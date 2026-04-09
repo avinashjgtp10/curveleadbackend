@@ -1,0 +1,25 @@
+-- ============================================
+-- Phase 6 Migration - Run in pgAdmin
+-- ============================================
+
+-- Add META_WEBHOOK_VERIFY_TOKEN to your .env file:
+-- META_WEBHOOK_VERIFY_TOKEN=curvelead_webhook_verify_2026
+-- META_PAGE_ACCESS_TOKEN=your_meta_page_access_token
+
+-- To create Super Admin user, run this in your terminal:
+-- cd backend && node -e "
+-- const bcrypt = require('bcryptjs');
+-- const { Pool } = require('pg');
+-- require('dotenv').config();
+-- const pool = new Pool({ host: process.env.DB_HOST, port: process.env.DB_PORT, database: process.env.DB_NAME, user: process.env.DB_USER, password: process.env.DB_PASSWORD });
+-- (async () => {
+--   const hash = await bcrypt.hash('Admin@123', 12);
+--   const tenantId = (await pool.query('SELECT id FROM tenants LIMIT 1')).rows[0]?.id;
+--   if (!tenantId) { console.log('No tenant found. Signup first.'); process.exit(); }
+--   const exists = await pool.query(\"SELECT id FROM users WHERE role = 'super_admin'\");
+--   if (exists.rows.length > 0) { console.log('Super admin already exists.'); process.exit(); }
+--   await pool.query('INSERT INTO users (tenant_id, name, email, phone, password_hash, role) VALUES ($1, $2, $3, $4, $5, $6)', [tenantId, 'Super Admin', 'admin@curvelead.in', '0000000000', hash, 'super_admin']);
+--   console.log('Super admin created! Email: admin@curvelead.in Password: Admin@123');
+--   process.exit();
+-- })();
+-- "
