@@ -2,7 +2,7 @@ name: Deploy CurveLead Backend
 
 on:
   push:
-    branches: [main]
+    branches: [master]
 
 jobs:
   deploy:
@@ -17,7 +17,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd /home/ubuntu/curveleadbackend
-            git pull origin main
+            git pull origin master
             npm install --production
             pm2 restart curvelead-api
             echo "✅ CurveLead Backend deployed successfully!"
