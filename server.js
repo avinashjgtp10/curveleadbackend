@@ -38,6 +38,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/api/auth', authLimiter, require('./routes/auth'));
 app.use('/api/leads', apiLimiter, require('./routes/leads'));
 app.use('/api/leads', apiLimiter, require('./routes/activities'));
+app.use('/api/lead-stages', apiLimiter, require('./routes/leadStages'));
 app.use('/api/courses', apiLimiter, require('./routes/courses'));
 app.use('/api/batches', apiLimiter, require('./routes/batches'));
 app.use('/api/students', apiLimiter, require('./routes/students'));
@@ -49,6 +50,7 @@ app.use('/api/salary', apiLimiter, require('./routes/salary'));
 app.use('/api/reports', apiLimiter, require('./routes/reports'));
 app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
 app.use('/api/settings', apiLimiter, require('./routes/settings'));
+app.use('/api/templates', apiLimiter, require('./routes/templates'));
 app.use('/api/webhook', require('./routes/webhook'));
 app.use('/api/dashboard', apiLimiter, require('./routes/dashboard'));
 
