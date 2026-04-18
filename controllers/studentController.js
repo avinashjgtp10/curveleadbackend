@@ -291,4 +291,21 @@ const enrollLead = async (req, res) => {
   }
 };
 
-module.exports = { getStudents, getStudent, createStudent, updateStudent, enrollLead };
+// DELETE /api/students/:id
+const deleteStudent = async (req, res) => {
+  try {
+    const student = await query('SELECT id FROM students WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (student.rows.length === 0) return res.status(404).json({ error: 'Student not found.' });
+
+    // Delete related records first
+    await query('DELETE FROM payments WHERE student_fee_id IN (SELECT id FROM student_fees WHERE student_id = $1 AND tenant_id = $2)', [req.params.id, req.tenantId]);
+    await query('DELETE FROM fee_installments WHERE student_fee_id IN (SELECT id FROM student_fees WHERE student_id = $1 AND tenant_id = $2)', [req.params.id, req.tenantId]);
+    await query('DELETE FROM student_fees WHERE student_id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    await query('DELETE FROM student_attendance WHERE student_id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    await query('DELETE FROM students WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+
+    res.json({ message: 'Student deleted.' });
+  } catch (error) { console.error('Delete student error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+module.exports = { getStudents, getStudent, createStudent, updateStudent, deleteStudent, enrollLead };
