@@ -191,4 +191,48 @@ const getReceiptData = async (req, res) => {
   } catch (error) { console.error('Get receipt error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getAllFees, getFeeDetails, recordPayment, updateInstallments, getMonthlyRevenue, getReminders, actionReminder, getReceiptData };
+// DELETE /api/fees/:id - Delete fee record (and its payments/installments)
+const deleteFee = async (req, res) => {
+  try {
+    const fee = await query('SELECT id FROM student_fees WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (fee.rows.length === 0) return res.status(404).json({ error: 'Fee not found.' });
+
+    await query('DELETE FROM payments WHERE student_fee_id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    await query('DELETE FROM fee_installments WHERE student_fee_id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    await query('DELETE FROM student_fees WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+
+    res.json({ message: 'Fee record deleted.' });
+  } catch (error) { console.error('Delete fee error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// DELETE /api/fees/payment/:id - Delete a single payment
+const deletePayment = async (req, res) => {
+  try {
+    const payment = await query('SELECT * FROM payments WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (payment.rows.length === 0) return res.status(404).json({ error: 'Payment not found.' });
+
+    const p = payment.rows[0];
+
+    // Reverse the payment amounts
+    await query(
+      `UPDATE student_fees SET amount_paid = amount_paid - $1, balance = balance + $1,
+       status = CASE WHEN amount_paid - $1 <= 0 THEN 'pending' ELSE 'partial' END
+       WHERE id = $2 AND tenant_id = $3`,
+      [p.amount, p.student_fee_id, req.tenantId]
+    );
+
+    // If payment was for an installment, mark it unpaid
+    if (p.installment_id) {
+      await query(
+        "UPDATE fee_installments SET status = 'pending', paid_amount = 0, paid_date = NULL WHERE id = $1",
+        [p.installment_id]
+      );
+    }
+
+    await query('DELETE FROM payments WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+
+    res.json({ message: 'Payment deleted and balance restored.' });
+  } catch (error) { console.error('Delete payment error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+module.exports = { getAllFees, getFeeDetails, recordPayment, updateInstallments, getMonthlyRevenue, getReminders, actionReminder, getReceiptData, deleteFee, deletePayment };
