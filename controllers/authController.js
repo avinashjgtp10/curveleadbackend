@@ -340,10 +340,15 @@ const forgotPassword = async (req, res) => {
       [user.id, token, expiresAt]
     );
 
-    // TODO: Send email with reset link
-    // For now, log the reset URL
+    // Send email with reset link
     const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password?token=${token}`;
     console.log(`\n🔑 Password Reset Link for ${user.email}:\n${resetUrl}\n`);
+
+    // Send email (works if EMAIL_USER is configured, otherwise logs only)
+    const { sendPasswordResetEmail } = require('../utils/email');
+    const tenantResult = await query('SELECT name FROM tenants WHERE id = (SELECT tenant_id FROM users WHERE id = $1)', [user.id]);
+    const academyName = tenantResult.rows[0]?.name || 'CurveLead';
+    await sendPasswordResetEmail(user.email, resetUrl, academyName);
 
     res.json({
       message: 'If an account with this email exists, a reset link has been sent.',

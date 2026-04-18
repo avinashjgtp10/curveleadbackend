@@ -1,4 +1,6 @@
 const { query } = require('../config/db');
+const { generateReceiptPDF } = require('../utils/pdfReceipt');
+const { sendReceiptEmail } = require('../utils/email');
 
 // GET /api/fees
 const getAllFees = async (req, res) => {
@@ -191,4 +193,99 @@ const getReceiptData = async (req, res) => {
   } catch (error) { console.error('Get receipt error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getAllFees, getFeeDetails, recordPayment, updateInstallments, getMonthlyRevenue, getReminders, actionReminder, getReceiptData };
+// DELETE /api/fees/:id - Delete fee record (and its payments/installments)
+const deleteFee = async (req, res) => {
+  try {
+    const fee = await query('SELECT id FROM student_fees WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (fee.rows.length === 0) return res.status(404).json({ error: 'Fee not found.' });
+
+    await query('DELETE FROM payments WHERE student_fee_id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    await query('DELETE FROM fee_installments WHERE student_fee_id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    await query('DELETE FROM student_fees WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+
+    res.json({ message: 'Fee record deleted.' });
+  } catch (error) { console.error('Delete fee error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// DELETE /api/fees/payment/:id - Delete a single payment
+const deletePayment = async (req, res) => {
+  try {
+    const payment = await query('SELECT * FROM payments WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (payment.rows.length === 0) return res.status(404).json({ error: 'Payment not found.' });
+
+    const p = payment.rows[0];
+
+    // Reverse the payment amounts
+    await query(
+      `UPDATE student_fees SET amount_paid = amount_paid - $1, balance = balance + $1,
+       status = CASE WHEN amount_paid - $1 <= 0 THEN 'pending' ELSE 'partial' END
+       WHERE id = $2 AND tenant_id = $3`,
+      [p.amount, p.student_fee_id, req.tenantId]
+    );
+
+    // If payment was for an installment, mark it unpaid
+    if (p.installment_id) {
+      await query(
+        "UPDATE fee_installments SET status = 'pending', paid_amount = 0, paid_date = NULL WHERE id = $1",
+        [p.installment_id]
+      );
+    }
+
+    await query('DELETE FROM payments WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+
+    res.json({ message: 'Payment deleted and balance restored.' });
+  } catch (error) { console.error('Delete payment error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// GET /api/fees/:id/receipt/:paymentId/pdf - Download PDF receipt
+const downloadReceiptPDF = async (req, res) => {
+  try {
+    const payment = await query(
+      `SELECT p.*, s.name as student_name, s.phone as student_phone, s.email as student_email,
+              c.name as course_name, sf.total_fee, sf.discount, sf.net_fee, sf.amount_paid, sf.balance,
+              t.name as academy_name, t.email as academy_email, t.phone as academy_phone, t.address as academy_address, t.logo_url,
+              u.name as received_by_name
+       FROM payments p JOIN students s ON p.student_id = s.id LEFT JOIN courses c ON s.course_id = c.id
+       JOIN student_fees sf ON p.student_fee_id = sf.id JOIN tenants t ON p.tenant_id = t.id LEFT JOIN users u ON p.received_by = u.id
+       WHERE p.id = $1 AND p.tenant_id = $2`, [req.params.paymentId, req.tenantId]
+    );
+    if (payment.rows.length === 0) return res.status(404).json({ error: 'Payment not found.' });
+
+    const pdfBuffer = await generateReceiptPDF(payment.rows[0]);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=Receipt_${payment.rows[0].receipt_number}.pdf`);
+    res.send(pdfBuffer);
+  } catch (error) { console.error('PDF receipt error:', error); res.status(500).json({ error: 'Failed to generate PDF.' }); }
+};
+
+// POST /api/fees/:id/receipt/:paymentId/email - Email receipt to student
+const emailReceipt = async (req, res) => {
+  try {
+    const payment = await query(
+      `SELECT p.*, s.name as student_name, s.phone as student_phone, s.email as student_email,
+              c.name as course_name, sf.total_fee, sf.discount, sf.net_fee, sf.amount_paid, sf.balance,
+              t.name as academy_name, t.email as academy_email, t.phone as academy_phone, t.address as academy_address,
+              u.name as received_by_name
+       FROM payments p JOIN students s ON p.student_id = s.id LEFT JOIN courses c ON s.course_id = c.id
+       JOIN student_fees sf ON p.student_fee_id = sf.id JOIN tenants t ON p.tenant_id = t.id LEFT JOIN users u ON p.received_by = u.id
+       WHERE p.id = $1 AND p.tenant_id = $2`, [req.params.paymentId, req.tenantId]
+    );
+    if (payment.rows.length === 0) return res.status(404).json({ error: 'Payment not found.' });
+
+    const d = payment.rows[0];
+    const emailTo = req.body.email || d.student_email;
+    if (!emailTo) return res.status(400).json({ error: 'No email address available for this student.' });
+
+    const pdfBuffer = await generateReceiptPDF(d);
+    const result = await sendReceiptEmail(emailTo, d.student_name, d, pdfBuffer, d.academy_name);
+
+    if (result.success) {
+      res.json({ message: `Receipt emailed to ${emailTo}`, dev: result.dev || false });
+    } else {
+      res.status(500).json({ error: result.error || 'Failed to send email.' });
+    }
+  } catch (error) { console.error('Email receipt error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+module.exports = { getAllFees, getFeeDetails, recordPayment, updateInstallments, getMonthlyRevenue, getReminders, actionReminder, getReceiptData, deleteFee, deletePayment, downloadReceiptPDF, emailReceipt };
