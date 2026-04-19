@@ -3,7 +3,7 @@ const { query } = require('../config/db');
 // GET /api/leads - List all leads with filters
 const getLeads = async (req, res) => {
   try {
-    const { stage, source, assigned_to, search, page = 1, limit = 20 } = req.query;
+    const { stage, source, assigned_to, search, date_from, date_to, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
     
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -26,6 +26,14 @@ const getLeads = async (req, res) => {
       whereClause += ` AND (l.name ILIKE $${paramIndex} OR l.phone ILIKE $${paramIndex})`;
       params.push(`%${search}%`);
       paramIndex++;
+    }
+    if (date_from) {
+      whereClause += ` AND l.created_at >= $${paramIndex++}`;
+      params.push(date_from);
+    }
+    if (date_to) {
+      whereClause += ` AND l.created_at <= $${paramIndex++}::date + INTERVAL '1 day'`;
+      params.push(date_to);
     }
 
     // Get total count
