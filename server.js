@@ -52,6 +52,8 @@ app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
 app.use('/api/settings', apiLimiter, require('./routes/settings'));
 app.use('/api/templates', apiLimiter, require('./routes/templates'));
 app.use('/api/webhook', require('./routes/webhook'));
+app.use('/api/billing', apiLimiter, require('./routes/billing'));
+app.use('/api/notifications', apiLimiter, require('./routes/notifications'));
 app.use('/api/dashboard', apiLimiter, require('./routes/dashboard'));
 
 // Health check

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getAllFees, getFeeDetails, recordPayment, updateInstallments, getMonthlyRevenue, getReminders, actionReminder, getReceiptData, deleteFee, deletePayment, downloadReceiptPDF, emailReceipt } = require('../controllers/feeController');
+const { getAllFees, getFeeDetails, recordPayment, updateInstallments, getMonthlyRevenue, getReminders, actionReminder, getReceiptData, updateFee, deleteFee, deletePayment, downloadReceiptPDF, emailReceipt } = require('../controllers/feeController');
 const { authenticate, adminOnly } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 
@@ -14,6 +14,7 @@ router.get('/', getAllFees);
 router.get('/:id', getFeeDetails);
 router.post('/:id/pay', recordPayment);
 router.put('/:id/installments', adminOnly, updateInstallments);
+router.put('/:id', adminOnly, updateFee);
 router.get('/:id/receipt/:paymentId', getReceiptData);
 router.get('/:id/receipt/:paymentId/pdf', downloadReceiptPDF);
 router.post('/:id/receipt/:paymentId/email', emailReceipt);
