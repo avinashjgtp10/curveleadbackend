@@ -193,6 +193,22 @@ const getReceiptData = async (req, res) => {
   } catch (error) { console.error('Get receipt error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// PUT /api/fees/:id - Update fee details (total_fee, discount, payment_type)
+const updateFee = async (req, res) => {
+  try {
+    const { total_fee, discount, net_fee, balance, status, payment_type } = req.body;
+    const result = await query(
+      `UPDATE student_fees SET total_fee = COALESCE($1, total_fee), discount = COALESCE($2, discount),
+       net_fee = COALESCE($3, net_fee), balance = COALESCE($4, balance), status = COALESCE($5, status),
+       payment_type = COALESCE($6, payment_type)
+       WHERE id = $7 AND tenant_id = $8 RETURNING *`,
+      [total_fee, discount, net_fee, balance, status, payment_type, req.params.id, req.tenantId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Fee not found.' });
+    res.json({ fee: result.rows[0] });
+  } catch (error) { console.error('Update fee error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
 // DELETE /api/fees/:id - Delete fee record (and its payments/installments)
 const deleteFee = async (req, res) => {
   try {
@@ -288,4 +304,4 @@ const emailReceipt = async (req, res) => {
   } catch (error) { console.error('Email receipt error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getAllFees, getFeeDetails, recordPayment, updateInstallments, getMonthlyRevenue, getReminders, actionReminder, getReceiptData, deleteFee, deletePayment, downloadReceiptPDF, emailReceipt };
+module.exports = { getAllFees, getFeeDetails, recordPayment, updateInstallments, getMonthlyRevenue, getReminders, actionReminder, getReceiptData, updateFee, deleteFee, deletePayment, downloadReceiptPDF, emailReceipt };
