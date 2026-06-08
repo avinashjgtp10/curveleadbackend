@@ -1,12 +1,11 @@
 const jwt = require('jsonwebtoken');
 const { query } = require('../config/db');
 
-// Verify JWT token and attach user + tenant to request
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Access denied. No token provided.' });
+      return res.status(401).json({ error: 'No token provided.' });
     }
 
     const token = authHeader.split(' ')[1];
@@ -15,9 +14,11 @@ const authenticate = async (req, res, next) => {
     // Fetch user with tenant info
     const result = await query(
       `SELECT u.id, u.name, u.email, u.role, u.tenant_id, u.is_active,
-              t.name as tenant_name, t.subscription_status, t.plan_id
+              t.name as tenant_name, t.business_type, t.subscription_status, t.trial_ends_at,
+              t.subscription_start, t.subscription_end, p.name as plan_name
        FROM users u
-       JOIN tenants t ON u.tenant_id = t.id
+       LEFT JOIN tenants t ON u.tenant_id = t.id
+       LEFT JOIN plans p ON t.plan_id = p.id
        WHERE u.id = $1`,
       [decoded.userId]
     );
@@ -29,28 +30,17 @@ const authenticate = async (req, res, next) => {
     const user = result.rows[0];
 
     if (!user.is_active) {
-      return res.status(403).json({ error: 'Account is deactivated.' });
+      return res.status(403).json({ error: 'Account is inactive.' });
     }
 
-    // Check tenant status
-    if (user.role !== 'super_admin' && !['active', 'trial'].includes(user.subscription_status)) {
-      return res.status(403).json({ 
-        error: 'Subscription inactive. Please renew your subscription.',
-        subscription_status: user.subscription_status
-      });
+    // Check subscription
+    const isSubscriptionBypassRoute = ['/api/auth', '/api/payments'].includes(req.baseUrl);
+    if (!isSubscriptionBypassRoute && user.subscription_status === 'trial' && user.trial_ends_at && new Date(user.trial_ends_at) < new Date()) {
+      return res.status(402).json({ error: 'Trial expired. Please upgrade your plan.' });
     }
 
-    req.user = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      tenantId: user.tenant_id,
-      tenantName: user.tenant_name,
-      subscriptionStatus: user.subscription_status,
-      planId: user.plan_id,
-    };
-
+    req.user = user;
+    req.tenantId = user.tenant_id;
     next();
   } catch (error) {
     if (error.name === 'TokenExpiredError') {
@@ -64,25 +54,6 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// Role-based access control
-const authorize = (...roles) => {
-  return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ error: 'You do not have permission to perform this action.' });
-    }
-    next();
-  };
-};
-
-// Super admin only
-const superAdminOnly = (req, res, next) => {
-  if (req.user.role !== 'super_admin') {
-    return res.status(403).json({ error: 'Super admin access required.' });
-  }
-  next();
-};
-
-// Admin only (academy admin)
 const adminOnly = (req, res, next) => {
   if (!['admin', 'super_admin'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Admin access required.' });
@@ -90,4 +61,11 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-module.exports = { authenticate, authorize, superAdminOnly, adminOnly };
+const superAdminOnly = (req, res, next) => {
+  if (req.user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Super admin access required.' });
+  }
+  next();
+};
+
+module.exports = { authenticate, adminOnly, superAdminOnly };

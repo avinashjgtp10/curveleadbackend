@@ -4,13 +4,11 @@ const { query } = require('../config/db');
 const getSettings = async (req, res) => {
   try {
     const result = await query(
-      `SELECT t.name, t.email, t.phone, t.address, t.city, t.state, t.academy_type, t.logo_url,
-              t.grace_period_minutes, t.financial_year_start, t.lead_auto_assign, t.lead_auto_assign_type,
-              t.default_assignee_id, t.auto_followup_minutes, t.meta_app_id,
-              t.subscription_status, t.trial_ends_at, p.name as plan_name, p.price as plan_price
-       FROM tenants t LEFT JOIN plans p ON t.plan_id = p.id WHERE t.id = $1`, [req.tenantId]
+      `SELECT id, name, email, phone, business_type, logo_url, address, settings,
+              subscription_status, trial_ends_at, subscription_start, subscription_end
+       FROM tenants WHERE id = $1`,
+      [req.tenantId]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found.' });
     res.json({ settings: result.rows[0] });
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
@@ -18,25 +16,83 @@ const getSettings = async (req, res) => {
 // PUT /api/settings
 const updateSettings = async (req, res) => {
   try {
-    const { name, email, phone, address, city, state, academy_type, grace_period_minutes,
-            lead_auto_assign, lead_auto_assign_type, default_assignee_id, auto_followup_minutes,
-            meta_app_id, meta_page_access_token } = req.body;
+    const { name, email, phone, business_type, logo_url, address, settings } = req.body;
+    const updates = [];
+    const params = [req.tenantId];
+    let i = 2;
+
+    const fields = { name, email, phone, business_type, logo_url, address };
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined) {
+        updates.push(`${key} = $${i++}`);
+        params.push(value);
+      }
+    }
+    if (settings !== undefined) {
+      updates.push(`settings = $${i++}::jsonb`);
+      params.push(JSON.stringify(settings));
+    }
+
+    if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
+    updates.push('updated_at = NOW()');
 
     const result = await query(
-      `UPDATE tenants SET
-        name = COALESCE($1, name), email = COALESCE($2, email), phone = COALESCE($3, phone),
-        address = COALESCE($4, address), city = COALESCE($5, city), state = COALESCE($6, state),
-        academy_type = COALESCE($7, academy_type), grace_period_minutes = COALESCE($8, grace_period_minutes),
-        lead_auto_assign = COALESCE($9, lead_auto_assign), lead_auto_assign_type = COALESCE($10, lead_auto_assign_type),
-        default_assignee_id = $11, auto_followup_minutes = COALESCE($12, auto_followup_minutes),
-        meta_app_id = COALESCE($13, meta_app_id), meta_page_access_token = COALESCE($14, meta_page_access_token)
-       WHERE id = $15 RETURNING *`,
-      [name, email, phone, address, city, state, academy_type, grace_period_minutes,
-       lead_auto_assign, lead_auto_assign_type, default_assignee_id || null, auto_followup_minutes,
-       meta_app_id, meta_page_access_token, req.tenantId]
+      `UPDATE tenants SET ${updates.join(', ')} WHERE id = $1 RETURNING *`,
+      params
     );
-    res.json({ settings: result.rows[0], message: 'Settings updated.' });
+    res.json({ settings: result.rows[0] });
   } catch (error) { console.error('Update settings error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getSettings, updateSettings };
+// GET /api/settings/stages - Pipeline stages
+const getStages = async (req, res) => {
+  try {
+    const result = await query(
+      'SELECT * FROM lead_stages WHERE tenant_id = $1 ORDER BY pos',
+      [req.tenantId]
+    );
+    res.json({ stages: result.rows });
+  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+};
+
+// POST /api/settings/stages
+const createStage = async (req, res) => {
+  try {
+    const { name, pos, color, is_won, is_lost } = req.body;
+    if (!name || pos === undefined) return res.status(400).json({ error: 'Name and pos required.' });
+
+    const result = await query(
+      `INSERT INTO lead_stages (tenant_id, name, pos, color, is_won, is_lost)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.tenantId, name, pos, color || 'gray', is_won || false, is_lost || false]
+    );
+    res.status(201).json({ stage: result.rows[0] });
+  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+};
+
+// PUT /api/settings/stages/:id
+const updateStage = async (req, res) => {
+  try {
+    const { name, pos, color, is_active } = req.body;
+    const result = await query(
+      `UPDATE lead_stages SET name = COALESCE($1, name), pos = COALESCE($2, pos),
+       color = COALESCE($3, color), is_active = COALESCE($4, is_active)
+       WHERE id = $5 AND tenant_id = $6 RETURNING *`,
+      [name, pos, color, is_active, req.params.id, req.tenantId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Stage not found.' });
+    res.json({ stage: result.rows[0] });
+  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+};
+
+// DELETE /api/settings/stages/:id
+const deleteStage = async (req, res) => {
+  try {
+    const result = await query('DELETE FROM lead_stages WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [req.params.id, req.tenantId]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Stage not found.' });
+    res.json({ message: 'Deleted.' });
+  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+};
+
+module.exports = { getSettings, updateSettings, getStages, createStage, updateStage, deleteStage };
