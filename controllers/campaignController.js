@@ -1,0 +1,191 @@
+const { query } = require('../config/db');
+
+// GET /api/campaigns - List all campaigns with metrics
+const getCampaigns = async (req, res) => {
+  try {
+    const { status, source, search, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    let where = 'WHERE c.tenant_id = $1';
+    const params = [req.tenantId];
+    let i = 2;
+
+    if (status) { where += ` AND c.status = $${i++}`; params.push(status); }
+    if (source) { where += ` AND c.source = $${i++}`; params.push(source); }
+    if (search) { where += ` AND c.name ILIKE $${i++}`; params.push(`%${search}%`); }
+
+    const result = await query(
+      `SELECT c.*,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND stage = 'won') as won_leads,
+              (SELECT COALESCE(SUM(deal_value), 0) FROM leads WHERE campaign_id = c.id AND stage = 'won') as revenue,
+              u.name as created_by_name
+       FROM campaigns c
+       LEFT JOIN users u ON c.created_by = u.id
+       ${where}
+       ORDER BY c.created_at DESC
+       LIMIT $${i++} OFFSET $${i}`,
+      [...params, limit, offset]
+    );
+
+    // Calculate CPL & ROI for each campaign
+    const campaigns = result.rows.map(c => {
+      const totalLeads = parseInt(c.total_leads) || 0;
+      const wonLeads = parseInt(c.won_leads) || 0;
+      const spend = parseFloat(c.actual_spend) || 0;
+      const revenue = parseFloat(c.revenue) || 0;
+      return {
+        ...c,
+        cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0,
+        cost_per_won: wonLeads > 0 ? (spend / wonLeads).toFixed(2) : 0,
+        conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
+        roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
+      };
+    });
+
+    res.json({ campaigns });
+  } catch (error) {
+    console.error('Get campaigns error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// GET /api/campaigns/:id - Campaign details with lead breakdown
+const getCampaign = async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT c.*, u.name as created_by_name FROM campaigns c
+       LEFT JOIN users u ON c.created_by = u.id
+       WHERE c.id = $1 AND c.tenant_id = $2`,
+      [req.params.id, req.tenantId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Campaign not found.' });
+
+    // Get leads in this campaign grouped by stage
+    const stageBreakdown = await query(
+      `SELECT stage, COUNT(*) as count, COALESCE(SUM(deal_value), 0) as total_value
+       FROM leads WHERE campaign_id = $1 AND tenant_id = $2 GROUP BY stage`,
+      [req.params.id, req.tenantId]
+    );
+
+    // Get recent leads
+    const recentLeads = await query(
+      `SELECT id, name, phone, email, stage, lead_score, created_at
+       FROM leads WHERE campaign_id = $1 AND tenant_id = $2 
+       ORDER BY created_at DESC LIMIT 20`,
+      [req.params.id, req.tenantId]
+    );
+
+    res.json({
+      campaign: result.rows[0],
+      stageBreakdown: stageBreakdown.rows,
+      recentLeads: recentLeads.rows,
+    });
+  } catch (error) {
+    console.error('Get campaign error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// POST /api/campaigns
+const createCampaign = async (req, res) => {
+  try {
+    const { name, source, description, budget, start_date, end_date, utm_source, utm_medium, utm_campaign } = req.body;
+    if (!name || !source) return res.status(400).json({ error: 'Name and source required.' });
+
+    const result = await query(
+      `INSERT INTO campaigns (tenant_id, name, source, description, budget, start_date, end_date,
+                              utm_source, utm_medium, utm_campaign, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
+      [req.tenantId, name, source, description, budget || 0, start_date, end_date,
+       utm_source, utm_medium, utm_campaign, req.user.id]
+    );
+
+    res.status(201).json({ campaign: result.rows[0] });
+  } catch (error) {
+    console.error('Create campaign error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// PUT /api/campaigns/:id
+const updateCampaign = async (req, res) => {
+  try {
+    const allowedFields = [
+      'name', 'source', 'description', 'budget', 'actual_spend',
+      'start_date', 'end_date', 'status', 'utm_source', 'utm_medium', 'utm_campaign',
+    ];
+
+    const updates = [];
+    const params = [req.params.id, req.tenantId];
+    let i = 3;
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updates.push(`${field} = $${i++}`);
+        params.push(req.body[field]);
+      }
+    }
+    if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
+
+    updates.push('updated_at = NOW()');
+
+    const result = await query(
+      `UPDATE campaigns SET ${updates.join(', ')} WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+      params
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Campaign not found.' });
+
+    res.json({ campaign: result.rows[0] });
+  } catch (error) {
+    console.error('Update campaign error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// DELETE /api/campaigns/:id
+const deleteCampaign = async (req, res) => {
+  try {
+    // First unlink leads (don't delete leads, just remove campaign reference)
+    await query('UPDATE leads SET campaign_id = NULL WHERE campaign_id = $1', [req.params.id]);
+    const result = await query('DELETE FROM campaigns WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [req.params.id, req.tenantId]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Campaign not found.' });
+    res.json({ message: 'Campaign deleted.' });
+  } catch (error) {
+    console.error('Delete campaign error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// GET /api/campaigns/stats/summary - Overall campaign performance
+const getCampaignStats = async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT 
+        COUNT(*) as total_campaigns,
+        COUNT(*) FILTER (WHERE status = 'active') as active_campaigns,
+        COALESCE(SUM(budget), 0) as total_budget,
+        COALESCE(SUM(actual_spend), 0) as total_spend
+       FROM campaigns WHERE tenant_id = $1`,
+      [req.tenantId]
+    );
+
+    const leadStats = await query(
+      `SELECT 
+        COUNT(*) as leads_from_campaigns,
+        COUNT(*) FILTER (WHERE stage = 'won') as won_from_campaigns,
+        COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as revenue_from_campaigns
+       FROM leads WHERE campaign_id IS NOT NULL AND tenant_id = $1`,
+      [req.tenantId]
+    );
+
+    res.json({ stats: { ...result.rows[0], ...leadStats.rows[0] } });
+  } catch (error) {
+    console.error('Campaign stats error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+module.exports = { getCampaigns, getCampaign, createCampaign, updateCampaign, deleteCampaign, getCampaignStats };
