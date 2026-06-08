@@ -1,85 +1,164 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const morgan = require('morgan');
+const multer = require('multer');
 const path = require('path');
-require('dotenv').config();
+const fs = require('fs');
 
 const app = express();
+const PORT = process.env.PORT || 3002;
 
+// ============================================
+// Create upload directories
+// ============================================
+['public/uploads/leads', 'public/uploads/brochures'].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
+// ============================================
 // Security middleware
-app.use(helmet());
+// ============================================
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+
+// CORS - parse from env
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5174,https://www.curvelead.com,https://curvelead.com')
+  .split(',').map(o => o.trim()).filter(Boolean);
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`CORS blocked: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
 }));
-
-// Rate limiting
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // max 20 requests per window
-  message: { error: 'Too many attempts. Please try again after 15 minutes.' },
-});
-
-const apiLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000, // 1 minute
-  max: 100,
-  message: { error: 'Too many requests. Please slow down.' },
-});
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Static files (uploads)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Logging
+if (process.env.NODE_ENV !== 'production') {
+  app.use(morgan('dev'));
+}
 
-// API Routes
-app.use('/api/auth', authLimiter, require('./routes/auth'));
-app.use('/api/leads', apiLimiter, require('./routes/leads'));
-app.use('/api/leads', apiLimiter, require('./routes/activities'));
-app.use('/api/lead-stages', apiLimiter, require('./routes/leadStages'));
-app.use('/api/courses', apiLimiter, require('./routes/courses'));
-app.use('/api/batches', apiLimiter, require('./routes/batches'));
-app.use('/api/students', apiLimiter, require('./routes/students'));
-app.use('/api/attendance', apiLimiter, require('./routes/attendance'));
-app.use('/api/fees', apiLimiter, require('./routes/fees'));
-app.use('/api/staff', apiLimiter, require('./routes/staff'));
-app.use('/api/expenses', apiLimiter, require('./routes/expenses'));
-app.use('/api/salary', apiLimiter, require('./routes/salary'));
-app.use('/api/reports', apiLimiter, require('./routes/reports'));
-app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
-app.use('/api/settings', apiLimiter, require('./routes/settings'));
-app.use('/api/templates', apiLimiter, require('./routes/templates'));
-app.use('/api/webhook', require('./routes/webhook'));
-app.use('/api/dashboard', apiLimiter, require('./routes/dashboard'));
+// Serve uploaded files
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 
-// Health check
+// ============================================
+// Multer config
+// ============================================
+
+// For lead attachments (per-lead folder)
+const leadStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = `public/uploads/leads/${req.params.leadId}`;
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext).replace(/[^a-z0-9]/gi, '_');
+    cb(null, `${name}_${Date.now()}${ext}`);
+  },
+});
+const uploadLeadFile = multer({
+  storage: leadStorage,
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+});
+
+// For brochures library
+const brochureStorage = multer.diskStorage({
+  destination: 'public/uploads/brochures',
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `brochure_${Date.now()}${ext}`);
+  },
+});
+const uploadBrochureFile = multer({
+  storage: brochureStorage,
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
+
+// ============================================
+// Rate limiting
+// ============================================
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 500,
+  message: { error: 'Too many requests, please try again later.' },
+});
+
+// ============================================
+// Health check (no rate limit)
+// ============================================
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', app: 'CurveLead API', version: '1.0.0' });
+  res.json({
+    status: 'ok',
+    app: 'CurveLead API',
+    version: '2.0.0',
+    timestamp: new Date().toISOString(),
+  });
 });
 
+// ============================================
+// API Routes
+// ============================================
+app.use('/api/auth', apiLimiter, require('./routes/auth'));
+app.use('/api/leads', apiLimiter, require('./routes/leads'));
+app.use('/api/followups', apiLimiter, require('./routes/followups'));
+app.use('/api/staff', apiLimiter, require('./routes/staff'));
+app.use('/api/campaigns', apiLimiter, require('./routes/campaigns'));
+app.use('/api/whatsapp', apiLimiter, require('./routes/whatsapp'));
+app.use('/api/ai', apiLimiter, require('./routes/ai'));
+app.use('/api/reports', apiLimiter, require('./routes/reports'));
+app.use('/api/settings', apiLimiter, require('./routes/settings'));
+app.use('/api/payments', apiLimiter, require('./routes/payments'));
+app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
+app.use('/api/webhook', require('./routes/webhook')); // No rate limit - external service
+
+// ⭐ NEW FEATURES
+app.use('/api/notes', apiLimiter, require('./routes/notes'));
+app.use('/api/attachments', apiLimiter, require('./routes/attachments')(uploadLeadFile));
+app.use('/api/brochures', apiLimiter, require('./routes/brochures')(uploadBrochureFile));
+app.use('/api/quotations', apiLimiter, require('./routes/quotations'));
+
+// ============================================
 // 404 handler
+// ============================================
 app.use((req, res) => {
-  res.status(404).json({ error: 'Route not found.' });
+  res.status(404).json({ error: 'Route not found', path: req.path });
 });
 
-// Error handler
-app.use((err, req, res, next) => {
-  console.error('Server error:', err);
-  res.status(500).json({ error: 'Internal server error.' });
-});
+// Global error handler
+app.use(require('./middleware/errorHandler'));
 
+// ============================================
 // Start server
-const PORT = process.env.PORT || 3000;
+// ============================================
 app.listen(PORT, () => {
   console.log(`
-  ╔═══════════════════════════════════════╗
-  ║   CurveLead API Server               ║
-  ║   Running on port ${PORT}               ║
-  ║   Environment: ${process.env.NODE_ENV || 'development'}       ║
-  ╚═══════════════════════════════════════╝
+  ╔═══════════════════════════════════════════╗
+  ║   🚀 CurveLead API V2                    ║
+  ║   Running on port ${PORT}                    ║
+  ║   Environment: ${process.env.NODE_ENV || 'development'}             ║
+  ║   Features: Notes, Files, Brochures,      ║
+  ║             Quotations + AI + WhatsApp    ║
+  ╚═══════════════════════════════════════════╝
   `);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  process.exit(0);
 });
 
 module.exports = app;
