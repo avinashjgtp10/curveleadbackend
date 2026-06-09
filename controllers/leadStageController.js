@@ -37,11 +37,14 @@ const updateStage = async (req, res) => {
     const { name, color, position } = req.body;
     const result = await query(
       'UPDATE lead_stages SET name=COALESCE($1,name), color=COALESCE($2,color), position=COALESCE($3,position) WHERE id=$4 AND tenant_id=$5 RETURNING *',
-      [name, color, position, req.params.id, req.tenantId]
+      [name ?? null, color ?? null, position ?? null, req.params.id, req.tenantId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Stage not found.' });
     res.json({ stage: result.rows[0] });
-  } catch (error) { res.status(500).json({ error: 'Failed to update stage.' }); }
+  } catch (error) {
+    console.error('updateStage error:', error.message);
+    res.status(500).json({ error: 'Failed to update stage.' });
+  }
 };
 
 // DELETE /api/lead-stages/:id (soft delete, can't delete defaults)

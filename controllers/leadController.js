@@ -100,9 +100,20 @@ const getLead = async (req, res) => {
       [req.params.id]
     );
 
+    // Get activity timeline
+    const activities = await query(
+      `SELECT a.*, u.name as created_by_name
+       FROM lead_activities a
+       LEFT JOIN users u ON a.created_by = u.id
+       WHERE a.lead_id = $1 AND a.tenant_id = $2
+       ORDER BY a.created_at DESC`,
+      [req.params.id, req.tenantId]
+    );
+
     res.json({
       lead: result.rows[0],
       followups: followups.rows,
+      activities: activities.rows,
     });
   } catch (error) {
     console.error('Get lead error:', error);
@@ -113,7 +124,7 @@ const getLead = async (req, res) => {
 // POST /api/leads - Create new lead
 const createLead = async (req, res) => {
   try {
-    const { name, phone, email, location, source, source_detail, notes } = req.body;
+    const { name, phone, email, location, source, source_detail, notes, lead_date } = req.body;
     const course_interest_id = req.body.course_interest_id || null;
     const assigned_to = req.body.assigned_to || null;
 
@@ -127,17 +138,17 @@ const createLead = async (req, res) => {
       [phone, req.tenantId]
     );
     if (duplicate.rows.length > 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: `A lead with this phone number already exists: ${duplicate.rows[0].name}`,
         existingLeadId: duplicate.rows[0].id
       });
     }
 
     const result = await query(
-      `INSERT INTO leads (tenant_id, name, phone, email, location, source, source_detail, course_interest_id, assigned_to, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO leads (tenant_id, name, phone, email, location, source, source_detail, course_interest_id, assigned_to, notes, lead_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
-      [req.tenantId, name, phone, email, location, source, source_detail, course_interest_id, assigned_to, notes]
+      [req.tenantId, name, phone, email, location, source, source_detail, course_interest_id, assigned_to, notes, lead_date || new Date()]
     );
 
     // Create notification for assigned staff
