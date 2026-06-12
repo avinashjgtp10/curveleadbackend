@@ -3,24 +3,29 @@ const { query } = require('../config/db');
 // GET /api/followups - Get all followups
 const getFollowups = async (req, res) => {
   try {
-    const { completed, lead_id, assigned_to, today, overdue } = req.query;
+    const { status, lead_id } = req.query;
     let where = 'WHERE f.tenant_id = $1';
     const params = [req.tenantId];
     let i = 2;
 
-    if (completed !== undefined) { where += ` AND f.completed = $${i++}`; params.push(completed === 'true'); }
+    if (status === 'completed') {
+      where += ' AND f.is_completed = true';
+    } else if (status === 'overdue') {
+      where += ' AND f.is_completed = false AND f.next_followup_at < NOW()';
+    } else {
+      // pending: not completed and not overdue (upcoming)
+      where += ' AND f.is_completed = false';
+    }
+
     if (lead_id) { where += ` AND f.lead_id = $${i++}`; params.push(lead_id); }
-    if (assigned_to) { where += ` AND f.assigned_to = $${i++}`; params.push(assigned_to); }
-    if (today === 'true') where += ` AND DATE(f.scheduled_at) = CURRENT_DATE AND f.completed = false`;
-    if (overdue === 'true') where += ` AND f.scheduled_at < NOW() AND f.completed = false`;
 
     const result = await query(
       `SELECT f.*, l.name as lead_name, l.phone as lead_phone, l.stage as lead_stage,
-              u.name as assigned_to_name
-       FROM followups f
+              lu.name as assigned_to_name
+       FROM lead_followups f
        JOIN leads l ON f.lead_id = l.id
-       LEFT JOIN users u ON f.assigned_to = u.id
-       ${where} ORDER BY f.scheduled_at ASC`,
+       LEFT JOIN users lu ON l.assigned_to = lu.id
+       ${where} ORDER BY f.next_followup_at ASC`,
       params
     );
 
@@ -49,13 +54,12 @@ const completeFollowup = async (req, res) => {
   try {
     const { outcome } = req.body;
     const result = await query(
-      `UPDATE followups SET completed = true, completed_at = NOW(), outcome = $1
+      `UPDATE lead_followups SET is_completed = true, outcome = $1
        WHERE id = $2 AND tenant_id = $3 RETURNING *`,
       [outcome, req.params.id, req.tenantId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Followup not found.' });
 
-    // Update lead's last_contacted
     await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [result.rows[0].lead_id]);
     res.json({ followup: result.rows[0] });
   } catch (error) { console.error('Complete followup error:', error); res.status(500).json({ error: 'Failed.' }); }
@@ -64,7 +68,7 @@ const completeFollowup = async (req, res) => {
 // DELETE /api/followups/:id
 const deleteFollowup = async (req, res) => {
   try {
-    const result = await query('DELETE FROM followups WHERE id = $1 AND tenant_id = $2 RETURNING id',
+    const result = await query('DELETE FROM lead_followups WHERE id = $1 AND tenant_id = $2 RETURNING id',
       [req.params.id, req.tenantId]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Followup not found.' });
     res.json({ message: 'Deleted.' });
