@@ -72,10 +72,6 @@ const getLead = async (req, res) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Lead not found.' });
-    }
-
     // Get follow-ups
     const followups = await query(
       `SELECT f.*, u.name as created_by_name
@@ -155,7 +151,7 @@ const updateLead = async (req, res) => {
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'source', 'source_detail', 'campaign_id',
       'stage', 'assigned_to', 'notes', 'deal_value', 'expected_close_date', 'tags',
-      'lead_score', 'score_reason', 'lost_reason',
+      'lead_score', 'score_reason', 'won_lost_reason',
     ];
 
     const updates = [];

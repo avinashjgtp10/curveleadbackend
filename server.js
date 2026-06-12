@@ -88,7 +88,7 @@ app.use('/api/payments', apiLimiter, require('./routes/payments'));
 app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
 app.use('/api/webhook', require('./routes/webhook')); // No rate limit - external service
 
-// ⭐ NEW FEATURES
+app.use('/api/lead-stages', apiLimiter, require('./routes/leadStages'));
 app.use('/api/notes', apiLimiter, require('./routes/notes'));
 app.use('/api/attachments', apiLimiter, require('./routes/attachments'));
 app.use('/api/brochures', apiLimiter, require('./routes/brochures'));
