@@ -567,7 +567,7 @@ const bulkUpdate = async (req, res) => {
     params.push(ids);
 
     const result = await query(
-      `UPDATE leads SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = ANY($${i}::int[]) RETURNING id`,
+      `UPDATE leads SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = ANY($${i}::uuid[]) RETURNING id`,
       params
     );
 
@@ -595,7 +595,7 @@ const bulkDelete = async (req, res) => {
     if (!ids?.length) return res.status(400).json({ error: 'No lead IDs provided.' });
 
     const result = await query(
-      'DELETE FROM leads WHERE tenant_id = $1 AND id = ANY($2::int[]) RETURNING id',
+      'DELETE FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[]) RETURNING id',
       [req.tenantId, ids]
     );
 
