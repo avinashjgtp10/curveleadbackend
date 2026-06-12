@@ -49,8 +49,31 @@ if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('dev'));
 }
 
-// Serve uploaded files
-app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+// API Routes
+app.use('/api/auth', authLimiter, require('./routes/auth'));
+app.use('/api/leads', apiLimiter, require('./routes/leads'));
+app.use('/api/leads', apiLimiter, require('./routes/activities'));
+app.use('/api/lead-stages', apiLimiter, require('./routes/leadStages'));
+app.use('/api/courses', apiLimiter, require('./routes/courses'));
+app.use('/api/batches', apiLimiter, require('./routes/batches'));
+app.use('/api/students', apiLimiter, require('./routes/students'));
+app.use('/api/attendance', apiLimiter, require('./routes/attendance'));
+app.use('/api/fees', apiLimiter, require('./routes/fees'));
+app.use('/api/staff', apiLimiter, require('./routes/staff'));
+app.use('/api/expenses', apiLimiter, require('./routes/expenses'));
+app.use('/api/salary', apiLimiter, require('./routes/salary'));
+app.use('/api/reports', apiLimiter, require('./routes/reports'));
+app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
+app.use('/api/settings', apiLimiter, require('./routes/settings'));
+app.use('/api/templates', apiLimiter, require('./routes/templates'));
+app.use('/api/quotations', apiLimiter, require('./routes/quotations'));
+app.use('/api/brochures', apiLimiter, require('./routes/brochures'));
+app.use('/api/notes', apiLimiter, require('./routes/notes'));
+app.use('/api/attachments', apiLimiter, require('./routes/attachments'));
+app.use('/api/webhook', require('./routes/webhook'));
+app.use('/api/billing', apiLimiter, require('./routes/billing'));
+app.use('/api/notifications', apiLimiter, require('./routes/notifications'));
+app.use('/api/dashboard', apiLimiter, require('./routes/dashboard'));
 
 // ============================================
 // Multer config

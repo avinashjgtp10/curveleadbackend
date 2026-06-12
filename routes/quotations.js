@@ -1,18 +1,21 @@
 const express = require('express');
 const router = express.Router();
+const ctrl = require('../controllers/quotationController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
-const ctrl = require('../controllers/quotationsController');
+
+// Public — no auth required (lead-facing view link)
+router.get('/public/:id', ctrl.getPublic);
 
 router.use(authenticate, tenantContext);
 
-router.get('/', ctrl.getQuotations);
-router.get('/:id', ctrl.getQuotation);
-router.post('/', ctrl.createQuotation);
-router.put('/:id', ctrl.updateQuotation);
-router.post('/:id/send', ctrl.sendQuotation);
-router.post('/:id/accept', ctrl.acceptQuotation);
-router.post('/:id/reject', ctrl.rejectQuotation);
-router.delete('/:id', ctrl.deleteQuotation);
+router.get('/', ctrl.getAll);
+router.get('/:id', ctrl.getOne);
+router.post('/', ctrl.create);
+router.put('/:id', ctrl.update);
+router.post('/:id/send', ctrl.send);
+router.post('/:id/accept', ctrl.accept);
+router.post('/:id/reject', ctrl.reject);
+router.delete('/:id', ctrl.delete);
 
 module.exports = router;

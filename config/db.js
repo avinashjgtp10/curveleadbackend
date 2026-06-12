@@ -10,15 +10,8 @@ const pool = new Pool({
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-  // Auto-enable SSL for AWS RDS
-  ssl: process.env.DB_HOST && process.env.DB_HOST.includes('rds.amazonaws.com')
-    ? { rejectUnauthorized: false }
-    : false,
-});
-
-pool.on('connect', () => {
-  if (process.env.NODE_ENV !== 'production') {
-    console.log('✅ DB connection established');
+   ssl: {
+    rejectUnauthorized: false
   }
 });
 
