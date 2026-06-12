@@ -17,7 +17,10 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd /home/ubuntu/curveleadbackend
-            git pull origin master
+            git fetch origin master
+            git checkout -- . 2>/dev/null || true
+            git reset --hard origin/master
+            cp /home/ubuntu/curveleadbackend/.env.backup /home/ubuntu/curveleadbackend/.env 2>/dev/null || true
             npm install --production
-            pm2 restart curvelead-api
+            pm2 restart curvelead-api --update-env
             echo "✅ CurveLead Backend deployed successfully!"
