@@ -63,35 +63,34 @@ const getLeads = async (req, res) => {
 // GET /api/leads/:id
 const getLead = async (req, res) => {
   try {
-    const result = await query(
-      `SELECT l.*, u.name as assigned_to_name, c.name as campaign_name
-       FROM leads l
-       LEFT JOIN users u ON l.assigned_to = u.id
-       LEFT JOIN campaigns c ON l.campaign_id = c.id
-       WHERE l.id = $1 AND l.tenant_id = $2`,
-      [req.params.id, req.tenantId]
-    );
+    const [result, followups, activities] = await Promise.all([
+      query(
+        `SELECT l.*, u.name as assigned_to_name, c.name as campaign_name
+         FROM leads l
+         LEFT JOIN users u ON l.assigned_to = u.id
+         LEFT JOIN campaigns c ON l.campaign_id = c.id
+         WHERE l.id = $1 AND l.tenant_id = $2`,
+        [req.params.id, req.tenantId]
+      ),
+      query(
+        `SELECT f.*, u.name as created_by_name
+         FROM lead_followups f
+         LEFT JOIN users u ON f.created_by = u.id
+         WHERE f.lead_id = $1
+         ORDER BY f.created_at DESC LIMIT 1`,
+        [req.params.id]
+      ),
+      query(
+        `SELECT a.*, u.name as created_by_name
+         FROM lead_activities a
+         LEFT JOIN users u ON a.created_by = u.id
+         WHERE a.lead_id = $1 AND a.tenant_id = $2
+         ORDER BY a.created_at DESC`,
+        [req.params.id, req.tenantId]
+      ),
+    ]);
+
     if (result.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
-
-    // Get follow-ups
-    const followups = await query(
-      `SELECT f.*, u.name as created_by_name
-       FROM lead_followups f
-       LEFT JOIN users u ON f.created_by = u.id
-       WHERE f.lead_id = $1
-       ORDER BY f.created_at DESC`,
-      [req.params.id]
-    );
-
-    // Get activity timeline
-    const activities = await query(
-      `SELECT a.*, u.name as created_by_name
-       FROM lead_activities a
-       LEFT JOIN users u ON a.created_by = u.id
-       WHERE a.lead_id = $1 AND a.tenant_id = $2
-       ORDER BY a.created_at DESC`,
-      [req.params.id, req.tenantId]
-    );
 
     res.json({
       lead: result.rows[0],
