@@ -563,4 +563,4 @@ const getStages = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages };
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups };
