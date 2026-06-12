@@ -10,7 +10,7 @@ const getLeads = async (req, res) => {
     const params = [req.tenantId];
     let i = 2;
 
-    if (stage) { whereClause += ` AND l.stage = $${i++}`; params.push(stage); }
+    if (stage) { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`; params.push(stage); }
     if (source) { whereClause += ` AND l.source = $${i++}`; params.push(source); }
     if (score) { whereClause += ` AND l.lead_score = $${i++}`; params.push(score); }
     if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
