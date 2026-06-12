@@ -55,19 +55,23 @@ const signup = async (req, res) => {
 
       // Create default lead stages
       const defaultStages = [
-        { name: 'New', pos: 1, color: 'blue' },
-        { name: 'Contacted', pos: 2, color: 'yellow' },
-        { name: 'Qualified', pos: 3, color: 'purple' },
-        { name: 'Proposal', pos: 4, color: 'orange' },
-        { name: 'Won', pos: 5, color: 'green', is_won: true },
-        { name: 'Lost', pos: 6, color: 'red', is_lost: true },
+        { name: 'New Lead',             pos: 1,  color: 'blue',   is_won: false, is_lost: false },
+        { name: 'Contacted',            pos: 2,  color: 'yellow', is_won: false, is_lost: false },
+        { name: 'Qualified',            pos: 3,  color: 'purple', is_won: false, is_lost: false },
+        { name: 'Interested',           pos: 4,  color: 'green',  is_won: false, is_lost: false },
+        { name: 'Demo/Visit Scheduled', pos: 5,  color: 'cyan',   is_won: false, is_lost: false },
+        { name: 'Proposal Shared',      pos: 6,  color: 'orange', is_won: false, is_lost: false },
+        { name: 'Negotiation',          pos: 7,  color: 'amber',  is_won: false, is_lost: false },
+        { name: 'Converted',            pos: 8,  color: 'green',  is_won: true,  is_lost: false },
+        { name: 'Lost',                 pos: 9,  color: 'red',    is_won: false, is_lost: true  },
+        { name: 'Follow-up Later',      pos: 10, color: 'gray',   is_won: false, is_lost: false },
       ];
 
       for (const stage of defaultStages) {
         await client.query(
-          `INSERT INTO lead_stages (tenant_id, name, pos, color, is_won, is_lost)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [tenant.id, stage.name, stage.pos, stage.color, stage.is_won || false, stage.is_lost || false]
+          `INSERT INTO lead_stages (tenant_id, name, pos, position, color, is_won, is_lost, is_active)
+           VALUES ($1, $2, $3, $3, $4, $5, $6, true)`,
+          [tenant.id, stage.name, stage.pos, stage.color, stage.is_won, stage.is_lost]
         );
       }
 
