@@ -1,6 +1,5 @@
 const { query } = require('../config/db');
-const path = require('path');
-const fs = require('fs');
+const { uploadToS3, deleteFromS3 } = require('../config/s3');
 
 const getFileType = (mime) => {
   if (mime?.startsWith('image/')) return 'image';
@@ -30,10 +29,9 @@ const upload = async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
     const { description = '' } = req.body;
 
-    const proto = req.headers['x-forwarded-proto'] || req.protocol;
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const baseUrl = process.env.BACKEND_URL || `${proto}://${host}`;
-    const fileUrl = `${baseUrl}/uploads/attachments/${req.file.filename}`;
+    const safe = req.file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    const key = `attachments/${req.tenantId}/${req.params.leadId}/${Date.now()}-${safe}`;
+    const fileUrl = await uploadToS3(req.file.buffer, key, req.file.mimetype);
 
     const result = await query(
       `INSERT INTO lead_attachments (tenant_id, lead_id, file_name, file_url, file_size, file_type, mime_type, description, uploaded_by)
@@ -43,18 +41,17 @@ const upload = async (req, res) => {
        description, req.user.id]
     );
     res.status(201).json({ attachment: result.rows[0] });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) { console.error('Attachment upload error:', e); res.status(500).json({ error: 'Failed to upload file.' }); }
 };
 
 const remove = async (req, res) => {
   try {
     const result = await query(
-      'DELETE FROM lead_attachments WHERE id=$1 AND lead_id=$2 AND tenant_id=$3 RETURNING file_name',
+      'DELETE FROM lead_attachments WHERE id=$1 AND lead_id=$2 AND tenant_id=$3 RETURNING file_url',
       [req.params.attachmentId, req.params.leadId, req.tenantId]
     );
-    if (result.rows.length && result.rows[0].file_name) {
-      const filePath = path.join(__dirname, '../uploads/attachments', result.rows[0].file_name);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    if (result.rows.length) {
+      await deleteFromS3(result.rows[0].file_url).catch(() => {});
     }
     res.json({ message: 'Deleted.' });
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }

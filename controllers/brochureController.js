@@ -1,6 +1,5 @@
 const { query } = require('../config/db');
-const path = require('path');
-const fs = require('fs');
+const { uploadToS3, deleteFromS3 } = require('../config/s3');
 
 const getAll = async (req, res) => {
   try {
@@ -20,15 +19,14 @@ const upload = async (req, res) => {
     const { name, category = 'general' } = req.body;
     if (!name) return res.status(400).json({ error: 'Name is required.' });
 
-    const proto = req.headers['x-forwarded-proto'] || req.protocol;
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const baseUrl = process.env.BACKEND_URL || `${proto}://${host}`;
-    const fileUrl = `${baseUrl}/uploads/brochures/${req.file.filename}`;
+    const ext = req.file.originalname.split('.').pop();
+    const key = `brochures/${req.tenantId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+    const fileUrl = await uploadToS3(req.file.buffer, key, req.file.mimetype);
 
     const result = await query(
       `INSERT INTO brochures (tenant_id, name, category, file_url, file_name, file_size, mime_type, uploaded_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [req.tenantId, name, category, fileUrl, req.file.filename, req.file.size, req.file.mimetype, req.user.id]
+      [req.tenantId, name, category, fileUrl, req.file.originalname, req.file.size, req.file.mimetype, req.user.id]
     );
     res.status(201).json({ brochure: result.rows[0] });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
@@ -36,10 +34,9 @@ const upload = async (req, res) => {
 
 const remove = async (req, res) => {
   try {
-    const result = await query('DELETE FROM brochures WHERE id=$1 AND tenant_id=$2 RETURNING file_name', [req.params.id, req.tenantId]);
-    if (result.rows.length && result.rows[0].file_name) {
-      const filePath = path.join(__dirname, '../uploads/brochures', result.rows[0].file_name);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    const result = await query('DELETE FROM brochures WHERE id=$1 AND tenant_id=$2 RETURNING file_url', [req.params.id, req.tenantId]);
+    if (result.rows.length) {
+      await deleteFromS3(result.rows[0].file_url).catch(() => {});
     }
     res.json({ message: 'Deleted.' });
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
