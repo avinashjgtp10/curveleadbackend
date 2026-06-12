@@ -3,9 +3,9 @@ const { query } = require('../config/db');
 // GET /api/leads - List all leads with filters
 const getLeads = async (req, res) => {
   try {
-    const { stage, source, assigned_to, search, date_from, date_to, page = 1, limit = 20 } = req.query;
+    const { stage, source, score, assigned_to, search, date_from, date_to, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
-    
+
     let whereClause = 'WHERE l.tenant_id = $1';
     const params = [req.tenantId];
     let paramIndex = 2;
@@ -18,6 +18,10 @@ const getLeads = async (req, res) => {
       whereClause += ` AND l.source = $${paramIndex++}`;
       params.push(source);
     }
+    if (score) {
+      whereClause += ` AND l.lead_score = $${paramIndex++}`;
+      params.push(score);
+    }
     if (assigned_to) {
       whereClause += ` AND l.assigned_to = $${paramIndex++}`;
       params.push(assigned_to);
@@ -28,11 +32,11 @@ const getLeads = async (req, res) => {
       paramIndex++;
     }
     if (date_from) {
-      whereClause += ` AND l.created_at >= $${paramIndex++}`;
+      whereClause += ` AND COALESCE(l.lead_date, l.created_at) >= $${paramIndex++}`;
       params.push(date_from);
     }
     if (date_to) {
-      whereClause += ` AND l.created_at <= $${paramIndex++}::date + INTERVAL '1 day'`;
+      whereClause += ` AND COALESCE(l.lead_date, l.created_at) < $${paramIndex++}::date + INTERVAL '1 day'`;
       params.push(date_to);
     }
 
@@ -416,19 +420,46 @@ const getLeadStats = async (req, res) => {
   }
 };
 
-// GET /api/leads/followups/today - Today's follow-ups
+// GET /api/leads/followups/today - Follow-ups with optional filters
 const getTodayFollowups = async (req, res) => {
   try {
+    const { search, type, date_from, date_to } = req.query;
+
+    let where = 'WHERE f.tenant_id = $1 AND f.is_completed = false';
+    const params = [req.tenantId];
+    let idx = 2;
+
+    // If no date range provided, default to today + overdue
+    if (!date_from && !date_to) {
+      where += ` AND DATE(f.next_followup_at) <= CURRENT_DATE`;
+    }
+    if (date_from) {
+      where += ` AND DATE(f.next_followup_at) >= $${idx++}`;
+      params.push(date_from);
+    }
+    if (date_to) {
+      where += ` AND DATE(f.next_followup_at) <= $${idx++}`;
+      params.push(date_to);
+    }
+    if (type) {
+      where += ` AND f.followup_type = $${idx++}`;
+      params.push(type);
+    }
+    if (search) {
+      where += ` AND (l.name ILIKE $${idx} OR l.phone ILIKE $${idx})`;
+      params.push(`%${search}%`);
+      idx++;
+    }
+
     const result = await query(
       `SELECT f.*, l.name as lead_name, l.phone as lead_phone, l.stage as lead_stage,
               u.name as assigned_to_name
        FROM lead_followups f
        JOIN leads l ON f.lead_id = l.id
        LEFT JOIN users u ON l.assigned_to = u.id
-       WHERE f.tenant_id = $1 AND f.is_completed = false
-       AND DATE(f.next_followup_at) <= CURRENT_DATE
+       ${where}
        ORDER BY f.next_followup_at ASC`,
-      [req.tenantId]
+      params
     );
 
     res.json({ followups: result.rows });

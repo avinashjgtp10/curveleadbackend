@@ -20,7 +20,9 @@ const upload = async (req, res) => {
     const { name, category = 'general' } = req.body;
     if (!name) return res.status(400).json({ error: 'Name is required.' });
 
-    const baseUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const proto = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const baseUrl = process.env.BACKEND_URL || `${proto}://${host}`;
     const fileUrl = `${baseUrl}/uploads/brochures/${req.file.filename}`;
 
     const result = await query(

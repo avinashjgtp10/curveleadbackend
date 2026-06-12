@@ -33,7 +33,6 @@ app.use(express.urlencoded({ extended: true }));
 
 // Static files (uploads)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use('/uploads/brochures', express.static(path.join(__dirname, 'uploads/brochures')));
 
 // API Routes
 app.use('/api/auth', authLimiter, require('./routes/auth'));
@@ -54,6 +53,8 @@ app.use('/api/settings', apiLimiter, require('./routes/settings'));
 app.use('/api/templates', apiLimiter, require('./routes/templates'));
 app.use('/api/quotations', apiLimiter, require('./routes/quotations'));
 app.use('/api/brochures', apiLimiter, require('./routes/brochures'));
+app.use('/api/notes', apiLimiter, require('./routes/notes'));
+app.use('/api/attachments', apiLimiter, require('./routes/attachments'));
 app.use('/api/webhook', require('./routes/webhook'));
 app.use('/api/billing', apiLimiter, require('./routes/billing'));
 app.use('/api/notifications', apiLimiter, require('./routes/notifications'));

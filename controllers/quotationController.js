@@ -13,6 +13,15 @@ const getAll = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// Public endpoint — no auth required, used for lead-facing view link
+const getPublic = async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM quotations WHERE id = $1', [req.params.id]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Not found.' });
+    res.json({ quotation: result.rows[0] });
+  } catch (e) { res.status(500).json({ error: 'Failed.' }); }
+};
+
 const getOne = async (req, res) => {
   try {
     const result = await query('SELECT * FROM quotations WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
@@ -132,15 +141,22 @@ const send = async (req, res) => {
       `Thank you for choosing ${q.business_name}!`,
     ].filter(l => l !== null).join('\n');
 
+    const frontendUrl = process.env.FRONTEND_URL || 'https://curvelead.com';
+    const viewUrl = `${frontendUrl}/q/${q.id}`;
+
+    const msgWithLink = msg + `\n\n📄 *View your quotation:*\n${viewUrl}`;
+
     const phone = (q.lead_phone || '').replace(/\D/g, '').slice(-10);
-    const whatsapp_url = phone ? `https://wa.me/91${phone}?text=${encodeURIComponent(msg)}` : null;
+    const whatsapp_url = phone
+      ? `https://wa.me/91${phone}?text=${encodeURIComponent(msgWithLink)}`
+      : `https://wa.me/?text=${encodeURIComponent(msgWithLink)}`;
 
     await query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
        VALUES ($1,$2,'quotation','Quotation Sent via WhatsApp',$3,$4)`,
       [req.tenantId, q.lead_id, `Quotation ${q.quote_number} (₹${parseFloat(q.total).toLocaleString('en-IN')}) sent to ${q.lead_name}`, req.user.id]
     );
-    res.json({ quotation: q, whatsapp_url, message: msg });
+    res.json({ quotation: q, whatsapp_url, message: msgWithLink });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
@@ -192,4 +208,4 @@ const remove = async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getAll, getOne, create, update, send, accept, reject, delete: remove };
+module.exports = { getAll, getPublic, getOne, create, update, send, accept, reject, delete: remove };
