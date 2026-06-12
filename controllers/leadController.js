@@ -210,6 +210,53 @@ const deleteLead = async (req, res) => {
 };
 
 // POST /api/leads/:id/note - Add note/activity
+const addFollowup = async (req, res) => {
+  try {
+    const { notes, followup_type, outcome, next_followup_at, whatsapp_log } = req.body;
+
+    if (!next_followup_at) {
+      return res.status(400).json({ error: 'Follow-up date and time are required.' });
+    }
+
+    const leadCheck = await query(
+      'SELECT id, name, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2',
+      [req.params.id, req.tenantId]
+    );
+    if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
+    const lead = leadCheck.rows[0];
+
+    await query(
+      `UPDATE lead_followups SET is_completed = true WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
+      [req.params.id, req.tenantId]
+    );
+
+    const result = await query(
+      `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.tenantId, req.params.id, notes || null, followup_type || 'call', next_followup_at, req.user.id]
+    );
+
+    if (lead.assigned_to) {
+      await query(
+        `INSERT INTO notifications (tenant_id, user_id, title, message, type, reference_type, reference_id)
+         VALUES ($1, $2, $3, $4, 'followup_due', 'lead', $5)`,
+        [req.tenantId, lead.assigned_to, 'Follow-up Reminder', `Follow up with ${lead.name}`, req.params.id]
+      ).catch(() => {});
+    }
+
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
+       VALUES ($1, $2, 'followup_set', 'Follow-up scheduled', $3, $4)`,
+      [req.tenantId, req.params.id, `Scheduled for ${new Date(next_followup_at).toLocaleString('en-IN')}`, req.user.id]
+    );
+
+    res.status(201).json({ followup: result.rows[0] });
+  } catch (error) {
+    console.error('Add followup error:', error);
+    res.status(500).json({ error: 'Failed to schedule follow-up.' });
+  }
+};
+
 const addNote = async (req, res) => {
   try {
     const { notes, followup_type, outcome, next_followup_at, whatsapp_log } = req.body;
@@ -507,4 +554,4 @@ const getStages = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, getStages };
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages };
