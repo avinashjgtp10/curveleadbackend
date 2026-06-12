@@ -13,7 +13,8 @@ const getLeads = async (req, res) => {
     if (stage) { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`; params.push(stage); }
     if (source) { whereClause += ` AND l.source = $${i++}`; params.push(source); }
     if (score) { whereClause += ` AND l.lead_score = $${i++}`; params.push(score); }
-    if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
+    if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
+    else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
     if (search) {
       whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i})`;
       params.push(`%${search}%`);
