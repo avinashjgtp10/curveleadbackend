@@ -13,6 +13,8 @@ const getFollowups = async (req, res) => {
       where += ' AND f.is_completed = true';
     } else if (status === 'overdue') {
       where += ' AND f.is_completed = false AND f.next_followup_at < NOW()';
+    } else if (status === 'all') {
+      // no filter — return all
     } else {
       where += ' AND f.is_completed = false';
     }
