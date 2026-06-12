@@ -1,9 +1,10 @@
 const { query } = require('../config/db');
 
-// GET /api/followups - Get all followups
+// GET /api/followups - Get all followups with pagination
 const getFollowups = async (req, res) => {
   try {
-    const { status, lead_id } = req.query;
+    const { status, lead_id, page = 1, limit = 15 } = req.query;
+    const offset = (page - 1) * limit;
     let where = 'WHERE f.tenant_id = $1';
     const params = [req.tenantId];
     let i = 2;
@@ -13,23 +14,30 @@ const getFollowups = async (req, res) => {
     } else if (status === 'overdue') {
       where += ' AND f.is_completed = false AND f.next_followup_at < NOW()';
     } else {
-      // pending: not completed and not overdue (upcoming)
       where += ' AND f.is_completed = false';
     }
 
     if (lead_id) { where += ` AND f.lead_id = $${i++}`; params.push(lead_id); }
 
-    const result = await query(
-      `SELECT f.*, l.name as lead_name, l.phone as lead_phone, l.stage as lead_stage,
-              lu.name as assigned_to_name
-       FROM lead_followups f
-       JOIN leads l ON f.lead_id = l.id
-       LEFT JOIN users lu ON l.assigned_to = lu.id
-       ${where} ORDER BY f.next_followup_at ASC`,
-      params
-    );
+    const [result, countResult] = await Promise.all([
+      query(
+        `SELECT f.*, l.name as lead_name, l.phone as lead_phone, l.stage as lead_stage,
+                lu.name as assigned_to_name
+         FROM lead_followups f
+         JOIN leads l ON f.lead_id = l.id
+         LEFT JOIN users lu ON l.assigned_to = lu.id
+         ${where} ORDER BY f.next_followup_at ASC
+         LIMIT $${i++} OFFSET $${i++}`,
+        [...params, limit, offset]
+      ),
+      query(`SELECT COUNT(*) FROM lead_followups f JOIN leads l ON f.lead_id = l.id ${where}`, params),
+    ]);
 
-    res.json({ followups: result.rows });
+    const total = parseInt(countResult.rows[0].count);
+    res.json({
+      followups: result.rows,
+      pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) },
+    });
   } catch (error) { console.error('Get followups error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
