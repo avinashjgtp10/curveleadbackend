@@ -11,7 +11,7 @@ const tenantContext = (req, res, next) => {
 const checkPlanLimit = (limitField) => async (req, res, next) => {
   try {
     const result = await query(
-      `SELECT p.max_leads, p.max_users, p.features FROM plans p
+      `SELECT p.max_leads, p.max_staff FROM plans p
        JOIN tenants t ON t.plan_id = p.id WHERE t.id = $1`,
       [req.tenantId]
     );
@@ -29,11 +29,11 @@ const checkPlanLimit = (limitField) => async (req, res, next) => {
       }
     }
 
-    if (limitField === 'max_users' && plan.max_users > 0) {
+    if (limitField === 'max_staff' && plan.max_staff > 0) {
       const count = await query('SELECT COUNT(*) FROM users WHERE tenant_id = $1', [req.tenantId]);
-      if (parseInt(count.rows[0].count) >= plan.max_users) {
+      if (parseInt(count.rows[0].count) >= plan.max_staff) {
         return res.status(403).json({
-          error: `Team member limit reached (${plan.max_users}). Please upgrade your plan.`,
+          error: `Team member limit reached (${plan.max_staff}). Please upgrade your plan.`,
         });
       }
     }

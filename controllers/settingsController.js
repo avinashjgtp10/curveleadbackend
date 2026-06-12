@@ -4,7 +4,7 @@ const { query } = require('../config/db');
 const getSettings = async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, name, email, phone, business_type, logo_url, address, settings,
+      `SELECT id, name, email, phone, business_type, logo_url, address,
               subscription_status, trial_ends_at, subscription_start, subscription_end
        FROM tenants WHERE id = $1`,
       [req.tenantId]
@@ -16,7 +16,7 @@ const getSettings = async (req, res) => {
 // PUT /api/settings
 const updateSettings = async (req, res) => {
   try {
-    const { name, email, phone, business_type, logo_url, address, settings } = req.body;
+    const { name, email, phone, business_type, logo_url, address } = req.body;
     const updates = [];
     const params = [req.tenantId];
     let i = 2;
@@ -27,10 +27,6 @@ const updateSettings = async (req, res) => {
         updates.push(`${key} = $${i++}`);
         params.push(value);
       }
-    }
-    if (settings !== undefined) {
-      updates.push(`settings = $${i++}::jsonb`);
-      params.push(JSON.stringify(settings));
     }
 
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });

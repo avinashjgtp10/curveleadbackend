@@ -59,7 +59,7 @@ const addDays = (date, days) => {
 const getPlans = async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, name, price, max_leads, max_users, features
+      `SELECT id, name, price, max_leads, max_staff
        FROM plans
        WHERE is_active = true
        ORDER BY price ASC`

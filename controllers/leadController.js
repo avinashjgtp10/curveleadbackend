@@ -10,37 +10,21 @@ const getLeads = async (req, res) => {
     const params = [req.tenantId];
     let i = 2;
 
-    if (stage) {
-      whereClause += ` AND l.stage = $${paramIndex++}`;
-      params.push(stage);
-    }
-    if (source) {
-      whereClause += ` AND l.source = $${paramIndex++}`;
-      params.push(source);
-    }
-    if (score) {
-      whereClause += ` AND l.lead_score = $${paramIndex++}`;
-      params.push(score);
-    }
-    if (assigned_to) {
-      whereClause += ` AND l.assigned_to = $${paramIndex++}`;
-      params.push(assigned_to);
-    }
+    if (stage) { whereClause += ` AND l.stage = $${i++}`; params.push(stage); }
+    if (source) { whereClause += ` AND l.source = $${i++}`; params.push(source); }
+    if (score) { whereClause += ` AND l.lead_score = $${i++}`; params.push(score); }
+    if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
     if (search) {
-      whereClause += ` AND (l.name ILIKE $${paramIndex} OR l.phone ILIKE $${paramIndex})`;
+      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i})`;
       params.push(`%${search}%`);
-      paramIndex++;
+      i++;
     }
-    if (date_from) {
-      whereClause += ` AND COALESCE(l.lead_date, l.created_at) >= $${paramIndex++}`;
-      params.push(date_from);
-    }
-    if (date_to) {
-      whereClause += ` AND COALESCE(l.lead_date, l.created_at) < $${paramIndex++}::date + INTERVAL '1 day'`;
-      params.push(date_to);
-    }
-    if (date_from) { where += ` AND l.created_at >= $${i++}`; params.push(date_from); }
-    if (date_to) { where += ` AND l.created_at <= $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
+    if (date_from) { whereClause += ` AND COALESCE(l.lead_date, l.created_at) >= $${i++}`; params.push(date_from); }
+    if (date_to) { whereClause += ` AND COALESCE(l.lead_date, l.created_at) < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
+
+    const limitParam = i++;
+    const offsetParam = i;
+    params.push(limit, offset);
 
     const leadsQuery = `
       SELECT l.*,
@@ -48,18 +32,17 @@ const getLeads = async (req, res) => {
              c.name as campaign_name,
              c.source as campaign_source,
              (SELECT COUNT(*) FROM followups WHERE lead_id = l.id) as followup_count,
-             (SELECT MIN(scheduled_at) FROM followups WHERE lead_id = l.id AND completed = false AND scheduled_at > NOW()) as next_followup
+             (SELECT MIN(scheduled_at) FROM followups WHERE lead_id = l.id AND scheduled_at > NOW()) as next_followup
       FROM leads l
       LEFT JOIN users u ON l.assigned_to = u.id
       LEFT JOIN campaigns c ON l.campaign_id = c.id
-      ${where}
+      ${whereClause}
       ORDER BY l.created_at DESC
-      LIMIT $${i++} OFFSET $${i}
+      LIMIT $${limitParam} OFFSET $${offsetParam}
     `;
-    params.push(limit, offset);
 
     const result = await query(leadsQuery, params);
-    const countResult = await query(`SELECT COUNT(*) FROM leads l ${where}`, params.slice(0, -2));
+    const countResult = await query(`SELECT COUNT(*) FROM leads l ${whereClause}`, params.slice(0, -2));
 
     res.json({
       leads: result.rows,
