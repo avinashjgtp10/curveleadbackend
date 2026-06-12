@@ -1,14 +1,15 @@
 {
   "name": "curvelead-backend",
-  "version": "1.0.0",
-  "description": "CurveLead - Academy Management SaaS Platform",
+  "version": "2.0.0",
+  "description": "CurveLead - Lead Management Platform Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "db:setup": "node config/dbSetup.js"
+    "test": "echo \"No tests yet\" && exit 0"
   },
   "dependencies": {
+    "axios": "^1.7.7",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -16,13 +17,17 @@
     "express-rate-limit": "^7.4.0",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.15",
-    "pdfkit": "^0.15.0",
     "pg": "^8.12.0",
+    "razorpay": "^2.9.6",
     "uuid": "^10.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
