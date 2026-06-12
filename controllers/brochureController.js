@@ -81,7 +81,7 @@ const shareWithLead = async (req, res) => {
 
     await query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
-       VALUES ($1,$2,'note','Brochure Shared',$3,$4)`,
+       VALUES ($1,$2,'share_material','Material Shared',$3,$4)`,
       [req.tenantId, leadId, `Brochure "${brochure.name}" shared via WhatsApp`, req.user.id]
     );
     res.json({ whatsapp_url, message: msg });

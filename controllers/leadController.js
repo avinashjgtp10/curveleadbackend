@@ -185,7 +185,16 @@ const updateLead = async (req, res) => {
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
          VALUES ($1, $2, 'stage_change', $3, $4)`,
-        [req.tenantId, req.params.id, `Moved to ${req.body.stage}`, req.user.id]
+        [req.tenantId, req.params.id, `Stage changed to ${req.body.stage}`, req.user.id]
+      );
+    }
+
+    // Log source change
+    if (req.body.source) {
+      await query(
+        `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
+         VALUES ($1, $2, 'source_change', $3, $4)`,
+        [req.tenantId, req.params.id, `Source changed to ${req.body.source.replace(/_/g, ' ')}`, req.user.id]
       );
     }
 
@@ -246,7 +255,7 @@ const addFollowup = async (req, res) => {
 
     await query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
-       VALUES ($1, $2, 'followup_set', 'Follow-up scheduled', $3, $4)`,
+       VALUES ($1, $2, 'followup_scheduled', 'Follow-up Scheduled', $3, $4)`,
       [req.tenantId, req.params.id, `Scheduled for ${new Date(next_followup_at).toLocaleString('en-IN')}`, req.user.id]
     );
 
@@ -323,7 +332,7 @@ const addNote = async (req, res) => {
     if (next_followup_at) {
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
-         VALUES ($1, $2, 'followup_set', 'Follow-up scheduled', $3, $4)`,
+         VALUES ($1, $2, 'followup_scheduled', 'Follow-up Scheduled', $3, $4)`,
         [req.tenantId, req.params.id, `Next follow-up on ${new Date(next_followup_at).toLocaleString('en-IN')}`, req.user.id]
       );
     }

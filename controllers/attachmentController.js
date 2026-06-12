@@ -39,6 +39,13 @@ const upload = async (req, res) => {
       [req.tenantId, req.params.leadId, req.file.originalname, fileUrl,
        req.file.size, getFileType(req.file.mimetype), description, req.user.id]
     );
+
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
+       VALUES ($1,$2,'file_uploaded','File Uploaded',$3,$4)`,
+      [req.tenantId, req.params.leadId, req.file.originalname, req.user.id]
+    ).catch(() => {});
+
     res.status(201).json({ attachment: result.rows[0] });
   } catch (e) { console.error('Attachment upload error:', e); res.status(500).json({ error: 'Failed to upload file.' }); }
 };
