@@ -4,7 +4,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
-const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
@@ -53,41 +52,6 @@ if (process.env.NODE_ENV !== 'production') {
 app.use('/uploads', require('express').static(require('path').join(__dirname, 'public/uploads')));
 
 // ============================================
-// Multer config
-// ============================================
-
-// For lead attachments (per-lead folder)
-const leadStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = `public/uploads/leads/${req.params.leadId}`;
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const name = path.basename(file.originalname, ext).replace(/[^a-z0-9]/gi, '_');
-    cb(null, `${name}_${Date.now()}${ext}`);
-  },
-});
-const uploadLeadFile = multer({
-  storage: leadStorage,
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
-});
-
-// For brochures library
-const brochureStorage = multer.diskStorage({
-  destination: 'public/uploads/brochures',
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `brochure_${Date.now()}${ext}`);
-  },
-});
-const uploadBrochureFile = multer({
-  storage: brochureStorage,
-  limits: { fileSize: 25 * 1024 * 1024 },
-});
-
-// ============================================
 // Rate limiting
 // ============================================
 const apiLimiter = rateLimit({
@@ -126,8 +90,8 @@ app.use('/api/webhook', require('./routes/webhook')); // No rate limit - externa
 
 // ⭐ NEW FEATURES
 app.use('/api/notes', apiLimiter, require('./routes/notes'));
-app.use('/api/attachments', apiLimiter, require('./routes/attachments')(uploadLeadFile));
-app.use('/api/brochures', apiLimiter, require('./routes/brochures')(uploadBrochureFile));
+app.use('/api/attachments', apiLimiter, require('./routes/attachments'));
+app.use('/api/brochures', apiLimiter, require('./routes/brochures'));
 app.use('/api/quotations', apiLimiter, require('./routes/quotations'));
 
 // ============================================
