@@ -549,6 +549,63 @@ const addActivity = async (req, res) => {
   }
 };
 
+// PUT /api/leads/bulk - Bulk update stage or assigned_to
+const bulkUpdate = async (req, res) => {
+  try {
+    const { ids, stage, assigned_to } = req.body;
+    if (!ids?.length) return res.status(400).json({ error: 'No lead IDs provided.' });
+
+    const sets = [];
+    const params = [req.tenantId];
+    let i = 2;
+
+    if (stage !== undefined) { sets.push(`stage = $${i++}`); params.push(stage); }
+    if (assigned_to !== undefined) { sets.push(`assigned_to = $${i++}`); params.push(assigned_to || null); }
+    if (!sets.length) return res.status(400).json({ error: 'Nothing to update.' });
+
+    sets.push('updated_at = NOW()');
+    params.push(ids);
+
+    const result = await query(
+      `UPDATE leads SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = ANY($${i}::int[]) RETURNING id`,
+      params
+    );
+
+    if (stage) {
+      await Promise.all(ids.map(id =>
+        query(
+          `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
+           VALUES ($1,$2,'stage_change',$3,$4)`,
+          [req.tenantId, id, `Stage changed to ${stage}`, req.user.id]
+        ).catch(() => {})
+      ));
+    }
+
+    res.json({ updated: result.rowCount });
+  } catch (error) {
+    console.error('Bulk update error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// DELETE /api/leads/bulk - Bulk delete
+const bulkDelete = async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!ids?.length) return res.status(400).json({ error: 'No lead IDs provided.' });
+
+    const result = await query(
+      'DELETE FROM leads WHERE tenant_id = $1 AND id = ANY($2::int[]) RETURNING id',
+      [req.tenantId, ids]
+    );
+
+    res.json({ deleted: result.rowCount });
+  } catch (error) {
+    console.error('Bulk delete error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
 // GET /api/leads/stages/all - Get pipeline stages
 const getStages = async (req, res) => {
   try {
@@ -562,4 +619,4 @@ const getStages = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups };
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete };
