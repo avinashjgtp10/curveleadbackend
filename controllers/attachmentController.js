@@ -34,11 +34,10 @@ const upload = async (req, res) => {
     const fileUrl = await uploadToS3(req.file.buffer, key, req.file.mimetype);
 
     const result = await query(
-      `INSERT INTO lead_attachments (tenant_id, lead_id, file_name, file_url, file_size, file_type, mime_type, description, uploaded_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      `INSERT INTO lead_attachments (tenant_id, lead_id, file_name, file_url, file_size, file_type, description, uploaded_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
       [req.tenantId, req.params.leadId, req.file.originalname, fileUrl,
-       req.file.size, getFileType(req.file.mimetype), req.file.mimetype,
-       description, req.user.id]
+       req.file.size, getFileType(req.file.mimetype), description, req.user.id]
     );
     res.status(201).json({ attachment: result.rows[0] });
   } catch (e) { console.error('Attachment upload error:', e); res.status(500).json({ error: 'Failed to upload file.' }); }
