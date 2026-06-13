@@ -10,11 +10,19 @@ const getLeads = async (req, res) => {
     const params = [req.tenantId];
     let i = 2;
 
+    // Staff can only see their own assigned leads
+    if (req.user.role === 'staff') {
+      whereClause += ` AND l.assigned_to = $${i++}`;
+      params.push(req.user.id);
+    }
+
     if (stage) { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`; params.push(stage); }
     if (source) { whereClause += ` AND l.source = $${i++}`; params.push(source); }
     if (score) { whereClause += ` AND l.lead_score = $${i++}`; params.push(score); }
-    if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
-    else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
+    if (req.user.role !== 'staff') {
+      if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
+      else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
+    }
     if (search) {
       whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i})`;
       params.push(`%${search}%`);
@@ -63,14 +71,18 @@ const getLeads = async (req, res) => {
 // GET /api/leads/:id
 const getLead = async (req, res) => {
   try {
+    const isStaff = req.user.role === 'staff';
+    const leadParams = isStaff
+      ? [req.params.id, req.tenantId, req.user.id]
+      : [req.params.id, req.tenantId];
     const [result, followups, activities] = await Promise.all([
       query(
         `SELECT l.*, u.name as assigned_to_name, c.name as campaign_name
          FROM leads l
          LEFT JOIN users u ON l.assigned_to = u.id
          LEFT JOIN campaigns c ON l.campaign_id = c.id
-         WHERE l.id = $1 AND l.tenant_id = $2`,
-        [req.params.id, req.tenantId]
+         WHERE l.id = $1 AND l.tenant_id = $2${isStaff ? ' AND l.assigned_to = $3' : ''}`,
+        leadParams
       ),
       query(
         `SELECT f.*, u.name as created_by_name
@@ -346,32 +358,39 @@ const addNote = async (req, res) => {
 // GET /api/leads/stats - Lead statistics for dashboard
 const getLeadStats = async (req, res) => {
   try {
+    const isStaff = req.user.role === 'staff';
+    const baseParams = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
+    const staffClause = isStaff ? ' AND assigned_to = $2' : '';
+    const staffFollowupClause = isStaff
+      ? ` AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)`
+      : '';
+
     // Leads by stage
     const byStage = await query(
-      `SELECT stage, COUNT(*) as count FROM leads 
-       WHERE tenant_id = $1 GROUP BY stage`,
-      [req.tenantId]
+      `SELECT stage, COUNT(*) as count FROM leads
+       WHERE tenant_id = $1${staffClause} GROUP BY stage`,
+      baseParams
     );
 
     // Leads by source
     const bySource = await query(
-      `SELECT source, COUNT(*) as count FROM leads 
-       WHERE tenant_id = $1 GROUP BY source`,
-      [req.tenantId]
+      `SELECT source, COUNT(*) as count FROM leads
+       WHERE tenant_id = $1${staffClause} GROUP BY source`,
+      baseParams
     );
 
     // This month's leads
     const thisMonth = await query(
-      `SELECT COUNT(*) FROM leads 
-       WHERE tenant_id = $1 AND created_at >= date_trunc('month', CURRENT_DATE)`,
-      [req.tenantId]
+      `SELECT COUNT(*) FROM leads
+       WHERE tenant_id = $1${staffClause} AND created_at >= date_trunc('month', CURRENT_DATE)`,
+      baseParams
     );
 
     // Conversion rate (enrolled / total)
-    const totalLeads = await query('SELECT COUNT(*) FROM leads WHERE tenant_id = $1', [req.tenantId]);
+    const totalLeads = await query(`SELECT COUNT(*) FROM leads WHERE tenant_id = $1${staffClause}`, baseParams);
     const enrolledLeads = await query(
-      "SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND stage = 'enrolled'",
-      [req.tenantId]
+      `SELECT COUNT(*) FROM leads WHERE tenant_id = $1${staffClause} AND stage = 'enrolled'`,
+      baseParams
     );
 
     const total = parseInt(totalLeads.rows[0].count);
@@ -380,30 +399,30 @@ const getLeadStats = async (req, res) => {
 
     // Today's follow-ups
     const todayFollowups = await query(
-      `SELECT COUNT(*) FROM lead_followups 
-       WHERE tenant_id = $1 AND is_completed = false 
-       AND DATE(next_followup_at) = CURRENT_DATE`,
-      [req.tenantId]
+      `SELECT COUNT(*) FROM lead_followups
+       WHERE tenant_id = $1 AND is_completed = false
+       AND DATE(next_followup_at) = CURRENT_DATE${staffFollowupClause}`,
+      baseParams
     );
 
     // Overdue follow-ups
     const overdueFollowups = await query(
-      `SELECT COUNT(*) FROM lead_followups 
-       WHERE tenant_id = $1 AND is_completed = false 
-       AND next_followup_at < CURRENT_TIMESTAMP`,
-      [req.tenantId]
+      `SELECT COUNT(*) FROM lead_followups
+       WHERE tenant_id = $1 AND is_completed = false
+       AND next_followup_at < CURRENT_TIMESTAMP${staffFollowupClause}`,
+      baseParams
     );
 
     // Monthly trend (last 6 months)
     const monthlyTrend = await query(
-      `SELECT 
+      `SELECT
         TO_CHAR(created_at, 'YYYY-MM') as month,
         COUNT(*) as count
-       FROM leads WHERE tenant_id = $1 
+       FROM leads WHERE tenant_id = $1${staffClause}
        AND created_at >= CURRENT_DATE - INTERVAL '6 months'
        GROUP BY TO_CHAR(created_at, 'YYYY-MM')
        ORDER BY month`,
-      [req.tenantId]
+      baseParams
     );
 
     res.json({
@@ -429,6 +448,12 @@ const getTodayFollowups = async (req, res) => {
     let where = 'WHERE f.tenant_id = $1 AND f.is_completed = false';
     const params = [req.tenantId];
     let idx = 2;
+
+    // Staff see only follow-ups for their assigned leads
+    if (req.user.role === 'staff') {
+      where += ` AND l.assigned_to = $${idx++}`;
+      params.push(req.user.id);
+    }
 
     // If no date range provided, default to today + overdue
     if (!date_from && !date_to) {
