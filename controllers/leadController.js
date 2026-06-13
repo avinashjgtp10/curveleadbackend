@@ -120,8 +120,11 @@ const createLead = async (req, res) => {
   try {
     const {
       name, phone, email, location, source, source_detail, campaign_id,
-      stage, assigned_to, notes, deal_value, expected_close_date, tags,
+      stage, notes, deal_value, expected_close_date, tags,
     } = req.body;
+
+    // Staff leads are always assigned to themselves
+    const assigned_to = req.user.role === 'staff' ? req.user.id : (req.body.assigned_to || null);
 
     if (!name || !phone) return res.status(400).json({ error: 'Name and phone required.' });
 

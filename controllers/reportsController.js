@@ -167,8 +167,15 @@ const getTimeline = async (req, res) => {
 // GET /api/reports/summary - Dashboard summary
 const getDashboardSummary = async (req, res) => {
   try {
+    const isStaff = req.user.role === 'staff';
+    const baseParams = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
+    const staffClause = isStaff ? ' AND assigned_to = $2' : '';
+    const staffFollowupClause = isStaff
+      ? ` AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)`
+      : '';
+
     const summary = await query(
-      `SELECT 
+      `SELECT
         COUNT(*) as total_leads,
         COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW())) as leads_this_month,
         COUNT(*) FILTER (WHERE stage = 'won') as total_won,
@@ -178,16 +185,16 @@ const getDashboardSummary = async (req, res) => {
         COUNT(*) FILTER (WHERE lead_score = 'cold') as cold_leads,
         COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won' AND won_at >= DATE_TRUNC('month', NOW())), 0) as revenue_this_month,
         COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as total_revenue
-       FROM leads WHERE tenant_id = $1`,
-      [req.tenantId]
+       FROM leads WHERE tenant_id = $1${staffClause}`,
+      baseParams
     );
 
     const followups = await query(
       `SELECT
         COUNT(*) FILTER (WHERE DATE(scheduled_at) = CURRENT_DATE AND completed = false) as today,
         COUNT(*) FILTER (WHERE scheduled_at < NOW() AND completed = false) as overdue
-       FROM followups WHERE tenant_id = $1`,
-      [req.tenantId]
+       FROM followups WHERE tenant_id = $1${staffFollowupClause}`,
+      baseParams
     );
 
     res.json({
