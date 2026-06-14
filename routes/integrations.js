@@ -15,4 +15,9 @@ router.post('/api-key', ctrl.generateApiKey);
 router.delete('/api-key', ctrl.revokeApiKey);
 router.get('/embed-script', ctrl.getEmbedScript);
 
+// Facebook OAuth flow
+router.post('/facebook/auth', ctrl.facebookAuth);
+router.post('/facebook/connect-page', ctrl.facebookConnectPage);
+router.post('/facebook/sync-leads', ctrl.facebookSyncLeads);
+
 module.exports = router;

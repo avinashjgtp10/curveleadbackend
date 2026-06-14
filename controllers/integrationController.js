@@ -26,6 +26,7 @@ const getSettings = async (req, res) => {
     const apiKey = settings.api_key || null;
     res.json({
       meta_page_id: settings.meta_page_id || '',
+      meta_page_name: settings.meta_page_name || '',
       meta_page_access_token: settings.meta_page_access_token ? '••••••••' : '',
       meta_configured: !!(settings.meta_page_id && settings.meta_page_access_token),
       google_webhook_secret: settings.google_webhook_secret ? '••••••••' : '',
@@ -147,4 +148,104 @@ const getEmbedScript = async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript };
+// ── Facebook OAuth helpers ─────────────────────────────────────────────────
+
+const GRAPH = 'https://graph.facebook.com/v19.0';
+
+const fbGet = async (path) => {
+  const res = await fetch(`${GRAPH}${path}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data;
+};
+
+// ── POST /api/integrations/facebook/auth ──────────────────────────────────
+// Receive short-lived user token from FB SDK, exchange for long-lived, return pages list
+const facebookAuth = async (req, res) => {
+  try {
+    const { user_token } = req.body;
+    if (!user_token) return res.status(400).json({ error: 'user_token required' });
+
+    const appId = process.env.META_APP_ID;
+    const appSecret = process.env.META_APP_SECRET;
+    if (!appId || !appSecret) return res.status(500).json({ error: 'META_APP_ID / META_APP_SECRET not configured on server.' });
+
+    const tokenData = await fbGet(
+      `/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${encodeURIComponent(user_token)}`
+    );
+
+    const pagesData = await fbGet(
+      `/me/accounts?access_token=${encodeURIComponent(tokenData.access_token)}&fields=id,name,access_token,fan_count`
+    );
+
+    res.json({ pages: pagesData.data || [] });
+  } catch (e) {
+    console.error('facebookAuth:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+};
+
+// ── POST /api/integrations/facebook/connect-page ──────────────────────────
+const facebookConnectPage = async (req, res) => {
+  try {
+    const { page_id, page_access_token, page_name } = req.body;
+    if (!page_id || !page_access_token) return res.status(400).json({ error: 'page_id and page_access_token required' });
+
+    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const current = result.rows[0]?.settings || {};
+    const updated = { ...current, meta_page_id: page_id, meta_page_access_token: page_access_token, meta_page_name: page_name };
+    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
+    res.json({ message: `Connected to "${page_name}"` });
+  } catch (e) {
+    console.error('facebookConnectPage:', e.message);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// ── POST /api/integrations/facebook/sync-leads ────────────────────────────
+const facebookSyncLeads = async (req, res) => {
+  try {
+    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const settings = result.rows[0]?.settings || {};
+    const { meta_page_id, meta_page_access_token } = settings;
+    if (!meta_page_id || !meta_page_access_token) return res.status(400).json({ error: 'Connect a Facebook page first.' });
+
+    const formsData = await fbGet(
+      `/${meta_page_id}/leadgen_forms?access_token=${encodeURIComponent(meta_page_access_token)}&limit=20&fields=id,name`
+    );
+
+    let created = 0, skipped = 0;
+
+    for (const form of formsData.data || []) {
+      const leadsData = await fbGet(
+        `/${form.id}/leads?access_token=${encodeURIComponent(meta_page_access_token)}&limit=100&fields=id,created_time,field_data`
+      );
+
+      for (const lead of leadsData.data || []) {
+        const dup = await query('SELECT id FROM leads WHERE tenant_id = $1 AND meta_lead_id = $2', [req.tenantId, lead.id]);
+        if (dup.rows.length) { skipped++; continue; }
+
+        const fields = {};
+        for (const f of lead.field_data || []) fields[f.name] = f.values?.[0] || '';
+
+        const name = fields['full_name'] || fields['name'] || 'Unknown';
+        const phone = fields['phone_number'] || fields['phone'] || null;
+        const email = fields['email'] || null;
+
+        await query(
+          `INSERT INTO leads (tenant_id, name, phone, email, source, source_detail, meta_lead_id, stage, created_at)
+           VALUES ($1,$2,$3,$4,'meta_ads',$5,$6,'new',$7) ON CONFLICT DO NOTHING`,
+          [req.tenantId, name, phone, email, form.name || 'Facebook Lead Ad', lead.id, new Date(lead.created_time)]
+        );
+        created++;
+      }
+    }
+
+    res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped });
+  } catch (e) {
+    console.error('facebookSyncLeads:', e.message);
+    res.status(500).json({ error: e.message || 'Failed to sync leads.' });
+  }
+};
+
+module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads };
