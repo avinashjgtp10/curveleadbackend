@@ -36,7 +36,13 @@ const getSettings = async (req, res) => {
       api_ingest_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/integrations/ingest`,
       google_webhook_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/webhook/google`,
     });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) {
+    console.error('getSettings error:', e.message);
+    if (e.message?.includes('settings')) {
+      return res.status(500).json({ error: 'DB migration required. Run migration_integrations.sql on your RDS database.' });
+    }
+    res.status(500).json({ error: 'Failed.' });
+  }
 };
 
 // ── PUT /api/integrations/settings ────────────────────────────────────────
