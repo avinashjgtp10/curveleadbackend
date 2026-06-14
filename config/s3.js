@@ -1,4 +1,5 @@
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION || 'us-east-1',
@@ -30,4 +31,11 @@ const deleteFromS3 = async (fileUrl) => {
   }
 };
 
-module.exports = { uploadToS3, deleteFromS3 };
+const getPresignedUrl = async (fileUrl, expiresIn = 3600) => {
+  if (!fileUrl || !fileUrl.includes('amazonaws.com')) return fileUrl;
+  const key = fileUrl.split('.amazonaws.com/')[1];
+  if (!key) return fileUrl;
+  return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn });
+};
+
+module.exports = { uploadToS3, deleteFromS3, getPresignedUrl };

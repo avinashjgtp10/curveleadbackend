@@ -1,5 +1,5 @@
 const { query } = require('../config/db');
-const { uploadToS3, deleteFromS3 } = require('../config/s3');
+const { uploadToS3, deleteFromS3, getPresignedUrl } = require('../config/s3');
 
 const getFileType = (mime) => {
   if (mime?.startsWith('image/')) return 'image';
@@ -20,7 +20,14 @@ const getByLead = async (req, res) => {
        ORDER BY a.uploaded_at DESC`,
       [req.params.leadId, req.tenantId]
     );
-    res.json({ attachments: result.rows });
+    // Generate presigned URLs so private S3 objects are viewable
+    const attachments = await Promise.all(
+      result.rows.map(async (a) => ({
+        ...a,
+        file_url: await getPresignedUrl(a.file_url),
+      }))
+    );
+    res.json({ attachments });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
