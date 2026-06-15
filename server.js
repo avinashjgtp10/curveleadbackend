@@ -121,6 +121,11 @@ app.listen(PORT, () => {
   ║             Quotations + AI + WhatsApp    ║
   ╚═══════════════════════════════════════════╝
   `);
+
+  // Follow-up reminder job — runs every 15 minutes
+  const { runFollowupReminder } = require('./jobs/followupReminder');
+  setTimeout(runFollowupReminder, 15 * 1000);          // first run 15s after boot
+  setInterval(runFollowupReminder, 15 * 60 * 1000);    // then every 15 min
 });
 
 // Graceful shutdown

@@ -167,39 +167,135 @@ const getTimeline = async (req, res) => {
 // GET /api/reports/summary - Dashboard summary
 const getDashboardSummary = async (req, res) => {
   try {
-    const isStaff = req.user.role === 'staff';
-    const baseParams = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
-    const staffClause = isStaff ? ' AND assigned_to = $2' : '';
-    const staffFollowupClause = isStaff
-      ? ` AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)`
-      : '';
+    const tid = req.tenantId;
 
-    const summary = await query(
-      `SELECT
-        COUNT(*) as total_leads,
-        COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW())) as leads_this_month,
-        COUNT(*) FILTER (WHERE LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as total_won,
-        COUNT(*) FILTER (WHERE LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true) AND won_at >= DATE_TRUNC('month', NOW())) as won_this_month,
-        COUNT(*) FILTER (WHERE lead_score = 'hot') as hot_leads,
-        COUNT(*) FILTER (WHERE lead_score = 'warm') as warm_leads,
-        COUNT(*) FILTER (WHERE lead_score = 'cold') as cold_leads,
-        COALESCE(SUM(deal_value) FILTER (WHERE LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true) AND won_at >= DATE_TRUNC('month', NOW())), 0) as revenue_this_month,
-        COALESCE(SUM(deal_value) FILTER (WHERE LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as total_revenue
-       FROM leads WHERE tenant_id = $1${staffClause}`,
-      baseParams
-    );
+    const [summary, followupStats, pipeline, sources, team, recentLeads, trend] = await Promise.all([
 
-    const followups = await query(
-      `SELECT
-        COUNT(*) FILTER (WHERE DATE(scheduled_at) = CURRENT_DATE AND completed = false) as today,
-        COUNT(*) FILTER (WHERE scheduled_at < NOW() AND completed = false) as overdue
-       FROM followups WHERE tenant_id = $1${staffFollowupClause}`,
-      baseParams
-    );
+      // Core KPIs — this month vs last month
+      query(`
+        SELECT
+          COUNT(*) as total_leads,
+          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW())) as leads_this_month,
+          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
+                           AND created_at < DATE_TRUNC('month', NOW())) as leads_last_month,
+          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW())) as leads_today,
+          COUNT(*) FILTER (WHERE lead_score = 'hot') as hot_leads,
+          COUNT(*) FILTER (WHERE LOWER(stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as total_won,
+          COUNT(*) FILTER (WHERE LOWER(stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
+            AND won_at >= DATE_TRUNC('month', NOW())) as won_this_month,
+          COALESCE(SUM(deal_value) FILTER (WHERE LOWER(stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as total_revenue,
+          COALESCE(SUM(deal_value) FILTER (WHERE LOWER(stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
+            AND won_at >= DATE_TRUNC('month', NOW())), 0) as revenue_this_month,
+          COALESCE(SUM(deal_value) FILTER (WHERE LOWER(stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
+            AND won_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
+            AND won_at < DATE_TRUNC('month', NOW())), 0) as revenue_last_month,
+          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
+                           AND created_at < DATE_TRUNC('month', NOW())) as _leads_lm
+        FROM leads WHERE tenant_id = $1
+      `, [tid]),
+
+      // Today's action items from lead_followups
+      query(`
+        SELECT
+          COUNT(*) FILTER (WHERE DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as today,
+          COUNT(*) FILTER (WHERE next_followup_at < NOW() AND is_completed = false) as overdue,
+          COUNT(*) FILTER (WHERE followup_type = 'demo' AND DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as demos_today
+        FROM lead_followups WHERE tenant_id = $1
+      `, [tid]),
+
+      // Pipeline: leads per stage
+      query(`
+        SELECT ls.name, ls.color, ls.pos, ls.is_won, ls.is_lost,
+               COUNT(l.id) as count,
+               COALESCE(SUM(l.deal_value), 0) as pipeline_value
+        FROM lead_stages ls
+        LEFT JOIN leads l ON LOWER(l.stage) = LOWER(ls.name) AND l.tenant_id = ls.tenant_id
+        WHERE ls.tenant_id = $1 AND ls.is_active = true
+        GROUP BY ls.id, ls.name, ls.color, ls.pos, ls.is_won, ls.is_lost
+        ORDER BY ls.pos ASC
+      `, [tid]),
+
+      // Lead sources — top 6
+      query(`
+        SELECT
+          COALESCE(source, 'Unknown') as source,
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE LOWER(stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won
+        FROM leads WHERE tenant_id = $1
+        GROUP BY source ORDER BY total DESC LIMIT 6
+      `, [tid]),
+
+      // Team performance
+      query(`
+        SELECT
+          u.name,
+          COUNT(l.id) as total_leads,
+          COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
+          COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue
+        FROM users u
+        LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
+        WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin', 'staff')
+        GROUP BY u.id, u.name ORDER BY won DESC, total_leads DESC LIMIT 8
+      `, [tid]),
+
+      // Recent 6 leads
+      query(`
+        SELECT id, name, phone, source, lead_score, stage, created_at
+        FROM leads WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 6
+      `, [tid]),
+
+      // Last 14-day trend
+      query(`
+        SELECT DATE_TRUNC('day', created_at) as day, COUNT(*) as count
+        FROM leads WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '14 days'
+        GROUP BY day ORDER BY day ASC
+      `, [tid]),
+    ]);
+
+    const s = summary.rows[0];
+    const f = followupStats.rows[0];
+
+    const pct = (curr, prev) => {
+      const c = parseFloat(curr) || 0, p = parseFloat(prev) || 0;
+      if (p === 0) return c > 0 ? 100 : 0;
+      return Math.round(((c - p) / p) * 100);
+    };
 
     res.json({
-      ...summary.rows[0],
-      ...followups.rows[0],
+      total_leads:       parseInt(s.total_leads),
+      leads_today:       parseInt(s.leads_today),
+      leads_this_month:  parseInt(s.leads_this_month),
+      leads_last_month:  parseInt(s.leads_last_month),
+      leads_change:      pct(s.leads_this_month, s._leads_lm),
+      hot_leads:         parseInt(s.hot_leads),
+      total_won:         parseInt(s.total_won),
+      won_this_month:    parseInt(s.won_this_month),
+      total_revenue:     parseFloat(s.total_revenue),
+      revenue_this_month: parseFloat(s.revenue_this_month),
+      revenue_last_month: parseFloat(s.revenue_last_month),
+      revenue_change:    pct(s.revenue_this_month, s.revenue_last_month),
+      conversion_rate:   s.leads_this_month > 0
+                          ? ((s.won_this_month / s.leads_this_month) * 100).toFixed(1)
+                          : '0.0',
+      avg_deal_value:    s.total_won > 0 ? Math.round(s.total_revenue / s.total_won) : 0,
+
+      followups_today:   parseInt(f.today),
+      overdue_followups: parseInt(f.overdue),
+      demos_today:       parseInt(f.demos_today),
+
+      pipeline:    pipeline.rows.map(p => ({ ...p, count: parseInt(p.count), pipeline_value: parseFloat(p.pipeline_value) })),
+      sources:     sources.rows.map(s => ({ ...s, total: parseInt(s.total), won: parseInt(s.won), conversion_rate: s.total > 0 ? ((s.won / s.total) * 100).toFixed(1) : '0.0' })),
+      team:        team.rows.map(t => ({ ...t, total_leads: parseInt(t.total_leads), won: parseInt(t.won), revenue: parseFloat(t.revenue) })),
+      recentLeads: recentLeads.rows,
+      trend:       trend.rows,
     });
   } catch (error) {
     console.error('Dashboard summary error:', error);
