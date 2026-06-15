@@ -241,18 +241,21 @@ const deleteLead = async (req, res) => {
 // POST /api/leads/:id/note - Add note/activity
 const addFollowup = async (req, res) => {
   try {
-    const { notes, followup_type, outcome, next_followup_at, whatsapp_log } = req.body;
+    const { notes, followup_type, outcome, next_followup_at, whatsapp_log, meeting_url } = req.body;
 
     if (!next_followup_at) {
       return res.status(400).json({ error: 'Follow-up date and time are required.' });
     }
 
     const leadCheck = await query(
-      'SELECT id, name, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2',
+      'SELECT id, name, email, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2',
       [req.params.id, req.tenantId]
     );
     if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
     const lead = leadCheck.rows[0];
+
+    const tenantRes = await query('SELECT name FROM tenants WHERE id = $1', [req.tenantId]);
+    const tenantName = tenantRes.rows[0]?.name || 'CurveLead';
 
     await query(
       `UPDATE lead_followups SET is_completed = true WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
@@ -260,9 +263,9 @@ const addFollowup = async (req, res) => {
     );
 
     const result = await query(
-      `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.tenantId, req.params.id, notes || null, followup_type || 'call', next_followup_at, req.user.id]
+      `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at, meeting_url, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.tenantId, req.params.id, notes || null, followup_type || 'call', next_followup_at, meeting_url || null, req.user.id]
     );
 
     if (lead.assigned_to) {
@@ -274,17 +277,46 @@ const addFollowup = async (req, res) => {
     }
 
     const isDemo = (followup_type || '').toLowerCase() === 'demo';
+    const demoTime = new Date(next_followup_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+
     await query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [req.tenantId, req.params.id,
        isDemo ? 'demo_scheduled' : 'followup_scheduled',
        isDemo ? 'Demo Scheduled' : 'Follow-up Scheduled',
-       `Scheduled for ${new Date(next_followup_at).toLocaleString('en-IN')}`,
+       isDemo && meeting_url
+         ? `Scheduled for ${demoTime} · Link: ${meeting_url}`
+         : `Scheduled for ${demoTime}`,
        req.user.id]
     );
 
-    res.status(201).json({ followup: result.rows[0] });
+    // Send demo invite email to lead if email exists
+    if (isDemo && meeting_url && lead.email) {
+      const { sendEmail } = require('../utils/email');
+      sendEmail({
+        to: lead.email,
+        subject: `Your Demo is Scheduled — ${tenantName}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; background: #f9fafb; border-radius: 12px;">
+            <h2 style="color: #1e1b4b; margin-bottom: 4px;">Your Demo is Confirmed! 🎥</h2>
+            <p style="color: #6b7280; font-size: 14px;">Hi ${lead.name},</p>
+            <p style="color: #374151; font-size: 14px;">We've scheduled a demo session for you.</p>
+            <div style="background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 20px; margin: 20px 0;">
+              <p style="margin: 0 0 8px; font-size: 13px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em;">📅 Date & Time</p>
+              <p style="margin: 0 0 20px; font-size: 16px; font-weight: 600; color: #1f2937;">${demoTime}</p>
+              <p style="margin: 0 0 8px; font-size: 13px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em;">🔗 Meeting Link</p>
+              <a href="${meeting_url}" style="display: inline-block; background: #4f46e5; color: white; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 600;">Join Demo</a>
+              <p style="margin: 12px 0 0; font-size: 12px; color: #9ca3af;">${meeting_url}</p>
+            </div>
+            ${notes ? `<p style="color: #374151; font-size: 14px;"><strong>Note:</strong> ${notes}</p>` : ''}
+            <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">Looking forward to speaking with you!<br/><strong>${tenantName}</strong></p>
+          </div>
+        `,
+      }).catch(() => {});
+    }
+
+    res.status(201).json({ followup: result.rows[0], emailSent: !!(isDemo && meeting_url && lead.email) });
   } catch (error) {
     console.error('Add followup error:', error);
     res.status(500).json({ error: 'Failed to schedule follow-up.' });
