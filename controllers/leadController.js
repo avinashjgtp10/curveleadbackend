@@ -700,6 +700,54 @@ const getStages = async (req, res) => {
   }
 };
 
+// GET /api/leads/import/template — download a prefilled sample Excel
+const getImportTemplate = async (req, res) => {
+  try {
+    const XLSX = require('xlsx');
+
+    const stagesResult = await query(
+      'SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_active = true ORDER BY pos ASC',
+      [req.tenantId]
+    );
+    const stageNames = stagesResult.rows.map(s => s.name);
+    const s1 = stageNames[0] || 'New';
+    const s2 = stageNames[1] || 'Contacted';
+
+    const rows = [
+      // Header
+      ['Name *', 'Phone *', 'Email', 'Source', 'Stage', 'Notes', 'Deal Value (INR)', 'City'],
+      // 5 example leads
+      ['Rahul Sharma',  '9876543210', 'rahul@example.com',  'Facebook',   s1, 'Interested in premium plan', 50000,  'Mumbai'],
+      ['Priya Patel',   '8765432109', 'priya@example.com',  'Google Ads', s2, 'Asked for demo',            75000,  'Pune'],
+      ['Amit Kumar',    '7654321098', 'amit@example.com',   'Referral',   s1, 'Referred by existing client',100000,'Delhi'],
+      ['Sneha Joshi',   '6543210987', '',                   'WhatsApp',   s2, 'Very interested, call back', 30000, 'Bangalore'],
+      ['Vikram Singh',  '9988776655', 'vikram@example.com', 'Website',    s1, 'Inquired about pricing',    '',     'Chennai'],
+      // blank separator
+      [],
+      // Allowed values reference
+      [`Allowed Stages: ${stageNames.join(' | ')}`],
+      ['Allowed Sources: Facebook | Google Ads | WhatsApp | Instagram | Referral | Website | Walk-in | Manual'],
+      ['* = Required column. Delete these rows and the example rows before uploading your real data.'],
+    ];
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+
+    // Column widths
+    ws['!cols'] = [22, 14, 28, 14, 16, 32, 18, 14].map(w => ({ wch: w }));
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Leads');
+
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="curvelead_import_template.xlsx"');
+    res.send(buf);
+  } catch (error) {
+    console.error('Template error:', error);
+    res.status(500).json({ error: 'Failed to generate template.' });
+  }
+};
+
 // POST /api/leads/import  — bulk import from CSV or Excel
 const importLeads = async (req, res) => {
   try {
@@ -801,4 +849,4 @@ const importLeads = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads };
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate };
