@@ -59,11 +59,11 @@ const shareWithLead = async (req, res) => {
     const lead = leadRes.rows[0];
     const tenant = tenantRes.rows[0];
 
-    // Log the share
-    await query(
+    // Log the share (non-fatal if table doesn't exist yet)
+    query(
       'INSERT INTO brochure_shares (tenant_id, brochure_id, lead_id, shared_by) VALUES ($1,$2,$3,$4)',
       [req.tenantId, brochureId, leadId, req.user.id]
-    );
+    ).catch(() => {});
 
     const msg = [
       `Hi ${lead.name}! 👋`,
@@ -79,11 +79,12 @@ const shareWithLead = async (req, res) => {
     const phone = (lead.phone || '').replace(/\D/g, '').slice(-10);
     const whatsapp_url = phone ? `https://wa.me/91${phone}?text=${encodeURIComponent(msg)}` : null;
 
-    await query(
+    query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
        VALUES ($1,$2,'share_material','Material Shared',$3,$4)`,
       [req.tenantId, leadId, `Brochure "${brochure.name}" shared via WhatsApp`, req.user.id]
-    );
+    ).catch(() => {});
+
     res.json({ whatsapp_url, message: msg });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
