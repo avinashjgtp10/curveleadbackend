@@ -182,9 +182,15 @@ const updateLead = async (req, res) => {
 
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
 
-    // Auto-set won_at / lost_at based on stage
-    if (req.body.stage === 'won') updates.push(`won_at = NOW()`);
-    if (req.body.stage === 'lost') updates.push(`lost_at = NOW()`);
+    // Auto-set won_at / lost_at based on stage's is_won / is_lost flag
+    if (req.body.stage) {
+      const stageInfo = await query(
+        'SELECT is_won, is_lost FROM lead_stages WHERE tenant_id = $1 AND name = $2 LIMIT 1',
+        [req.tenantId, req.body.stage]
+      );
+      if (stageInfo.rows[0]?.is_won) updates.push('won_at = NOW()');
+      if (stageInfo.rows[0]?.is_lost) updates.push('lost_at = NOW()');
+    }
 
     updates.push('updated_at = NOW()');
 

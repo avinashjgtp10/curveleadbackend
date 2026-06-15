@@ -178,13 +178,13 @@ const getDashboardSummary = async (req, res) => {
       `SELECT
         COUNT(*) as total_leads,
         COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW())) as leads_this_month,
-        COUNT(*) FILTER (WHERE stage = 'won') as total_won,
-        COUNT(*) FILTER (WHERE stage = 'won' AND won_at >= DATE_TRUNC('month', NOW())) as won_this_month,
+        COUNT(*) FILTER (WHERE stage IN (SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as total_won,
+        COUNT(*) FILTER (WHERE stage IN (SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won = true) AND won_at >= DATE_TRUNC('month', NOW())) as won_this_month,
         COUNT(*) FILTER (WHERE lead_score = 'hot') as hot_leads,
         COUNT(*) FILTER (WHERE lead_score = 'warm') as warm_leads,
         COUNT(*) FILTER (WHERE lead_score = 'cold') as cold_leads,
-        COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won' AND won_at >= DATE_TRUNC('month', NOW())), 0) as revenue_this_month,
-        COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as total_revenue
+        COALESCE(SUM(deal_value) FILTER (WHERE stage IN (SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won = true) AND won_at >= DATE_TRUNC('month', NOW())), 0) as revenue_this_month,
+        COALESCE(SUM(deal_value) FILTER (WHERE stage IN (SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as total_revenue
        FROM leads WHERE tenant_id = $1${staffClause}`,
       baseParams
     );
