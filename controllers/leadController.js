@@ -185,7 +185,7 @@ const updateLead = async (req, res) => {
     // Auto-set won_at / lost_at based on stage's is_won / is_lost flag
     if (req.body.stage) {
       const stageInfo = await query(
-        'SELECT is_won, is_lost FROM lead_stages WHERE tenant_id = $1 AND name = $2 LIMIT 1',
+        'SELECT is_won, is_lost FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
         [req.tenantId, req.body.stage]
       );
       if (stageInfo.rows[0]?.is_won) updates.push('won_at = NOW()');
