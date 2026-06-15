@@ -262,11 +262,21 @@ const addFollowup = async (req, res) => {
       [req.params.id, req.tenantId]
     );
 
-    const result = await query(
-      `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at, meeting_url, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.tenantId, req.params.id, notes || null, followup_type || 'call', next_followup_at, meeting_url || null, req.user.id]
-    );
+    let result;
+    try {
+      result = await query(
+        `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at, meeting_url, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [req.tenantId, req.params.id, notes || null, followup_type || 'call', next_followup_at, meeting_url || null, req.user.id]
+      );
+    } catch (colErr) {
+      // Fallback: meeting_url column may not exist yet (migration pending)
+      result = await query(
+        `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [req.tenantId, req.params.id, notes || null, followup_type || 'call', next_followup_at, req.user.id]
+      );
+    }
 
     if (lead.assigned_to) {
       await query(
