@@ -163,6 +163,10 @@ Be concise, action-oriented.`;
  * Market Intelligence — competitor & market analysis
  */
 const analyzeMarket = async ({ business_name, industry, product_service, target_geography, customer_type }) => {
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error('AI service not configured. Please set GROQ_API_KEY in your server environment.');
+  }
+
   const prompt = `You are a world-class market research analyst and business strategist with deep knowledge of global markets.
 
 Analyze the market for this business and provide a comprehensive, actionable report:
