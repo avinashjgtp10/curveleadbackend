@@ -159,4 +159,78 @@ Be concise, action-oriented.`;
   return result.content;
 };
 
-module.exports = { callGroq, scoreLead, qualifyLead, summarizeLead };
+/**
+ * Market Intelligence — competitor & market analysis
+ */
+const analyzeMarket = async ({ business_name, industry, product_service, target_geography, customer_type }) => {
+  const prompt = `You are a world-class market research analyst and business strategist with deep knowledge of global markets.
+
+Analyze the market for this business and provide a comprehensive, actionable report:
+
+Business: ${business_name}
+Industry: ${industry}
+Product/Service: ${product_service}
+Target Geography: ${target_geography || 'Global'}
+Customer Type: ${customer_type || 'SMBs and Enterprises'}
+
+Provide a detailed market analysis in this exact JSON format (no extra text, only valid JSON):
+{
+  "market_overview": {
+    "summary": "3-4 sentence overview of this market globally",
+    "estimated_size": "estimated global market size (e.g. $12B)",
+    "growth_rate": "annual growth rate (e.g. 14% CAGR)",
+    "maturity": "Emerging | Growing | Mature | Declining",
+    "key_trends": [
+      "trend 1 shaping this market",
+      "trend 2",
+      "trend 3",
+      "trend 4"
+    ]
+  },
+  "top_competitors": [
+    {
+      "name": "Competitor Name",
+      "origin": "Country",
+      "market_position": "Leader | Challenger | Niche",
+      "strengths": ["strength 1", "strength 2"],
+      "weaknesses": ["weakness 1", "weakness 2"],
+      "differentiator": "what makes them unique in one line"
+    }
+  ],
+  "opportunities": [
+    {
+      "title": "Opportunity title",
+      "description": "1-2 sentence explanation of this market opportunity"
+    }
+  ],
+  "threats": [
+    {
+      "title": "Threat title",
+      "description": "1-2 sentence explanation of this threat"
+    }
+  ],
+  "recommendations": [
+    {
+      "priority": "High | Medium",
+      "action": "Specific action to take",
+      "rationale": "Why this matters"
+    }
+  ],
+  "ideal_customer_profile": "Description of the ideal customer for this business in 2 sentences"
+}
+
+Include 5-8 real competitors, 4-5 opportunities, 3-4 threats, and 4-5 recommendations. Be specific and factual.`;
+
+  const result = await callGroq(
+    [{ role: 'user', content: prompt }],
+    { json: true, temperature: 0.4, maxTokens: 3000 }
+  );
+
+  try {
+    return JSON.parse(result.content);
+  } catch (e) {
+    throw new Error('Failed to parse market analysis response');
+  }
+};
+
+module.exports = { callGroq, scoreLead, qualifyLead, summarizeLead, analyzeMarket };

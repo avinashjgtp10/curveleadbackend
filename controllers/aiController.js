@@ -1,5 +1,5 @@
 const { query } = require('../config/db');
-const { scoreLead, qualifyLead, summarizeLead } = require('../services/groqService');
+const { scoreLead, qualifyLead, summarizeLead, analyzeMarket } = require('../services/groqService');
 
 // POST /api/ai/score-lead/:id - Score a single lead
 const scoreLeadById = async (req, res) => {
@@ -114,4 +114,25 @@ const testQualify = async (req, res) => {
   }
 };
 
-module.exports = { scoreLeadById, scoreBulkLeads, summarizeLeadById, testQualify };
+// POST /api/ai/market-analysis
+const runMarketAnalysis = async (req, res) => {
+  try {
+    const { business_name, industry, product_service, target_geography, customer_type } = req.body;
+    if (!industry || !product_service) {
+      return res.status(400).json({ error: 'industry and product_service are required.' });
+    }
+    const analysis = await analyzeMarket({
+      business_name: business_name || 'My Business',
+      industry,
+      product_service,
+      target_geography,
+      customer_type,
+    });
+    res.json({ analysis });
+  } catch (error) {
+    console.error('Market analysis error:', error);
+    res.status(500).json({ error: error.message || 'Failed to generate analysis.' });
+  }
+};
+
+module.exports = { scoreLeadById, scoreBulkLeads, summarizeLeadById, testQualify, runMarketAnalysis };
