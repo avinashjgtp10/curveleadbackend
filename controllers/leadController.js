@@ -700,4 +700,105 @@ const getStages = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete };
+// POST /api/leads/import  — bulk import from CSV or Excel
+const importLeads = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+
+    const XLSX = require('xlsx');
+    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+    if (!rows.length) return res.status(400).json({ error: 'File is empty.' });
+    if (rows.length > 2000) return res.status(400).json({ error: 'Max 2000 rows per import.' });
+
+    // Normalise header key → field name
+    const norm = (k) => String(k).toLowerCase().trim().replace(/[\s\-\/]+/g, '_').replace(/[^a-z0-9_]/g, '');
+    const FIELD_MAP = {
+      name:       ['name','full_name','customer_name','lead_name','contact_name','client_name'],
+      phone:      ['phone','mobile','contact','phone_number','mobile_number','cell','telephone','tel'],
+      email:      ['email','email_address','e_mail','mail'],
+      source:     ['source','lead_source','channel','medium'],
+      stage:      ['stage','status','lead_stage','pipeline_stage'],
+      notes:      ['notes','note','comment','comments','remarks','description','details'],
+      deal_value: ['deal_value','value','amount','deal_amount','price','budget','revenue'],
+      city:       ['city','location','area','region'],
+    };
+
+    const sampleKeys = Object.keys(rows[0]).map(norm);
+    const keyMap = {}; // normalized_header → field
+    for (const [field, aliases] of Object.entries(FIELD_MAP)) {
+      const match = Object.keys(rows[0]).find(k => aliases.includes(norm(k)));
+      if (match) keyMap[match] = field;
+    }
+
+    // Fetch valid stages for this tenant
+    const stagesResult = await query(
+      'SELECT LOWER(name) as name FROM lead_stages WHERE tenant_id = $1 AND is_active = true',
+      [req.tenantId]
+    );
+    const validStages = new Set(stagesResult.rows.map(s => s.name));
+
+    let inserted = 0, skipped = 0;
+    const errors = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const lead = {};
+      for (const [rawKey, field] of Object.entries(keyMap)) {
+        lead[field] = String(row[rawKey] ?? '').trim();
+      }
+
+      // Require at least name
+      if (!lead.name) { skipped++; continue; }
+
+      // Normalise phone — strip non-digits, allow leading +
+      if (lead.phone) lead.phone = lead.phone.replace(/[^\d+]/g, '').slice(0, 15);
+
+      // Validate/default stage
+      const stageInput = (lead.stage || '').toLowerCase().trim();
+      lead.stage = validStages.has(stageInput) ? stageInput : (validStages.has('new') ? 'new' : [...validStages][0] || 'new');
+
+      // Parse deal value
+      const dv = parseFloat(String(lead.deal_value).replace(/[^0-9.]/g, ''));
+      lead.deal_value = isNaN(dv) ? null : dv;
+
+      try {
+        await query(
+          `INSERT INTO leads (tenant_id, name, phone, email, source, stage, notes, deal_value, city, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT DO NOTHING`,
+          [
+            req.tenantId,
+            lead.name,
+            lead.phone || null,
+            lead.email || null,
+            lead.source || 'import',
+            lead.stage,
+            lead.notes || null,
+            lead.deal_value,
+            lead.city || null,
+            req.user.id,
+          ]
+        );
+        inserted++;
+      } catch (e) {
+        errors.push({ row: i + 2, name: lead.name, error: e.message });
+        skipped++;
+      }
+    }
+
+    res.json({
+      message: `Import complete: ${inserted} leads added, ${skipped} skipped.`,
+      inserted,
+      skipped,
+      errors: errors.slice(0, 20),
+    });
+  } catch (error) {
+    console.error('Import leads error:', error);
+    res.status(500).json({ error: error.message || 'Import failed.' });
+  }
+};
+
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads };
