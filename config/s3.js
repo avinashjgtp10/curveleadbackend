@@ -1,4 +1,5 @@
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { Readable } = require('stream');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const s3 = new S3Client({
@@ -38,4 +39,13 @@ const getPresignedUrl = async (fileUrl, expiresIn = 3600) => {
   return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn });
 };
 
-module.exports = { uploadToS3, deleteFromS3, getPresignedUrl };
+const downloadFromS3 = async (fileUrl) => {
+  const key = fileUrl.split('.amazonaws.com/')[1]?.split('?')[0];
+  if (!key) throw new Error('Invalid S3 URL');
+  const response = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+  const chunks = [];
+  for await (const chunk of response.Body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks);
+};
+
+module.exports = { uploadToS3, deleteFromS3, getPresignedUrl, downloadFromS3 };

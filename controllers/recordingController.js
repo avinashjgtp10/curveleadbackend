@@ -1,5 +1,5 @@
 const { query } = require('../config/db');
-const { uploadToS3, getPresignedUrl } = require('../config/s3');
+const { uploadToS3, getPresignedUrl, downloadFromS3 } = require('../config/s3');
 const { transcribeAudio, analyzeRecording } = require('../services/groqService');
 
 const GROQ_MAX_BYTES = 25 * 1024 * 1024; // 25 MB Groq Whisper limit
@@ -149,6 +149,37 @@ const getTeamRecordings = async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
 
+// POST /api/recordings/:id/retry
+const retryAnalysis = async (req, res) => {
+  try {
+    const result = await query(
+      'SELECT * FROM call_recordings WHERE id=$1 AND tenant_id=$2',
+      [req.params.id, req.tenantId]
+    );
+    const rec = result.rows[0];
+    if (!rec) return res.status(404).json({ error: 'Recording not found.' });
+    if (rec.analysis_status === 'processing') return res.status(409).json({ error: 'Already processing.' });
+    if (!rec.file_url) return res.status(400).json({ error: 'No file to re-analyze.' });
+
+    await query(`UPDATE call_recordings SET analysis_status='pending', analysis=NULL, transcription=NULL WHERE id=$1`, [rec.id]);
+    res.json({ message: 'Retry started.' });
+
+    // Async re-process
+    (async () => {
+      try {
+        const buffer = await downloadFromS3(rec.file_url);
+        await processRecording(rec.id, buffer, rec.file_name, rec.recording_type === 'video' ? 'video/mp4' : 'audio/mpeg', rec.tenant_id, rec.lead_id, rec.recording_type);
+      } catch (e) {
+        await query(`UPDATE call_recordings SET analysis_status='failed', analysis=$1 WHERE id=$2`,
+          [JSON.stringify({ error: e.message }), rec.id]).catch(() => {});
+      }
+    })();
+  } catch (e) {
+    console.error('Retry error:', e);
+    res.status(500).json({ error: 'Retry failed.' });
+  }
+};
+
 // DELETE /api/recordings/:id
 const deleteRecording = async (req, res) => {
   try {
@@ -162,4 +193,4 @@ const deleteRecording = async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { uploadRecording, getLeadRecordings, getTeamRecordings, deleteRecording };
+module.exports = { uploadRecording, getLeadRecordings, getTeamRecordings, deleteRecording, retryAnalysis };

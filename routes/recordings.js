@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { authenticate, adminOnly } = require('../middleware/auth');
-const { uploadRecording, getLeadRecordings, getTeamRecordings, deleteRecording } = require('../controllers/recordingController');
+const { uploadRecording, getLeadRecordings, getTeamRecordings, deleteRecording, retryAnalysis } = require('../controllers/recordingController');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -18,6 +18,7 @@ router.use(authenticate);
 
 router.get('/team', adminOnly, getTeamRecordings);
 
+router.post('/:id/retry', retryAnalysis);
 router.get('/:leadId', getLeadRecordings);
 router.post('/:leadId', upload.single('file'), uploadRecording);
 router.delete('/:id', deleteRecording);
