@@ -17,6 +17,9 @@ const PORT = process.env.PORT || 3002;
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
+// Trust Nginx reverse proxy (fixes express-rate-limit X-Forwarded-For warning)
+app.set('trust proxy', 1);
+
 // ============================================
 // Security middleware
 // ============================================
