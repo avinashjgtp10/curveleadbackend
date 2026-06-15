@@ -29,7 +29,7 @@ const upload = async (req, res) => {
       [req.tenantId, name, category, fileUrl, req.file.originalname, req.file.size, req.file.mimetype, req.user.id]
     );
     res.status(201).json({ brochure: result.rows[0] });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) { console.error('Brochure upload error:', e); res.status(500).json({ error: e.message || 'Failed.' }); }
 };
 
 const remove = async (req, res) => {
