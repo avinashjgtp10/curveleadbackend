@@ -237,4 +237,78 @@ Include 5-8 real competitors, 4-5 opportunities, 3-4 threats, and 4-5 recommenda
   }
 };
 
-module.exports = { callGroq, scoreLead, qualifyLead, summarizeLead, analyzeMarket };
+/**
+ * Transcribe audio/video using Groq Whisper
+ * buffer must be a Buffer, filename is the original file name
+ */
+const transcribeAudio = async (buffer, filename, mimetype) => {
+  if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY not set');
+
+  const FormData = require('form-data');
+  const form = new FormData();
+  form.append('file', buffer, { filename, contentType: mimetype });
+  form.append('model', 'whisper-large-v3');
+  form.append('response_format', 'text');
+
+  const response = await axios.post(
+    'https://api.groq.com/openai/v1/audio/transcriptions',
+    form,
+    {
+      headers: { ...form.getHeaders(), Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      timeout: 180000, // 3 min — long audio files take time
+      maxBodyLength: 26 * 1024 * 1024,
+      maxContentLength: 26 * 1024 * 1024,
+    }
+  );
+  return typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+};
+
+/**
+ * Analyze a call/demo transcript and score the pitch
+ */
+const analyzeRecording = async ({ transcription, recordingType, leadName, staffName }) => {
+  const prompt = `You are an expert sales coach reviewing a ${recordingType === 'video' ? 'demo recording' : 'sales call'} transcript.
+
+Rep: ${staffName || 'Unknown'}
+Lead: ${leadName || 'Unknown'}
+
+Transcript:
+"""
+${transcription.slice(0, 6000)}
+"""
+
+Analyze the transcript and respond ONLY with valid JSON:
+{
+  "overall_score": <number 1-10>,
+  "pitch_covered": ["element that was done", "another element"],
+  "pitch_missed": ["missed element", "another missed element"],
+  "strengths": ["specific strength observed in this call"],
+  "improvements": ["specific, actionable improvement"],
+  "customer_sentiment": "positive | neutral | negative | unclear",
+  "summary": "2-3 sentence summary of what happened in this call",
+  "next_action": "specific recommended next step for this lead"
+}
+
+Evaluate against these pitch elements:
+- Proper greeting & rapport building
+- Understanding customer needs (discovery questions)
+- Product / service introduction
+- Key features & benefits explained
+- Pricing or budget discussion
+- Handling objections
+- Social proof or testimonials mentioned
+- Clear call-to-action or next steps agreed`;
+
+  const result = await callGroq(
+    [{ role: 'user', content: prompt }],
+    { json: true, temperature: 0.3, maxTokens: 1000 }
+  );
+
+  try {
+    return JSON.parse(result.content);
+  } catch {
+    throw new Error('Could not parse analysis response');
+  }
+};
+
+module.exports = { callGroq, scoreLead, qualifyLead, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording };

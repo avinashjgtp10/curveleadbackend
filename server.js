@@ -97,6 +97,7 @@ app.use('/api/brochures', apiLimiter, require('./routes/brochures'));
 app.use('/api/quotations', apiLimiter, require('./routes/quotations'));
 app.use('/api/templates', apiLimiter, require('./routes/templates'));
 app.use('/api/notifications', apiLimiter, require('./routes/notifications'));
+app.use('/api/recordings', apiLimiter, require('./routes/recordings'));
 
 // ============================================
 // 404 handler
