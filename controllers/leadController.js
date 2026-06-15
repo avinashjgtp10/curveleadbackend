@@ -273,10 +273,15 @@ const addFollowup = async (req, res) => {
       ).catch(() => {});
     }
 
+    const isDemo = (followup_type || '').toLowerCase() === 'demo';
     await query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
-       VALUES ($1, $2, 'followup_scheduled', 'Follow-up Scheduled', $3, $4)`,
-      [req.tenantId, req.params.id, `Scheduled for ${new Date(next_followup_at).toLocaleString('en-IN')}`, req.user.id]
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [req.tenantId, req.params.id,
+       isDemo ? 'demo_scheduled' : 'followup_scheduled',
+       isDemo ? 'Demo Scheduled' : 'Follow-up Scheduled',
+       `Scheduled for ${new Date(next_followup_at).toLocaleString('en-IN')}`,
+       req.user.id]
     );
 
     res.status(201).json({ followup: result.rows[0] });

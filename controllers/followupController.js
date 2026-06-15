@@ -71,17 +71,49 @@ const completeFollowup = async (req, res) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Followup not found.' });
 
-    await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [result.rows[0].lead_id]);
-    res.json({ followup: result.rows[0] });
+    const f = result.rows[0];
+    const isDemo = f.followup_type === 'demo';
+
+    await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [f.lead_id]);
+
+    query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [req.tenantId, f.lead_id,
+       isDemo ? 'demo_completed' : 'followup_completed',
+       isDemo ? 'Demo Completed' : 'Follow-up Done',
+       outcome ? `Outcome: ${outcome}` : (isDemo ? 'Demo marked as completed' : 'Follow-up marked as done'),
+       req.user.id]
+    ).catch(() => {});
+
+    res.json({ followup: f });
   } catch (error) { console.error('Complete followup error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // DELETE /api/followups/:id
 const deleteFollowup = async (req, res) => {
   try {
-    const result = await query('DELETE FROM lead_followups WHERE id = $1 AND tenant_id = $2 RETURNING id',
-      [req.params.id, req.tenantId]);
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Followup not found.' });
+    const existing = await query(
+      'SELECT lead_id, followup_type, next_followup_at FROM lead_followups WHERE id = $1 AND tenant_id = $2',
+      [req.params.id, req.tenantId]
+    );
+    if (existing.rows.length === 0) return res.status(404).json({ error: 'Followup not found.' });
+
+    const f = existing.rows[0];
+    const isDemo = f.followup_type === 'demo';
+
+    await query('DELETE FROM lead_followups WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+
+    query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [req.tenantId, f.lead_id,
+       isDemo ? 'demo_cancelled' : 'followup_cancelled',
+       isDemo ? 'Demo Cancelled' : 'Follow-up Cancelled',
+       `Was scheduled for ${new Date(f.next_followup_at).toLocaleString('en-IN')}`,
+       req.user.id]
+    ).catch(() => {});
+
     res.json({ message: 'Deleted.' });
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
