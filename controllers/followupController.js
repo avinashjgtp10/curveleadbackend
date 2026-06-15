@@ -3,7 +3,7 @@ const { query } = require('../config/db');
 // GET /api/followups - Get all followups with pagination
 const getFollowups = async (req, res) => {
   try {
-    const { status, lead_id, page = 1, limit = 15 } = req.query;
+    const { status, lead_id, type, page = 1, limit = 15 } = req.query;
     const offset = (page - 1) * limit;
     let where = 'WHERE f.tenant_id = $1';
     const params = [req.tenantId];
@@ -20,6 +20,7 @@ const getFollowups = async (req, res) => {
     }
 
     if (lead_id) { where += ` AND f.lead_id = $${i++}`; params.push(lead_id); }
+    if (type)    { where += ` AND f.followup_type = $${i++}`; params.push(type); }
 
     const [result, countResult] = await Promise.all([
       query(
