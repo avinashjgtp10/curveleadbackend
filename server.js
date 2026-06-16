@@ -101,6 +101,8 @@ app.use('/api/quotations', apiLimiter, require('./routes/quotations'));
 app.use('/api/templates', apiLimiter, require('./routes/templates'));
 app.use('/api/notifications', apiLimiter, require('./routes/notifications'));
 app.use('/api/recordings', apiLimiter, require('./routes/recordings'));
+app.use('/api/ai-calling', apiLimiter, require('./routes/aiCalling'));
+app.use('/api/playbook', apiLimiter, require('./routes/playbook'));
 
 // ============================================
 // 404 handler
@@ -130,6 +132,11 @@ app.listen(PORT, () => {
   const { runFollowupReminder } = require('./jobs/followupReminder');
   setTimeout(runFollowupReminder, 15 * 1000);          // first run 15s after boot
   setInterval(runFollowupReminder, 15 * 60 * 1000);    // then every 15 min
+
+  // Sales playbook generation — batch job, run daily (not time-sensitive)
+  const { runPlaybookGeneration } = require('./jobs/playbookGenerator');
+  setTimeout(runPlaybookGeneration, 60 * 1000);            // first run 60s after boot
+  setInterval(runPlaybookGeneration, 24 * 60 * 60 * 1000); // then every 24h
 });
 
 // Graceful shutdown

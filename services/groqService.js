@@ -311,4 +311,47 @@ Evaluate against these pitch elements:
   }
 };
 
-module.exports = { callGroq, scoreLead, qualifyLead, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording };
+/**
+ * Synthesize a sales playbook from a batch of already-analyzed call summaries,
+ * split by outcome (won vs lost lead). Operates on compact per-call analysis
+ * objects (not raw transcripts) to keep this cheap regardless of call volume.
+ */
+const generatePlaybook = async ({ wonSummaries, lostSummaries }) => {
+  const fmt = (list) => list.map((c, i) => `${i + 1}. Score: ${c.overall_score ?? '?'}/10 | Sentiment: ${c.customer_sentiment || 'unknown'}
+   Summary: ${c.summary || '—'}
+   Covered: ${(c.pitch_covered || []).join('; ') || '—'}
+   Missed: ${(c.pitch_missed || []).join('; ') || '—'}`).join('\n');
+
+  const prompt = `You are an expert sales coach analyzing a batch of past sales call summaries to build a playbook for both an AI calling agent and a human sales team.
+
+Calls from leads that WERE WON (converted):
+"""
+${fmt(wonSummaries) || 'None available.'}
+"""
+
+Calls from leads that WERE LOST:
+"""
+${fmt(lostSummaries) || 'None available.'}
+"""
+
+Compare the two groups and identify what separates a won call from a lost one. Respond ONLY with valid JSON:
+{
+  "best_practices": ["specific, actionable practice that shows up in won calls"],
+  "common_objections": [{ "objection": "objection seen in lost calls", "recommended_response": "how to handle it, based on what worked in won calls" }],
+  "phrases_that_work": ["short phrase or technique correlated with won calls"],
+  "phrases_to_avoid": ["pattern correlated with lost calls"]
+}`;
+
+  const result = await callGroq(
+    [{ role: 'user', content: prompt }],
+    { json: true, temperature: 0.3, maxTokens: 1200 }
+  );
+
+  try {
+    return JSON.parse(result.content);
+  } catch {
+    throw new Error('Could not parse playbook response');
+  }
+};
+
+module.exports = { callGroq, scoreLead, qualifyLead, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };

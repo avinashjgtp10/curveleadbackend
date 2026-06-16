@@ -3,7 +3,7 @@ const { query, transaction } = require('../config/db');
 // GET /api/leads - with filters
 const getLeads = async (req, res) => {
   try {
-    const { stage, source, score, assigned_to, search, date_from, date_to, page = 1, limit = 20 } = req.query;
+    const { stage, source, score, assigned_to, search, date_field, date_from, date_to, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -28,8 +28,9 @@ const getLeads = async (req, res) => {
       params.push(`%${search}%`);
       i++;
     }
-    if (date_from) { whereClause += ` AND COALESCE(l.lead_date, l.created_at) >= $${i++}`; params.push(date_from); }
-    if (date_to) { whereClause += ` AND COALESCE(l.lead_date, l.created_at) < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
+    const dateColumn = date_field === 'created_at' ? 'l.created_at' : 'COALESCE(l.lead_date, l.created_at)';
+    if (date_from) { whereClause += ` AND ${dateColumn} >= $${i++}`; params.push(date_from); }
+    if (date_to) { whereClause += ` AND ${dateColumn} < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
 
     const limitParam = i++;
     const offsetParam = i;
@@ -120,7 +121,7 @@ const createLead = async (req, res) => {
   try {
     const {
       name, phone, email, location, source, source_detail, campaign_id,
-      stage, notes, deal_value, expected_close_date, tags,
+      stage, notes, deal_value, expected_close_date, tags, lead_date,
     } = req.body;
 
     // Staff leads are always assigned to themselves
@@ -139,11 +140,11 @@ const createLead = async (req, res) => {
 
     const result = await query(
       `INSERT INTO leads (tenant_id, name, phone, email, location, source, source_detail, campaign_id,
-                          stage, assigned_to, notes, deal_value, expected_close_date, tags)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                          stage, assigned_to, notes, deal_value, expected_close_date, tags, lead_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING *`,
       [req.tenantId, name, phone, email, location, source || 'manual', source_detail, campaign_id,
-       stage || 'new', assigned_to, notes, deal_value || 0, expected_close_date, tags]
+       stage || 'new', assigned_to, notes, deal_value || 0, expected_close_date, tags, lead_date || new Date()]
     );
 
     // Log activity
@@ -166,7 +167,7 @@ const updateLead = async (req, res) => {
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'source', 'source_detail', 'campaign_id',
       'stage', 'assigned_to', 'notes', 'deal_value', 'expected_close_date', 'tags',
-      'lead_score', 'score_reason', 'won_lost_reason',
+      'lead_score', 'score_reason', 'won_lost_reason', 'lead_date',
     ];
 
     const updates = [];
@@ -772,6 +773,7 @@ const importLeads = async (req, res) => {
       notes:      ['notes','note','comment','comments','remarks','description','details'],
       deal_value: ['deal_value','value','amount','deal_amount','price','budget','revenue'],
       city:       ['city','location','area','region'],
+      lead_date:  ['lead_date','lead_datetime','lead_time','date','created_date','enquiry_date'],
     };
 
     const sampleKeys = Object.keys(rows[0]).map(norm);
@@ -790,19 +792,27 @@ const importLeads = async (req, res) => {
 
     let inserted = 0, skipped = 0;
     const errors = [];
+    const skipReasons = [];
+
+    const addSkip = (row, name, reason) => {
+      skipped++;
+      skipReasons.push({ row, name: name || '', reason });
+    };
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
+      const rowNumber = i + 2;
       const lead = {};
       for (const [rawKey, field] of Object.entries(keyMap)) {
         lead[field] = String(row[rawKey] ?? '').trim();
       }
 
       // Require at least name
-      if (!lead.name) { skipped++; continue; }
+      if (!lead.name) { addSkip(rowNumber, '', 'Missing name'); continue; }
 
       // Normalise phone — strip non-digits, allow leading +
       if (lead.phone) lead.phone = lead.phone.replace(/[^\d+]/g, '').slice(0, 15);
+      if (!lead.phone) { addSkip(rowNumber, lead.name, 'Missing phone'); continue; }
 
       // Validate/default stage
       const stageInput = (lead.stage || '').toLowerCase().trim();
@@ -813,14 +823,15 @@ const importLeads = async (req, res) => {
       lead.deal_value = isNaN(dv) ? null : dv;
 
       try {
-        await query(
-          `INSERT INTO leads (tenant_id, name, phone, email, source, stage, notes, deal_value, city, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-           ON CONFLICT DO NOTHING`,
+        const insertResult = await query(
+          `INSERT INTO leads (tenant_id, name, phone, email, source, stage, notes, deal_value, city, created_by, lead_date)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+           ON CONFLICT DO NOTHING
+           RETURNING id`,
           [
             req.tenantId,
             lead.name,
-            lead.phone || null,
+            lead.phone,
             lead.email || null,
             lead.source || 'import',
             lead.stage,
@@ -828,11 +839,13 @@ const importLeads = async (req, res) => {
             lead.deal_value,
             lead.city || null,
             req.user.id,
+            lead.lead_date || new Date(),
           ]
         );
-        inserted++;
+        if (insertResult.rowCount > 0) inserted++;
+        else addSkip(rowNumber, lead.name, `Duplicate phone: ${lead.phone}`);
       } catch (e) {
-        errors.push({ row: i + 2, name: lead.name, error: e.message });
+        errors.push({ row: rowNumber, name: lead.name, error: e.message });
         skipped++;
       }
     }
@@ -842,6 +855,7 @@ const importLeads = async (req, res) => {
       inserted,
       skipped,
       errors: errors.slice(0, 20),
+      skip_reasons: skipReasons.slice(0, 20),
     });
   } catch (error) {
     console.error('Import leads error:', error);
