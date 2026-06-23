@@ -195,10 +195,69 @@ const facebookConnectPage = async (req, res) => {
     const current = result.rows[0]?.settings || {};
     const updated = { ...current, meta_page_id: page_id, meta_page_access_token: page_access_token, meta_page_name: page_name };
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
-    res.json({ message: `Connected to "${page_name}"` });
+
+    // Auto-subscribe page to webhook so real-time leads start flowing
+    let webhookStatus = 'not_subscribed';
+    try {
+      const subRes = await fetch(
+        `${GRAPH}/${page_id}/subscribed_apps?access_token=${encodeURIComponent(page_access_token)}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subscribed_fields: ['leadgen'] }) }
+      );
+      const subData = await subRes.json();
+      if (subData.success) webhookStatus = 'subscribed';
+      else console.warn('Webhook subscription warning:', subData);
+    } catch (subErr) {
+      console.warn('Could not auto-subscribe to webhook:', subErr.message);
+    }
+
+    res.json({ message: `Connected to "${page_name}"`, webhook_status: webhookStatus });
   } catch (e) {
     console.error('facebookConnectPage:', e.message);
     res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// ── POST /api/integrations/facebook/subscribe-webhook ─────────────────────
+const facebookSubscribeWebhook = async (req, res) => {
+  try {
+    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const settings = result.rows[0]?.settings || {};
+    const { meta_page_id, meta_page_access_token } = settings;
+    if (!meta_page_id || !meta_page_access_token) return res.status(400).json({ error: 'Connect a Facebook page first.' });
+
+    const subRes = await fetch(
+      `${GRAPH}/${meta_page_id}/subscribed_apps?access_token=${encodeURIComponent(meta_page_access_token)}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subscribed_fields: ['leadgen'] }) }
+    );
+    const subData = await subRes.json();
+
+    if (subData.success) {
+      res.json({ message: 'Webhook subscribed — real-time leads are now active.', subscribed: true });
+    } else {
+      res.status(400).json({ error: subData.error?.message || 'Subscription failed.', detail: subData });
+    }
+  } catch (e) {
+    console.error('facebookSubscribeWebhook:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+};
+
+// ── GET /api/integrations/facebook/subscription-status ────────────────────
+const facebookSubscriptionStatus = async (req, res) => {
+  try {
+    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const settings = result.rows[0]?.settings || {};
+    const { meta_page_id, meta_page_access_token } = settings;
+    if (!meta_page_id || !meta_page_access_token) return res.json({ subscribed: false, reason: 'no_page_connected' });
+
+    const data = await fbGet(`/${meta_page_id}/subscribed_apps?access_token=${encodeURIComponent(meta_page_access_token)}`);
+    const app = (data.data || []).find(a => a.id === process.env.META_APP_ID);
+    const subscribed = !!(app && (app.subscribed_fields || []).includes('leadgen'));
+
+    res.json({ subscribed, page_id: meta_page_id, page_name: settings.meta_page_name || '', subscribed_fields: app?.subscribed_fields || [] });
+  } catch (e) {
+    console.error('facebookSubscriptionStatus:', e.message);
+    res.status(500).json({ error: e.message });
   }
 };
 
@@ -248,4 +307,4 @@ const facebookSyncLeads = async (req, res) => {
   }
 };
 
-module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads };
+module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus };

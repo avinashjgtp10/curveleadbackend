@@ -16,7 +16,7 @@ const verifyWebhook = (req, res) => {
 
 // POST /api/webhook/meta - Receive lead from Meta Ads
 const receiveLeadFormWebhook = async (req, res) => {
-  res.sendStatus(200); // Always 200 OK
+  res.sendStatus(200); // Always respond 200 first
 
   try {
     const entry = req.body.entry?.[0];
@@ -29,12 +29,29 @@ const receiveLeadFormWebhook = async (req, res) => {
       const pageId = change.value.page_id;
       const adId = change.value.ad_id;
 
-      // Fetch lead details from Meta
+      // Find tenant by page_id and get their stored access token
+      const tenantResult = await query(
+        `SELECT id, settings->>'meta_page_access_token' AS page_access_token
+         FROM tenants WHERE settings->>'meta_page_id' = $1 LIMIT 1`,
+        [pageId]
+      );
+      const tenant = tenantResult.rows[0];
+      if (!tenant) {
+        console.warn(`No tenant found for Meta page ${pageId}`);
+        continue;
+      }
+
+      if (!tenant.page_access_token) {
+        console.warn(`Tenant ${tenant.id} has no page access token for page ${pageId}`);
+        continue;
+      }
+
+      // Fetch lead details using the tenant's page access token
       let leadData;
       try {
         const response = await axios.get(
-          `https://graph.facebook.com/v18.0/${leadgenId}`,
-          { params: { access_token: process.env.META_PAGE_ACCESS_TOKEN } }
+          `https://graph.facebook.com/v19.0/${leadgenId}`,
+          { params: { access_token: tenant.page_access_token } }
         );
         leadData = response.data;
       } catch (e) {
@@ -48,36 +65,27 @@ const receiveLeadFormWebhook = async (req, res) => {
         fields[f.name] = f.values?.[0];
       });
 
-      // Find tenant by page_id (stored in settings) - simplified: use first tenant for now
-      const tenantResult = await query(
-        `SELECT id FROM tenants WHERE settings->>'meta_page_id' = $1 LIMIT 1`,
-        [pageId]
-      );
-      const tenantId = tenantResult.rows[0]?.id;
-      if (!tenantId) {
-        console.warn(`No tenant found for Meta page ${pageId}`);
-        continue;
-      }
-
       // Try to match campaign by ad_id
       const campaignResult = await query(
         `SELECT id FROM campaigns WHERE tenant_id = $1 AND (utm_campaign = $2 OR description LIKE $3) LIMIT 1`,
-        [tenantId, adId, `%${adId}%`]
+        [tenant.id, adId, `%${adId}%`]
       );
       const campaignId = campaignResult.rows[0]?.id;
 
-      // Create lead
       const phone = fields.phone_number || fields.phone || '';
       const name = fields.full_name || `${fields.first_name || ''} ${fields.last_name || ''}`.trim();
       const email = fields.email || '';
 
       if (!phone) {
-        console.warn('No phone in Meta lead, skipping');
+        console.warn(`No phone in Meta lead ${leadgenId}, skipping`);
         continue;
       }
 
-      // Check duplicate
-      const existing = await query('SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2', [tenantId, phone]);
+      // Check duplicate by meta_lead_id first, then phone
+      const existing = await query(
+        'SELECT id FROM leads WHERE tenant_id = $1 AND (meta_lead_id = $2 OR phone = $3)',
+        [tenant.id, leadgenId, phone]
+      );
       if (existing.rows.length > 0) {
         console.log(`Duplicate lead skipped: ${phone}`);
         continue;
@@ -86,10 +94,10 @@ const receiveLeadFormWebhook = async (req, res) => {
       await query(
         `INSERT INTO leads (tenant_id, name, phone, email, source, source_detail, campaign_id, meta_lead_id, stage)
          VALUES ($1, $2, $3, $4, 'meta_ads', $5, $6, $7, 'new')`,
-        [tenantId, name || 'Unknown', phone, email, `Ad: ${adId}`, campaignId, leadgenId]
+        [tenant.id, name || 'Unknown', phone, email || null, `Ad: ${adId}`, campaignId || null, leadgenId]
       );
 
-      console.log(`✅ Lead captured from Meta: ${name} (${phone})`);
+      console.log(`✅ Lead captured from Meta: ${name} (${phone}) for tenant ${tenant.id}`);
     }
   } catch (error) {
     console.error('Meta webhook error:', error);

@@ -167,7 +167,7 @@ const updateLead = async (req, res) => {
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'source', 'source_detail', 'campaign_id',
       'stage', 'assigned_to', 'notes', 'deal_value', 'expected_close_date', 'tags',
-      'lead_score', 'score_reason', 'won_lost_reason', 'lead_date',
+      'lead_score', 'score_reason', 'lost_reason', 'lead_date',
     ];
 
     const updates = [];
@@ -824,8 +824,8 @@ const importLeads = async (req, res) => {
 
       try {
         const insertResult = await query(
-          `INSERT INTO leads (tenant_id, name, phone, email, source, stage, notes, deal_value, city, created_by, lead_date)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          `INSERT INTO leads (tenant_id, name, phone, email, source, stage, notes, deal_value, location, lead_date)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
            ON CONFLICT DO NOTHING
            RETURNING id`,
           [
@@ -838,7 +838,6 @@ const importLeads = async (req, res) => {
             lead.notes || null,
             lead.deal_value,
             lead.city || null,
-            req.user.id,
             lead.lead_date || new Date(),
           ]
         );
@@ -863,4 +862,4 @@ const importLeads = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate };
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate, getLeadStats };

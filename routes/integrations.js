@@ -19,5 +19,7 @@ router.get('/embed-script', ctrl.getEmbedScript);
 router.post('/facebook/auth', ctrl.facebookAuth);
 router.post('/facebook/connect-page', ctrl.facebookConnectPage);
 router.post('/facebook/sync-leads', ctrl.facebookSyncLeads);
+router.post('/facebook/subscribe-webhook', ctrl.facebookSubscribeWebhook);
+router.get('/facebook/subscription-status', ctrl.facebookSubscriptionStatus);
 
 module.exports = router;

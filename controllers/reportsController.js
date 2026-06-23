@@ -4,24 +4,28 @@ const { query } = require('../config/db');
 const getConversionReport = async (req, res) => {
   try {
     const { date_from, date_to } = req.query;
+    const isStaff = req.user.role === 'staff';
+    const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
+    const sc = isStaff ? ' AND assigned_to = $2' : '';
+
     let dateFilter = '';
-    const params = [req.tenantId];
+    const dateParamBase = params.length + 1;
+    const extraParams = [];
 
     if (date_from) {
-      dateFilter += ` AND created_at >= $${params.length + 1}`;
-      params.push(date_from);
+      dateFilter += ` AND created_at >= $${dateParamBase + extraParams.length}`;
+      extraParams.push(date_from);
     }
     if (date_to) {
-      dateFilter += ` AND created_at <= $${params.length + 1}::date + INTERVAL '1 day'`;
-      params.push(date_to);
+      dateFilter += ` AND created_at <= $${dateParamBase + extraParams.length}::date + INTERVAL '1 day'`;
+      extraParams.push(date_to);
     }
 
-    // Stage breakdown
     const stages = await query(
       `SELECT stage, COUNT(*) as count, COALESCE(SUM(deal_value), 0) as value
-       FROM leads WHERE tenant_id = $1 ${dateFilter}
+       FROM leads WHERE tenant_id = $1${sc} ${dateFilter}
        GROUP BY stage ORDER BY count DESC`,
-      params
+      [...params, ...extraParams]
     );
 
     const total = stages.rows.reduce((sum, s) => sum + parseInt(s.count), 0);
@@ -48,14 +52,18 @@ const getConversionReport = async (req, res) => {
 // GET /api/reports/by-source - Conversion by lead source
 const getReportBySource = async (req, res) => {
   try {
+    const isStaff = req.user.role === 'staff';
+    const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
+    const sc = isStaff ? ' AND assigned_to = $2' : '';
+
     const result = await query(
       `SELECT source,
               COUNT(*) as total_leads,
               COUNT(*) FILTER (WHERE stage = 'won') as won,
               COUNT(*) FILTER (WHERE stage = 'lost') as lost,
               COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as revenue
-       FROM leads WHERE tenant_id = $1 GROUP BY source ORDER BY total_leads DESC`,
-      [req.tenantId]
+       FROM leads WHERE tenant_id = $1${sc} GROUP BY source ORDER BY total_leads DESC`,
+      params
     );
 
     const sources = result.rows.map(s => ({
@@ -72,9 +80,14 @@ const getReportBySource = async (req, res) => {
   }
 };
 
-// GET /api/reports/by-staff - Conversion by team member
+// GET /api/reports/by-staff - Conversion by team member (admin sees all; staff sees only self)
 const getReportByStaff = async (req, res) => {
   try {
+    const isStaff = req.user.role === 'staff';
+    const params = [req.tenantId];
+    const userFilter = isStaff ? ' AND u.id = $2' : '';
+    if (isStaff) params.push(req.user.id);
+
     const result = await query(
       `SELECT u.id, u.name, u.email,
               COUNT(l.id) as total_leads,
@@ -84,10 +97,10 @@ const getReportByStaff = async (req, res) => {
               (SELECT COUNT(*) FROM followups WHERE assigned_to = u.id AND completed = false) as pending_followups
        FROM users u
        LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = u.tenant_id
-       WHERE u.tenant_id = $1 AND u.is_active = true
+       WHERE u.tenant_id = $1 AND u.is_active = true${userFilter}
        GROUP BY u.id, u.name, u.email
        ORDER BY revenue DESC`,
-      [req.tenantId]
+      params
     );
 
     const staff = result.rows.map(s => ({
@@ -107,17 +120,21 @@ const getReportByStaff = async (req, res) => {
 // GET /api/reports/by-campaign - Campaign ROI
 const getReportByCampaign = async (req, res) => {
   try {
+    const isStaff = req.user.role === 'staff';
+    const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
+    const staffJoin = isStaff ? ' AND l.assigned_to = $2' : '';
+
     const result = await query(
       `SELECT c.id, c.name, c.source, c.budget, c.actual_spend, c.status,
               COUNT(l.id) as total_leads,
               COUNT(l.id) FILTER (WHERE l.stage = 'won') as won,
               COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won'), 0) as revenue
        FROM campaigns c
-       LEFT JOIN leads l ON l.campaign_id = c.id
+       LEFT JOIN leads l ON l.campaign_id = c.id${staffJoin}
        WHERE c.tenant_id = $1
        GROUP BY c.id
        ORDER BY revenue DESC`,
-      [req.tenantId]
+      params
     );
 
     const campaigns = result.rows.map(c => {
@@ -146,6 +163,9 @@ const getTimeline = async (req, res) => {
   try {
     const { period = 'daily', days = 30 } = req.query;
     const truncFormat = period === 'monthly' ? 'month' : period === 'weekly' ? 'week' : 'day';
+    const isStaff = req.user.role === 'staff';
+    const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
+    const sc = isStaff ? ' AND assigned_to = $2' : '';
 
     const result = await query(
       `SELECT DATE_TRUNC('${truncFormat}', created_at) as period,
@@ -153,9 +173,9 @@ const getTimeline = async (req, res) => {
               COUNT(*) FILTER (WHERE stage = 'won') as won,
               COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as revenue
        FROM leads
-       WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'
+       WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'${sc}
        GROUP BY period ORDER BY period ASC`,
-      [req.tenantId]
+      params
     );
 
     res.json({ timeline: result.rows });
@@ -168,6 +188,13 @@ const getTimeline = async (req, res) => {
 const getDashboardSummary = async (req, res) => {
   try {
     const tid = req.tenantId;
+    const isStaff = req.user.role === 'staff';
+    const uid = req.user.id;
+    const baseParams = isStaff ? [tid, uid] : [tid];
+    const sc = isStaff ? ' AND assigned_to = $2' : '';
+    const sfc = isStaff
+      ? ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)'
+      : '';
 
     const [summary, followupStats, pipeline, sources, team, recentLeads, trend] = await Promise.all([
 
@@ -196,8 +223,8 @@ const getDashboardSummary = async (req, res) => {
             AND won_at < DATE_TRUNC('month', NOW())), 0) as revenue_last_month,
           COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
                            AND created_at < DATE_TRUNC('month', NOW())) as _leads_lm
-        FROM leads WHERE tenant_id = $1
-      `, [tid]),
+        FROM leads WHERE tenant_id = $1${sc}
+      `, baseParams),
 
       // Today's action items from lead_followups
       query(`
@@ -205,8 +232,8 @@ const getDashboardSummary = async (req, res) => {
           COUNT(*) FILTER (WHERE DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as today,
           COUNT(*) FILTER (WHERE next_followup_at < NOW() AND is_completed = false) as overdue,
           COUNT(*) FILTER (WHERE followup_type = 'demo' AND DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as demos_today
-        FROM lead_followups WHERE tenant_id = $1
-      `, [tid]),
+        FROM lead_followups WHERE tenant_id = $1${sfc}
+      `, baseParams),
 
       // Pipeline: leads per stage
       query(`
@@ -214,11 +241,11 @@ const getDashboardSummary = async (req, res) => {
                COUNT(l.id) as count,
                COALESCE(SUM(l.deal_value), 0) as pipeline_value
         FROM lead_stages ls
-        LEFT JOIN leads l ON LOWER(l.stage) = LOWER(ls.name) AND l.tenant_id = ls.tenant_id
+        LEFT JOIN leads l ON LOWER(l.stage) = LOWER(ls.name) AND l.tenant_id = ls.tenant_id${isStaff ? ' AND l.assigned_to = $2' : ''}
         WHERE ls.tenant_id = $1 AND ls.is_active = true
         GROUP BY ls.id, ls.name, ls.color, ls.pos, ls.is_won, ls.is_lost
         ORDER BY ls.pos ASC
-      `, [tid]),
+      `, baseParams),
 
       // Lead sources — top 6
       query(`
@@ -227,37 +254,51 @@ const getDashboardSummary = async (req, res) => {
           COUNT(*) as total,
           COUNT(*) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won
-        FROM leads WHERE tenant_id = $1
+        FROM leads WHERE tenant_id = $1${sc}
         GROUP BY source ORDER BY total DESC LIMIT 6
-      `, [tid]),
+      `, baseParams),
 
-      // Team performance
-      query(`
-        SELECT
-          u.name,
-          COUNT(l.id) as total_leads,
-          COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
-            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
-          COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
-            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue
-        FROM users u
-        LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
-        WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin', 'staff')
-        GROUP BY u.id, u.name ORDER BY won DESC, total_leads DESC LIMIT 8
-      `, [tid]),
+      // Team performance — admin sees all; staff sees only themselves
+      isStaff
+        ? query(`
+            SELECT
+              u.name,
+              COUNT(l.id) as total_leads,
+              COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
+                SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
+              COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
+                SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue
+            FROM users u
+            LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
+            WHERE u.tenant_id = $1 AND u.id = $2
+            GROUP BY u.id, u.name
+          `, baseParams)
+        : query(`
+            SELECT
+              u.name,
+              COUNT(l.id) as total_leads,
+              COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
+                SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
+              COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
+                SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue
+            FROM users u
+            LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
+            WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin', 'staff')
+            GROUP BY u.id, u.name ORDER BY won DESC, total_leads DESC LIMIT 8
+          `, [tid]),
 
       // Recent 6 leads
       query(`
         SELECT id, name, phone, source, lead_score, stage, created_at
-        FROM leads WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 6
-      `, [tid]),
+        FROM leads WHERE tenant_id = $1${sc} ORDER BY created_at DESC LIMIT 6
+      `, baseParams),
 
       // Last 14-day trend
       query(`
         SELECT DATE_TRUNC('day', created_at) as day, COUNT(*) as count
-        FROM leads WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '14 days'
+        FROM leads WHERE tenant_id = $1${sc} AND created_at >= NOW() - INTERVAL '14 days'
         GROUP BY day ORDER BY day ASC
-      `, [tid]),
+      `, baseParams),
     ]);
 
     const s = summary.rows[0];

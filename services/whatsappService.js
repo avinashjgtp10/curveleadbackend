@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const META_API_URL = 'https://graph.facebook.com/v18.0';
+const META_API_URL = 'https://graph.facebook.com/v21.0';
 
 /**
  * Send WhatsApp text message
