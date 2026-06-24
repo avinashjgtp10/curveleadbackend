@@ -4,29 +4,40 @@ const { query } = require('../config/db');
 const getSettings = async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, name, email, phone, business_type, logo_url, address,
+      `SELECT id, name, email, phone, business_type, logo_url, address, city, state,
+              gst_number, pan_number, website,
+              settings,
               subscription_status, trial_ends_at, subscription_start, subscription_end
        FROM tenants WHERE id = $1`,
       [req.tenantId]
     );
-    res.json({ settings: result.rows[0] });
+    const row = result.rows[0];
+    // Merge top-level bank_details from settings JSONB for convenience
+    res.json({ settings: { ...row, bank_details: row?.settings?.bank_details || {} } });
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
 
 // PUT /api/settings
 const updateSettings = async (req, res) => {
   try {
-    const { name, email, phone, business_type, logo_url, address } = req.body;
+    const { name, email, phone, business_type, logo_url, address, city, state,
+            gst_number, pan_number, website, bank_details } = req.body;
     const updates = [];
     const params = [req.tenantId];
     let i = 2;
 
-    const fields = { name, email, phone, business_type, logo_url, address };
+    const fields = { name, email, phone, business_type, logo_url, address, city, state, gst_number, pan_number, website };
     for (const [key, value] of Object.entries(fields)) {
       if (value !== undefined) {
         updates.push(`${key} = $${i++}`);
         params.push(value);
       }
+    }
+
+    // Store bank_details inside the settings JSONB column
+    if (bank_details !== undefined) {
+      updates.push(`settings = settings || $${i++}`);
+      params.push(JSON.stringify({ bank_details }));
     }
 
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
@@ -36,7 +47,8 @@ const updateSettings = async (req, res) => {
       `UPDATE tenants SET ${updates.join(', ')} WHERE id = $1 RETURNING *`,
       params
     );
-    res.json({ settings: result.rows[0] });
+    const row = result.rows[0];
+    res.json({ settings: { ...row, bank_details: row?.settings?.bank_details || {} } });
   } catch (error) { console.error('Update settings error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 

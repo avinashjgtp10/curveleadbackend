@@ -4,8 +4,9 @@ const ctrl = require('../controllers/quotationController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 
-// Public — no auth required (lead-facing view link)
+// Public — no auth required
 router.get('/public/:id', ctrl.getPublic);
+router.get('/pdf/:id', ctrl.getPdf);
 
 router.use(authenticate, tenantContext);
 

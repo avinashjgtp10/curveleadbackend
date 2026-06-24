@@ -5,28 +5,28 @@ const { query, transaction } = require('../config/db');
 const PLAN_CATALOG = {
   Starter: {
     monthly: {
-      amount: 900,
-      currency: 'USD',
+      amount: 99900,       // ₹999 in paise
+      currency: 'INR',
       durationDays: 30,
       description: 'Starter monthly subscription',
     },
     yearly: {
-      amount: 9000,
-      currency: 'USD',
+      amount: 999000,      // ₹9,990 in paise
+      currency: 'INR',
       durationDays: 365,
       description: 'Starter yearly subscription',
     },
   },
   Growth: {
     monthly: {
-      amount: 2900,
-      currency: 'USD',
+      amount: 249900,      // ₹2,499 in paise
+      currency: 'INR',
       durationDays: 30,
       description: 'Growth monthly subscription',
     },
     yearly: {
-      amount: 29000,
-      currency: 'USD',
+      amount: 2499000,     // ₹24,990 in paise
+      currency: 'INR',
       durationDays: 365,
       description: 'Growth yearly subscription',
     },
@@ -59,7 +59,7 @@ const addDays = (date, days) => {
 const getPlans = async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, name, price, max_leads, max_staff
+      `SELECT id, name, price, max_leads, max_users
        FROM plans
        WHERE is_active = true
        ORDER BY price ASC`
