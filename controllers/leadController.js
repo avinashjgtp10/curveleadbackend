@@ -3,7 +3,7 @@ const { query, transaction } = require('../config/db');
 // GET /api/leads - with filters
 const getLeads = async (req, res) => {
   try {
-    const { stage, source, score, assigned_to, search, date_field, date_from, date_to, page = 1, limit = 20 } = req.query;
+    const { stage, lead_status, source, score, assigned_to, search, date_field, date_from, date_to, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -17,6 +17,7 @@ const getLeads = async (req, res) => {
     }
 
     if (stage) { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`; params.push(stage); }
+    if (lead_status) { whereClause += ` AND LOWER(l.lead_status) = LOWER($${i++})`; params.push(lead_status); }
     if (source) { whereClause += ` AND l.source = $${i++}`; params.push(source); }
     if (score) { whereClause += ` AND l.lead_score = $${i++}`; params.push(score); }
     if (req.user.role !== 'staff') {
@@ -166,9 +167,17 @@ const updateLead = async (req, res) => {
   try {
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'source', 'source_detail', 'campaign_id',
-      'stage', 'assigned_to', 'notes', 'deal_value', 'expected_close_date', 'tags',
-      'lead_score', 'score_reason', 'lost_reason', 'lead_date',
+      'stage', 'lead_status', 'assigned_to', 'notes', 'deal_value', 'expected_close_date',
+      'tags', 'lead_score', 'score_reason', 'lost_reason', 'lead_date',
     ];
+
+    // Fetch current lead to capture prev values for history
+    const current = await query(
+      'SELECT stage, lead_status FROM leads WHERE id = $1 AND tenant_id = $2',
+      [req.params.id, req.tenantId]
+    );
+    if (!current.rows.length) return res.status(404).json({ error: 'Lead not found.' });
+    const prev = current.rows[0];
 
     const updates = [];
     const params = [req.params.id, req.tenantId];
@@ -199,15 +208,42 @@ const updateLead = async (req, res) => {
       `UPDATE leads SET ${updates.join(', ')} WHERE id = $1 AND tenant_id = $2 RETURNING *`,
       params
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
+    if (!result.rows.length) return res.status(404).json({ error: 'Lead not found.' });
 
-    // Log stage change
-    if (req.body.stage) {
+    const stageChanged  = req.body.stage       !== undefined && req.body.stage       !== prev.stage;
+    const statusChanged = req.body.lead_status  !== undefined && req.body.lead_status  !== prev.lead_status;
+
+    // Log to lead_stage_history when stage or status changes
+    if (stageChanged || statusChanged) {
+      await query(
+        `INSERT INTO lead_stage_history
+           (tenant_id, lead_id, prev_stage, new_stage, prev_status, new_status, changed_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          req.tenantId, req.params.id,
+          stageChanged  ? prev.stage       : null, stageChanged  ? req.body.stage       : null,
+          statusChanged ? prev.lead_status  : null, statusChanged ? req.body.lead_status  : null,
+          req.user.id,
+        ]
+      ).catch(() => {}); // non-blocking
+    }
+
+    // Log stage change to lead_activities
+    if (stageChanged) {
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
          VALUES ($1, $2, 'stage_change', $3, $4)`,
         [req.tenantId, req.params.id, `Stage changed to ${req.body.stage}`, req.user.id]
-      );
+      ).catch(() => {});
+    }
+
+    // Log status change to lead_activities
+    if (statusChanged) {
+      await query(
+        `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
+         VALUES ($1, $2, 'status_change', $3, $4)`,
+        [req.tenantId, req.params.id, `Status changed to ${req.body.lead_status}`, req.user.id]
+      ).catch(() => {});
     }
 
     // Log source change
@@ -216,7 +252,7 @@ const updateLead = async (req, res) => {
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
          VALUES ($1, $2, 'source_change', $3, $4)`,
         [req.tenantId, req.params.id, `Source changed to ${req.body.source.replace(/_/g, ' ')}`, req.user.id]
-      );
+      ).catch(() => {});
     }
 
     res.json({ lead: result.rows[0] });

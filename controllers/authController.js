@@ -67,11 +67,55 @@ const signup = async (req, res) => {
         { name: 'Follow-up Later',      pos: 10, color: 'gray',   is_won: false, is_lost: false },
       ];
 
+      const stageIds = {};
       for (const stage of defaultStages) {
-        await client.query(
+        const sr = await client.query(
           `INSERT INTO lead_stages (tenant_id, name, pos, position, color, is_won, is_lost, is_active)
-           VALUES ($1, $2, $3, $3, $4, $5, $6, true)`,
+           VALUES ($1, $2, $3, $3, $4, $5, $6, true) RETURNING id, name`,
           [tenant.id, stage.name, stage.pos, stage.color, stage.is_won, stage.is_lost]
+        );
+        stageIds[stage.name] = sr.rows[0].id;
+      }
+
+      // Seed default statuses
+      const defaultStatuses = [
+        { stage: 'New Lead',             name: 'New',                 pos: 1  },
+        { stage: 'Contacted',            name: 'Calling',             pos: 1  },
+        { stage: 'Contacted',            name: 'No Answer',           pos: 2  },
+        { stage: 'Contacted',            name: 'Busy',                pos: 3  },
+        { stage: 'Contacted',            name: 'Switched Off',        pos: 4  },
+        { stage: 'Contacted',            name: 'Invalid Number',      pos: 5  },
+        { stage: 'Contacted',            name: 'WhatsApp Sent',       pos: 6  },
+        { stage: 'Contacted',            name: 'SMS Sent',            pos: 7  },
+        { stage: 'Contacted',            name: 'Email Sent',          pos: 8  },
+        { stage: 'Contacted',            name: 'Call Back Later',     pos: 9  },
+        { stage: 'Contacted',            name: 'Connected',           pos: 10 },
+        { stage: 'Qualified',            name: 'Interested',          pos: 1  },
+        { stage: 'Qualified',            name: 'Not Interested',      pos: 2  },
+        { stage: 'Qualified',            name: 'Follow-up Required',  pos: 3  },
+        { stage: 'Demo/Visit Scheduled', name: 'Scheduled',           pos: 1  },
+        { stage: 'Demo/Visit Scheduled', name: 'Rescheduled',         pos: 2  },
+        { stage: 'Demo/Visit Scheduled', name: 'Cancelled',           pos: 3  },
+        { stage: 'Proposal Shared',      name: 'Proposal Sent',       pos: 1  },
+        { stage: 'Proposal Shared',      name: 'Viewed',              pos: 2  },
+        { stage: 'Proposal Shared',      name: 'Awaiting Response',   pos: 3  },
+        { stage: 'Negotiation',          name: 'Price Discussion',    pos: 1  },
+        { stage: 'Negotiation',          name: 'Feature Discussion',  pos: 2  },
+        { stage: 'Negotiation',          name: 'Waiting for Decision',pos: 3  },
+        { stage: 'Converted',            name: 'Customer',            pos: 1  },
+        { stage: 'Lost',                 name: 'No Response',         pos: 1  },
+        { stage: 'Lost',                 name: 'Price',               pos: 2  },
+        { stage: 'Lost',                 name: 'Competitor',          pos: 3  },
+        { stage: 'Lost',                 name: 'Not Interested',      pos: 4  },
+        { stage: 'Follow-up Later',      name: 'Invoice Sent',        pos: 1  },
+        { stage: 'Follow-up Later',      name: 'Waiting for Payment', pos: 2  },
+      ];
+
+      for (const status of defaultStatuses) {
+        await client.query(
+          `INSERT INTO lead_statuses (tenant_id, stage_id, name, pos, is_active)
+           VALUES ($1, $2, $3, $4, true)`,
+          [tenant.id, stageIds[status.stage] || null, status.name, status.pos]
         );
       }
 

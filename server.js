@@ -94,7 +94,8 @@ app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
 app.use('/api/webhook', require('./routes/webhook')); // No rate limit - external service
 app.use('/api/integrations', apiLimiter, require('./routes/integrations'));
 
-app.use('/api/lead-stages', apiLimiter, require('./routes/leadStages'));
+app.use('/api/lead-stages',    apiLimiter, require('./routes/leadStages'));
+app.use('/api/lead-statuses', apiLimiter, require('./routes/leadStatuses'));
 app.use('/api/notes', apiLimiter, require('./routes/notes'));
 app.use('/api/attachments', apiLimiter, require('./routes/attachments'));
 app.use('/api/brochures', apiLimiter, require('./routes/brochures'));
