@@ -36,6 +36,10 @@ const getSettings = async (req, res) => {
       webhook_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/webhook/meta`,
       api_ingest_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/integrations/ingest`,
       google_webhook_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/webhook/google`,
+      // WhatsApp Business API (per-tenant)
+      whatsapp_phone_number_id: settings.whatsapp_phone_number_id || '',
+      whatsapp_access_token: settings.whatsapp_access_token ? '••••••••' : '',
+      whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token),
     });
   } catch (e) {
     console.error('getSettings error:', e.message);
@@ -49,7 +53,7 @@ const getSettings = async (req, res) => {
 // ── PUT /api/integrations/settings ────────────────────────────────────────
 const updateSettings = async (req, res) => {
   try {
-    const { meta_page_id, meta_page_access_token, google_webhook_secret } = req.body;
+    const { meta_page_id, meta_page_access_token, google_webhook_secret, whatsapp_phone_number_id, whatsapp_access_token } = req.body;
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
 
@@ -57,6 +61,8 @@ const updateSettings = async (req, res) => {
     if (meta_page_id !== undefined) updated.meta_page_id = meta_page_id;
     if (meta_page_access_token && !meta_page_access_token.startsWith('•')) updated.meta_page_access_token = meta_page_access_token;
     if (google_webhook_secret && !google_webhook_secret.startsWith('•')) updated.google_webhook_secret = google_webhook_secret;
+    if (whatsapp_phone_number_id !== undefined) updated.whatsapp_phone_number_id = whatsapp_phone_number_id;
+    if (whatsapp_access_token && !whatsapp_access_token.startsWith('•')) updated.whatsapp_access_token = whatsapp_access_token;
 
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
     res.json({ message: 'Integration settings saved.' });
@@ -150,7 +156,7 @@ const getEmbedScript = async (req, res) => {
 
 // ── Facebook OAuth helpers ─────────────────────────────────────────────────
 
-const GRAPH = 'https://graph.facebook.com/v19.0';
+const GRAPH = 'https://graph.facebook.com/v25.0';
 
 const fbGet = async (path) => {
   const res = await fetch(`${GRAPH}${path}`);

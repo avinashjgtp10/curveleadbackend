@@ -50,7 +50,7 @@ const receiveLeadFormWebhook = async (req, res) => {
       let leadData;
       try {
         const response = await axios.get(
-          `https://graph.facebook.com/v19.0/${leadgenId}`,
+          `https://graph.facebook.com/v25.0/${leadgenId}`,
           { params: { access_token: tenant.page_access_token } }
         );
         leadData = response.data;

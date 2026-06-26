@@ -17,7 +17,7 @@ const sendWhatsAppMessage = async (to, message) => {
 
     const fetch = (await import('node-fetch')).default;
     const response = await fetch(
-      `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+      `https://graph.facebook.com/v25.0/${phoneNumberId}/messages`,
       {
         method: 'POST',
         headers: {

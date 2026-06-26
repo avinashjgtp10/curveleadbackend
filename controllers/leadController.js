@@ -285,14 +285,15 @@ const addFollowup = async (req, res) => {
     }
 
     const leadCheck = await query(
-      'SELECT id, name, email, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2',
+      'SELECT id, name, phone, email, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2',
       [req.params.id, req.tenantId]
     );
     if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
     const lead = leadCheck.rows[0];
 
-    const tenantRes = await query('SELECT name FROM tenants WHERE id = $1', [req.tenantId]);
+    const tenantRes = await query('SELECT name, settings FROM tenants WHERE id = $1', [req.tenantId]);
     const tenantName = tenantRes.rows[0]?.name || 'CurveLead';
+    const tenantSettings = tenantRes.rows[0]?.settings || {};
 
     await query(
       `UPDATE lead_followups SET is_completed = true WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
@@ -363,7 +364,30 @@ const addFollowup = async (req, res) => {
       }).catch(() => {});
     }
 
-    res.status(201).json({ followup: result.rows[0], emailSent: !!(isDemo && meeting_url && lead.email) });
+    // Auto-send WhatsApp confirmation on demo/visit booking
+    const isAppointment = ['demo', 'visit'].includes((followup_type || '').toLowerCase());
+    let whatsappSent = false;
+    if (isAppointment && lead.phone) {
+      try {
+        const waCredentials = tenantSettings.whatsapp_phone_number_id ? {
+          phone_number_id: tenantSettings.whatsapp_phone_number_id,
+          access_token: tenantSettings.whatsapp_access_token,
+        } : null;
+
+        const label = isDemo ? 'demo' : 'visit/appointment';
+        let msg = `Hi ${lead.name}, your ${label} with *${tenantName}* is confirmed for *${demoTime}*.`;
+        if (meeting_url) msg += `\n\nJoin here: ${meeting_url}`;
+        if (notes) msg += `\n\n_${notes}_`;
+
+        const { sendTextMessage } = require('../services/whatsappService');
+        const waRes = await sendTextMessage(lead.phone, msg, waCredentials);
+        whatsappSent = waRes.success;
+      } catch (e) {
+        console.error('Auto WhatsApp error:', e.message);
+      }
+    }
+
+    res.status(201).json({ followup: result.rows[0], emailSent: !!(isDemo && meeting_url && lead.email), whatsappSent });
   } catch (error) {
     console.error('Add followup error:', error);
     res.status(500).json({ error: 'Failed to schedule follow-up.' });
