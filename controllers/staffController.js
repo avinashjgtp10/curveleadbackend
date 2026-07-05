@@ -66,15 +66,16 @@ const deleteStaff = async (req, res) => {
   try {
     if (req.params.id === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself.' });
 
-    // Unassign leads first
-    await query('UPDATE leads SET assigned_to = NULL WHERE assigned_to = $1', [req.params.id]);
-    await query('UPDATE followups SET assigned_to = NULL WHERE assigned_to = $1', [req.params.id]);
+    const userId = req.params.id;
+    // Unassign leads and followups before deleting (ON DELETE SET NULL handles created_by columns)
+    await query('UPDATE leads SET assigned_to = NULL WHERE assigned_to = $1', [userId]);
+    await query('UPDATE followups SET assigned_to = NULL WHERE assigned_to = $1', [userId]);
 
     const result = await query('DELETE FROM users WHERE id = $1 AND tenant_id = $2 RETURNING id',
-      [req.params.id, req.tenantId]);
+      [userId, req.tenantId]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Staff not found.' });
     res.json({ message: 'Deleted.' });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Delete staff error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 module.exports = { getStaff, createStaff, updateStaff, deleteStaff };

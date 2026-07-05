@@ -129,8 +129,9 @@ CREATE TABLE IF NOT EXISTS leads (
     score_reason TEXT,
     score_updated_at TIMESTAMP,
     
-    -- Deal value
+    -- Deal value (quoted price)
     deal_value DECIMAL(12,2) DEFAULT 0,
+    advance_received DECIMAL(12,2) DEFAULT 0, -- collected once lead is Won
     expected_close_date DATE,
     
     -- Meta tracking

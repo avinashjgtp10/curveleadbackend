@@ -168,16 +168,34 @@ const updateLead = async (req, res) => {
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'source', 'source_detail', 'campaign_id',
       'stage', 'lead_status', 'assigned_to', 'notes', 'deal_value', 'expected_close_date',
-      'tags', 'lead_score', 'score_reason', 'lost_reason', 'lead_date',
+      'tags', 'lead_score', 'score_reason', 'lost_reason', 'lead_date', 'advance_received',
     ];
 
     // Fetch current lead to capture prev values for history
     const current = await query(
-      'SELECT stage, lead_status FROM leads WHERE id = $1 AND tenant_id = $2',
+      'SELECT stage, lead_status, assigned_to, name, advance_received FROM leads WHERE id = $1 AND tenant_id = $2',
       [req.params.id, req.tenantId]
     );
     if (!current.rows.length) return res.status(404).json({ error: 'Lead not found.' });
     const prev = current.rows[0];
+
+    // Advance received is only collected once a lead is Won — check the
+    // effective stage (the one being set in this request, or the current one).
+    // Only enforce this when the value is actually changing — the edit form
+    // resends the whole lead object, so advance_received is present on every
+    // save even when the user is only editing an unrelated field.
+    const advanceReceivedChanged = req.body.advance_received !== undefined
+      && Number(req.body.advance_received) !== Number(prev.advance_received || 0);
+    if (advanceReceivedChanged) {
+      const effectiveStage = req.body.stage || prev.stage;
+      const stageInfo = await query(
+        'SELECT is_won FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
+        [req.tenantId, effectiveStage]
+      );
+      if (!stageInfo.rows[0]?.is_won) {
+        return res.status(400).json({ error: 'Advance received can only be set once the lead is marked Won.' });
+      }
+    }
 
     const updates = [];
     const params = [req.params.id, req.tenantId];
@@ -199,7 +217,12 @@ const updateLead = async (req, res) => {
         [req.tenantId, req.body.stage]
       );
       if (stageInfo.rows[0]?.is_won) updates.push('won_at = NOW()');
-      if (stageInfo.rows[0]?.is_lost) updates.push('lost_at = NOW()');
+      if (stageInfo.rows[0]?.is_lost) {
+        updates.push('lost_at = NOW()');
+        if (!req.body.lost_reason) {
+          return res.status(400).json({ error: 'A reason is required when marking a lead as lost.', requires_lost_reason: true });
+        }
+      }
     }
 
     updates.push('updated_at = NOW()');
@@ -252,6 +275,18 @@ const updateLead = async (req, res) => {
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
          VALUES ($1, $2, 'source_change', $3, $4)`,
         [req.tenantId, req.params.id, `Source changed to ${req.body.source.replace(/_/g, ' ')}`, req.user.id]
+      ).catch(() => {});
+    }
+
+    // Notify new assignee when assignment changes
+    const assigneeChanged = req.body.assigned_to !== undefined
+      && req.body.assigned_to
+      && req.body.assigned_to !== prev.assigned_to;
+    if (assigneeChanged) {
+      await query(
+        `INSERT INTO notifications (tenant_id, user_id, title, message, type, reference_type, reference_id)
+         VALUES ($1, $2, 'Lead assigned to you', $3, 'assignment', 'lead', $4)`,
+        [req.tenantId, req.body.assigned_to, `${result.rows[0].name} has been assigned to you`, req.params.id]
       ).catch(() => {});
     }
 
@@ -617,9 +652,8 @@ const getLeadJourney = async (req, res) => {
   try {
     // Verify lead belongs to tenant
     const leadCheck = await query(
-      `SELECT l.*, c.name as course_name, u.name as assigned_to_name
+      `SELECT l.*, u.name as assigned_to_name
        FROM leads l
-       LEFT JOIN courses c ON l.course_interest_id = c.id
        LEFT JOIN users u ON l.assigned_to = u.id
        WHERE l.id = $1 AND l.tenant_id = $2`,
       [req.params.id, req.tenantId]
@@ -679,9 +713,9 @@ const addActivity = async (req, res) => {
 
     const result = await query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
-       VALUES ($1, $2, 'note', 'Note added', $3, $4)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [req.tenantId, req.params.id, note, req.user.id]
+      [req.tenantId, req.params.id, activity_type, title, description || null, req.user.id]
     );
 
     res.status(201).json({ activity: result.rows[0] });
@@ -831,7 +865,7 @@ const importLeads = async (req, res) => {
       source:     ['source','lead_source','channel','medium'],
       stage:      ['stage','status','lead_stage','pipeline_stage'],
       notes:      ['notes','note','comment','comments','remarks','description','details'],
-      deal_value: ['deal_value','value','amount','deal_amount','price','budget','revenue'],
+      deal_value: ['deal_value','value','amount','deal_amount','price','budget','revenue','quoted_price','quote','quoted_amount'],
       city:       ['city','location','area','region'],
       lead_date:  ['lead_date','lead_datetime','lead_time','date','created_date','enquiry_date'],
     };
@@ -922,4 +956,72 @@ const importLeads = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate, getLeadStats };
+// GET /api/leads/export — download all matching leads as CSV
+const exportLeads = async (req, res) => {
+  try {
+    const { stage, lead_status, source, score, assigned_to, search, date_field, date_from, date_to } = req.query;
+
+    let whereClause = 'WHERE l.tenant_id = $1';
+    const params = [req.tenantId];
+    let i = 2;
+
+    if (req.user.role === 'staff') {
+      whereClause += ` AND l.assigned_to = $${i++}`;
+      params.push(req.user.id);
+    }
+
+    if (stage)       { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`;       params.push(stage); }
+    if (lead_status) { whereClause += ` AND LOWER(l.lead_status) = LOWER($${i++})`; params.push(lead_status); }
+    if (source)      { whereClause += ` AND l.source = $${i++}`;                    params.push(source); }
+    if (score)       { whereClause += ` AND l.lead_score = $${i++}`;                params.push(score); }
+    if (req.user.role !== 'staff') {
+      if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
+      else if (assigned_to)             { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
+    }
+    if (search) {
+      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i})`;
+      params.push(`%${search}%`);
+      i++;
+    }
+    const dateCol = date_field === 'created_at' ? 'l.created_at' : 'COALESCE(l.lead_date, l.created_at)';
+    if (date_from) { whereClause += ` AND ${dateCol} >= $${i++}`;                       params.push(date_from); }
+    if (date_to)   { whereClause += ` AND ${dateCol} < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
+
+    const result = await query(
+      `SELECT l.name, l.phone, l.email, l.location, l.source, l.stage, l.lead_status, l.lead_score,
+              u.name as assigned_to_name, l.deal_value, l.notes, l.lost_reason,
+              TO_CHAR(l.created_at, 'DD-MM-YYYY') as created_at,
+              TO_CHAR(l.last_contacted_at, 'DD-MM-YYYY') as last_contacted_at
+       FROM leads l
+       LEFT JOIN users u ON l.assigned_to = u.id
+       ${whereClause}
+       ORDER BY l.created_at DESC
+       LIMIT 10000`,
+      params
+    );
+
+    const esc = (v) => {
+      if (v == null) return '';
+      const s = String(v);
+      return (s.includes(',') || s.includes('"') || s.includes('\n'))
+        ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const headers = ['Name','Phone','Email','Location','Source','Stage','Status','Score','Assigned To','Deal Value','Notes','Lost Reason','Created','Last Contacted'];
+    const rows = result.rows.map(r =>
+      [r.name,r.phone,r.email,r.location,r.source,r.stage,r.lead_status,r.lead_score,
+       r.assigned_to_name,r.deal_value,r.notes,r.lost_reason,r.created_at,r.last_contacted_at]
+      .map(esc).join(',')
+    );
+
+    const csv = [headers.join(','), ...rows].join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="leads_export.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Export leads error:', error);
+    res.status(500).json({ error: 'Failed to export leads.' });
+  }
+};
+
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate, getLeadStats, exportLeads };

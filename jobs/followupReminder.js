@@ -56,6 +56,48 @@ const runFollowupReminder = async () => {
     if (result.rows.length > 0) {
       console.log(`[ReminderJob] Sent ${result.rows.length} follow-up notification(s)`);
     }
+
+    // Escalate to admins: followups overdue by more than 2 hours with no recent escalation
+    const escalations = await query(`
+      SELECT DISTINCT
+        f.tenant_id,
+        f.lead_id,
+        l.name AS lead_name,
+        COALESCE(l.assigned_to, f.created_by) AS assigned_user_id
+      FROM lead_followups f
+      JOIN leads l ON f.lead_id = l.id
+      WHERE f.is_completed = false
+        AND f.next_followup_at < NOW() - INTERVAL '2 hours'
+        AND NOT EXISTS (
+          SELECT 1 FROM notifications n
+          WHERE n.tenant_id  = f.tenant_id
+            AND n.type       = 'escalation'
+            AND n.reference_id = f.lead_id
+            AND n.created_at > NOW() - INTERVAL '4 hours'
+        )
+    `);
+
+    for (const esc of escalations.rows) {
+      const admins = await query(
+        `SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND is_active = true`,
+        [esc.tenant_id]
+      );
+      for (const admin of admins.rows) {
+        await createNotification(
+          esc.tenant_id,
+          admin.id,
+          `Follow-up overdue — ${esc.lead_name}`,
+          `More than 2 hours overdue. Assigned user has not yet completed the follow-up.`,
+          'escalation',
+          'lead',
+          esc.lead_id,
+        );
+      }
+    }
+
+    if (escalations.rows.length > 0) {
+      console.log(`[ReminderJob] Sent escalation for ${escalations.rows.length} overdue lead(s)`);
+    }
   } catch (e) {
     console.error('[ReminderJob] Error:', e.message);
   }

@@ -196,7 +196,7 @@ const getDashboardSummary = async (req, res) => {
       ? ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)'
       : '';
 
-    const [summary, followupStats, pipeline, sources, team, recentLeads, trend] = await Promise.all([
+    const [summary, followupStats, pipeline, sources, team, recentLeads, trend, unassigned] = await Promise.all([
 
       // Core KPIs — this month vs last month
       query(`
@@ -221,6 +221,10 @@ const getDashboardSummary = async (req, res) => {
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
             AND won_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
             AND won_at < DATE_TRUNC('month', NOW())), 0) as revenue_last_month,
+          COALESCE(SUM(advance_received) FILTER (WHERE LOWER(stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as total_advance_collected,
+          COALESCE(SUM(deal_value - advance_received) FILTER (WHERE LOWER(stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as total_balance_due,
           COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
                            AND created_at < DATE_TRUNC('month', NOW())) as _leads_lm
         FROM leads WHERE tenant_id = $1${sc}
@@ -299,6 +303,11 @@ const getDashboardSummary = async (req, res) => {
         FROM leads WHERE tenant_id = $1${sc} AND created_at >= NOW() - INTERVAL '14 days'
         GROUP BY day ORDER BY day ASC
       `, baseParams),
+
+      // Unassigned leads (admin only)
+      isStaff
+        ? Promise.resolve({ rows: [{ count: '0' }] })
+        : query('SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND assigned_to IS NULL', [tid]),
     ]);
 
     const s = summary.rows[0];
@@ -323,6 +332,8 @@ const getDashboardSummary = async (req, res) => {
       revenue_this_month: parseFloat(s.revenue_this_month),
       revenue_last_month: parseFloat(s.revenue_last_month),
       revenue_change:    pct(s.revenue_this_month, s.revenue_last_month),
+      total_advance_collected: parseFloat(s.total_advance_collected),
+      total_balance_due: parseFloat(s.total_balance_due),
       conversion_rate:   s.leads_this_month > 0
                           ? ((s.won_this_month / s.leads_this_month) * 100).toFixed(1)
                           : '0.0',
@@ -331,6 +342,8 @@ const getDashboardSummary = async (req, res) => {
       followups_today:   parseInt(f.today),
       overdue_followups: parseInt(f.overdue),
       demos_today:       parseInt(f.demos_today),
+
+      unassigned_leads: isStaff ? 0 : parseInt(unassigned.rows[0].count),
 
       pipeline:    pipeline.rows.map(p => ({ ...p, count: parseInt(p.count), pipeline_value: parseFloat(p.pipeline_value) })),
       sources:     sources.rows.map(s => ({ ...s, total: parseInt(s.total), won: parseInt(s.won), conversion_rate: s.total > 0 ? ((s.won / s.total) * 100).toFixed(1) : '0.0' })),
