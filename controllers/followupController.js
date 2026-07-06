@@ -60,6 +60,32 @@ const createFollowup = async (req, res) => {
   } catch (error) { console.error('Create followup error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// PUT /api/followups/:id
+const updateFollowup = async (req, res) => {
+  try {
+    const allowedFields = ['notes', 'followup_type', 'next_followup_at', 'meeting_url'];
+    const updates = [];
+    const params = [req.params.id, req.tenantId];
+    let i = 3;
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updates.push(`${field} = $${i++}`);
+        params.push(req.body[field]);
+      }
+    }
+    if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
+
+    const result = await query(
+      `UPDATE lead_followups SET ${updates.join(', ')} WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+      params
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Followup not found.' });
+
+    res.json({ followup: result.rows[0] });
+  } catch (error) { console.error('Update followup error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
 // PUT /api/followups/:id/complete
 const completeFollowup = async (req, res) => {
   try {
@@ -118,4 +144,4 @@ const deleteFollowup = async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getFollowups, createFollowup, completeFollowup, deleteFollowup };
+module.exports = { getFollowups, createFollowup, updateFollowup, completeFollowup, deleteFollowup };
