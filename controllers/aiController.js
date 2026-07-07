@@ -24,16 +24,17 @@ const scoreLeadById = async (req, res) => {
 
     // Update lead
     await query(
-      `UPDATE leads SET lead_score = $1, score_reason = $2, score_updated_at = NOW()
-       WHERE id = $3 AND tenant_id = $4`,
-      [scoring.score, scoring.reason, req.params.id, req.tenantId]
+      `UPDATE leads SET lead_score = $1, score_reason = $2, score_updated_at = NOW(),
+              intent_score = $3, suggested_action = $4
+       WHERE id = $5 AND tenant_id = $6`,
+      [scoring.score, scoring.reason, scoring.intent_score, scoring.suggested_action, req.params.id, req.tenantId]
     );
 
     // Log activity
     await query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
        VALUES ($1, $2, 'score_change', $3, $4, $5)`,
-      [req.tenantId, req.params.id, `AI scored as ${scoring.score}`, scoring.reason, req.user.id]
+      [req.tenantId, req.params.id, `AI scored ${scoring.intent_score}/100 (${scoring.score})`, scoring.reason, req.user.id]
     );
 
     res.json({ scoring });
@@ -57,8 +58,9 @@ const scoreBulkLeads = async (req, res) => {
       try {
         const scoring = await scoreLead(lead);
         await query(
-          `UPDATE leads SET lead_score = $1, score_reason = $2, score_updated_at = NOW() WHERE id = $3`,
-          [scoring.score, scoring.reason, lead.id]
+          `UPDATE leads SET lead_score = $1, score_reason = $2, score_updated_at = NOW(),
+                  intent_score = $3, suggested_action = $4 WHERE id = $5`,
+          [scoring.score, scoring.reason, scoring.intent_score, scoring.suggested_action, lead.id]
         );
         results.push({ id: lead.id, name: lead.name, ...scoring });
       } catch (e) {

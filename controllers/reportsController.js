@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 
 // GET /api/reports/conversion - Overall conversion funnel
 const getConversionReport = async (req, res) => {
@@ -235,7 +236,10 @@ const getDashboardSummary = async (req, res) => {
         SELECT
           COUNT(*) FILTER (WHERE DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as today,
           COUNT(*) FILTER (WHERE next_followup_at < NOW() AND is_completed = false) as overdue,
-          COUNT(*) FILTER (WHERE followup_type = 'demo' AND DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as demos_today
+          COUNT(*) FILTER (WHERE followup_type = 'demo' AND DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as demos_today,
+          COUNT(*) FILTER (WHERE is_completed = false AND next_followup_at < NOW() - INTERVAL '${MISSED_AFTER_HOURS} hours'
+                           AND next_followup_at >= NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours') as missed,
+          COUNT(*) FILTER (WHERE is_completed = false AND next_followup_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours') as critical
         FROM lead_followups WHERE tenant_id = $1${sfc}
       `, baseParams),
 
@@ -342,6 +346,8 @@ const getDashboardSummary = async (req, res) => {
       followups_today:   parseInt(f.today),
       overdue_followups: parseInt(f.overdue),
       demos_today:       parseInt(f.demos_today),
+      missed_followups:  parseInt(f.missed),
+      critical_followups: parseInt(f.critical),
 
       unassigned_leads: isStaff ? 0 : parseInt(unassigned.rows[0].count),
 

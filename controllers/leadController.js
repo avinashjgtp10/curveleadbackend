@@ -1,9 +1,10 @@
 const { query, transaction } = require('../config/db');
+const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 
 // GET /api/leads - with filters
 const getLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, assigned_to, search, date_field, date_from, date_to, page = 1, limit = 20 } = req.query;
+    const { stage, lead_status, source, score, followup_health, assigned_to, search, date_field, date_from, date_to, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -20,6 +21,11 @@ const getLeads = async (req, res) => {
     if (lead_status) { whereClause += ` AND LOWER(l.lead_status) = LOWER($${i++})`; params.push(lead_status); }
     if (source) { whereClause += ` AND l.source = $${i++}`; params.push(source); }
     if (score) { whereClause += ` AND l.lead_score = $${i++}`; params.push(score); }
+    // Follow-up Health — deterministic bucket computed from the lead's pending lead_followups row (pf.next_followup_at)
+    if (followup_health === 'good') { whereClause += ` AND (pf.next_followup_at IS NULL OR pf.next_followup_at >= NOW())`; }
+    else if (followup_health === 'delayed') { whereClause += ` AND pf.next_followup_at < NOW() AND pf.next_followup_at >= NOW() - INTERVAL '${MISSED_AFTER_HOURS} hours'`; }
+    else if (followup_health === 'missed') { whereClause += ` AND pf.next_followup_at < NOW() - INTERVAL '${MISSED_AFTER_HOURS} hours' AND pf.next_followup_at >= NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours'`; }
+    else if (followup_health === 'critical') { whereClause += ` AND pf.next_followup_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours'`; }
     if (req.user.role !== 'staff') {
       if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
       else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
@@ -37,23 +43,36 @@ const getLeads = async (req, res) => {
     const offsetParam = i;
     params.push(limit, offset);
 
+    // pf = the lead's current pending (not-completed) follow-up, if any — feeds both the
+    // follow-up_health filter above and next_followup_at below.
+    const fromClause = `
+      FROM leads l
+      LEFT JOIN users u ON l.assigned_to = u.id
+      LEFT JOIN campaigns c ON l.campaign_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT next_followup_at, followup_type
+        FROM lead_followups
+        WHERE lead_id = l.id AND is_completed = false
+        ORDER BY next_followup_at ASC
+        LIMIT 1
+      ) pf ON true
+    `;
+
     const leadsQuery = `
       SELECT l.*,
              u.name as assigned_to_name,
              c.name as campaign_name,
              c.source as campaign_source,
-             (SELECT COUNT(*) FROM followups WHERE lead_id = l.id) as followup_count,
-             (SELECT MIN(scheduled_at) FROM followups WHERE lead_id = l.id AND scheduled_at > NOW()) as next_followup
-      FROM leads l
-      LEFT JOIN users u ON l.assigned_to = u.id
-      LEFT JOIN campaigns c ON l.campaign_id = c.id
+             pf.next_followup_at as next_followup_at,
+             pf.followup_type as next_followup_type
+      ${fromClause}
       ${whereClause}
       ORDER BY l.created_at DESC
       LIMIT $${limitParam} OFFSET $${offsetParam}
     `;
 
     const result = await query(leadsQuery, params);
-    const countResult = await query(`SELECT COUNT(*) FROM leads l ${whereClause}`, params.slice(0, -2));
+    const countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params.slice(0, -2));
 
     res.json({
       leads: result.rows,
@@ -106,8 +125,10 @@ const getLead = async (req, res) => {
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
 
+    const pendingFollowup = followups.rows.find(f => !f.is_completed) || null;
+
     res.json({
-      lead: result.rows[0],
+      lead: { ...result.rows[0], followup_health: computeFollowupHealth(pendingFollowup) },
       followups: followups.rows,
       activities: activities.rows,
     });

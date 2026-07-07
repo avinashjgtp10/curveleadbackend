@@ -9,7 +9,7 @@ const DEFAULT_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const callGroq = async (messages, options = {}) => {
   if (!process.env.GROQ_API_KEY) {
     console.warn('⚠️ GROQ_API_KEY not set, returning mock response');
-    return { content: '{"score":"warm","reason":"AI disabled - default score"}' };
+    return { content: '{"intent_score":50,"reason":"AI disabled - default score","suggested_action":"Review lead manually"}' };
   }
 
   try {
@@ -38,11 +38,19 @@ const callGroq = async (messages, options = {}) => {
   }
 };
 
+// intent_score band -> the existing hot/warm/cold levels every list/filter/badge already relies on.
+// Derived here (not trusted from the AI's own text label) so the two can never disagree.
+const scoreBandFromIntent = (intentScore) => {
+  if (intentScore >= 70) return 'hot';
+  if (intentScore >= 40) return 'warm';
+  return 'cold';
+};
+
 /**
- * Score a lead as hot/warm/cold based on data
+ * Score a lead 0-100 based on signals; hot/warm/cold is derived from that score.
  */
 const scoreLead = async (leadData) => {
-  const prompt = `You are a sales lead scoring expert. Score this lead as "hot", "warm", or "cold" based on signals.
+  const prompt = `You are a sales lead scoring expert. Score this lead's buying intent from 0-100 based on signals.
 
 Lead Information:
 - Name: ${leadData.name}
@@ -55,15 +63,16 @@ Lead Information:
 - Notes: ${leadData.notes || 'none'}
 - Recent activity: ${leadData.recent_activity || 'none'}
 
-Scoring rules:
-- "hot": High-intent signals (asked for demo, mentioned budget, urgent timeline, replied multiple times, high deal value)
-- "warm": Engaged but exploring (responded to messages, showed interest, asked questions)
-- "cold": No engagement or negative signals (no response, said "not interested", old lead with no activity)
+Scoring guide:
+- 70-100 (hot): High-intent signals (asked for demo, mentioned budget, urgent timeline, replied multiple times, high deal value)
+- 40-69 (warm): Engaged but exploring (responded to messages, showed interest, asked questions)
+- 0-39 (cold): No engagement or negative signals (no response, said "not interested", old lead with no activity)
 
 Respond ONLY with valid JSON:
 {
-  "score": "hot|warm|cold",
-  "reason": "brief 1-line explanation",
+  "intent_score": 0-100,
+  "reason": "2-3 sentence explanation citing the specific signals you weighed",
+  "suggested_action": "one short imperative next step for the sales rep, e.g. 'Call today to discuss pricing'",
   "confidence": 0.0-1.0
 }`;
 
@@ -72,11 +81,21 @@ Respond ONLY with valid JSON:
     { json: true, temperature: 0.3 }
   );
 
+  let parsed;
   try {
-    return JSON.parse(result.content);
+    parsed = JSON.parse(result.content);
   } catch (e) {
-    return { score: 'warm', reason: 'AI response parsing failed', confidence: 0.5 };
+    parsed = { intent_score: 50, reason: 'AI response parsing failed', suggested_action: 'Review lead manually', confidence: 0.5 };
   }
+
+  const intent_score = Math.max(0, Math.min(100, Math.round(Number(parsed.intent_score) || 0)));
+  return {
+    intent_score,
+    score: scoreBandFromIntent(intent_score),
+    reason: parsed.reason || 'No reason provided',
+    suggested_action: parsed.suggested_action || null,
+    confidence: parsed.confidence ?? 0.5,
+  };
 };
 
 /**
