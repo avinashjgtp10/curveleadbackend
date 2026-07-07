@@ -9,7 +9,7 @@ const DEFAULT_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const callGroq = async (messages, options = {}) => {
   if (!process.env.GROQ_API_KEY) {
     console.warn('⚠️ GROQ_API_KEY not set, returning mock response');
-    return { content: '{"intent_score":50,"reason":"AI disabled - default score","suggested_action":"Review lead manually"}' };
+    return { content: '{"score":"warm","reason":"AI disabled - default score"}' };
   }
 
   try {
@@ -36,66 +36,6 @@ const callGroq = async (messages, options = {}) => {
     console.error('Groq API error:', error.response?.data || error.message);
     throw new Error('AI service temporarily unavailable');
   }
-};
-
-// intent_score band -> the existing hot/warm/cold levels every list/filter/badge already relies on.
-// Derived here (not trusted from the AI's own text label) so the two can never disagree.
-const scoreBandFromIntent = (intentScore) => {
-  if (intentScore >= 70) return 'hot';
-  if (intentScore >= 40) return 'warm';
-  return 'cold';
-};
-
-/**
- * Score a lead 0-100 based on signals; hot/warm/cold is derived from that score.
- */
-const scoreLead = async (leadData) => {
-  const prompt = `You are a sales lead scoring expert. Score this lead's buying intent from 0-100 based on signals.
-
-Lead Information:
-- Name: ${leadData.name}
-- Phone: ${leadData.phone}
-- Email: ${leadData.email || 'not provided'}
-- Source: ${leadData.source}
-- Stage: ${leadData.stage}
-- Deal value: ₹${leadData.deal_value || 0}
-- Days since created: ${Math.floor((Date.now() - new Date(leadData.created_at)) / (1000 * 60 * 60 * 24))}
-- Notes: ${leadData.notes || 'none'}
-- Recent activity: ${leadData.recent_activity || 'none'}
-
-Scoring guide:
-- 70-100 (hot): High-intent signals (asked for demo, mentioned budget, urgent timeline, replied multiple times, high deal value)
-- 40-69 (warm): Engaged but exploring (responded to messages, showed interest, asked questions)
-- 0-39 (cold): No engagement or negative signals (no response, said "not interested", old lead with no activity)
-
-Respond ONLY with valid JSON:
-{
-  "intent_score": 0-100,
-  "reason": "2-3 sentence explanation citing the specific signals you weighed",
-  "suggested_action": "one short imperative next step for the sales rep, e.g. 'Call today to discuss pricing'",
-  "confidence": 0.0-1.0
-}`;
-
-  const result = await callGroq(
-    [{ role: 'user', content: prompt }],
-    { json: true, temperature: 0.3 }
-  );
-
-  let parsed;
-  try {
-    parsed = JSON.parse(result.content);
-  } catch (e) {
-    parsed = { intent_score: 50, reason: 'AI response parsing failed', suggested_action: 'Review lead manually', confidence: 0.5 };
-  }
-
-  const intent_score = Math.max(0, Math.min(100, Math.round(Number(parsed.intent_score) || 0)));
-  return {
-    intent_score,
-    score: scoreBandFromIntent(intent_score),
-    reason: parsed.reason || 'No reason provided',
-    suggested_action: parsed.suggested_action || null,
-    confidence: parsed.confidence ?? 0.5,
-  };
 };
 
 /**
@@ -373,4 +313,4 @@ Compare the two groups and identify what separates a won call from a lost one. R
   }
 };
 
-module.exports = { callGroq, scoreLead, qualifyLead, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };
+module.exports = { callGroq, qualifyLead, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };
