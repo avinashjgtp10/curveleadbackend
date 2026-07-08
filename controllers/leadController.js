@@ -1,10 +1,13 @@
 const { query, transaction } = require('../config/db');
 const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
+const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSED_AFTER_MINUTES } = require('../utils/leadSla');
+const { recordFirstResponse } = require('../utils/leadResponse');
+const { createNotification } = require('./notificationController');
 
 // GET /api/leads - with filters
 const getLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, followup_health, assigned_to, search, date_field, date_from, date_to, page = 1, limit = 20 } = req.query;
+    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -26,6 +29,13 @@ const getLeads = async (req, res) => {
     else if (followup_health === 'delayed') { whereClause += ` AND pf.next_followup_at < NOW() AND pf.next_followup_at >= NOW() - INTERVAL '${MISSED_AFTER_HOURS} hours'`; }
     else if (followup_health === 'missed') { whereClause += ` AND pf.next_followup_at < NOW() - INTERVAL '${MISSED_AFTER_HOURS} hours' AND pf.next_followup_at >= NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours'`; }
     else if (followup_health === 'critical') { whereClause += ` AND pf.next_followup_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours'`; }
+    // Response SLA — deterministic bucket computed from created_at vs first_response_at
+    if (sla_status === 'uncontacted') { whereClause += ` AND l.first_response_at IS NULL`; }
+    else if (sla_status === 'new') { whereClause += ` AND l.first_response_at IS NULL AND l.created_at > NOW() - INTERVAL '${TARGET_RESPONSE_MINUTES} minutes'`; }
+    else if (sla_status === 'sla_risk') { whereClause += ` AND l.first_response_at IS NULL AND l.created_at <= NOW() - INTERVAL '${TARGET_RESPONSE_MINUTES} minutes' AND l.created_at > NOW() - INTERVAL '${ESCALATION_AFTER_MINUTES} minutes'`; }
+    else if (sla_status === 'sla_breached') { whereClause += ` AND l.first_response_at IS NULL AND l.created_at <= NOW() - INTERVAL '${ESCALATION_AFTER_MINUTES} minutes' AND l.created_at > NOW() - INTERVAL '${MISSED_AFTER_MINUTES} minutes'`; }
+    else if (sla_status === 'missed_lead') { whereClause += ` AND l.first_response_at IS NULL AND l.created_at <= NOW() - INTERVAL '${MISSED_AFTER_MINUTES} minutes'`; }
+    else if (sla_status === 'responded_5min') { whereClause += ` AND l.first_response_at IS NOT NULL AND l.response_time_seconds <= ${TARGET_RESPONSE_MINUTES * 60}`; }
     if (req.user.role !== 'staff') {
       if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
       else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
@@ -75,7 +85,7 @@ const getLeads = async (req, res) => {
     const countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params.slice(0, -2));
 
     res.json({
-      leads: result.rows,
+      leads: result.rows.map(r => ({ ...r, ...computeLeadSla(r) })),
       pagination: {
         total: parseInt(countResult.rows[0].count),
         page: parseInt(page),
@@ -128,7 +138,7 @@ const getLead = async (req, res) => {
     const pendingFollowup = followups.rows.find(f => !f.is_completed) || null;
 
     res.json({
-      lead: { ...result.rows[0], followup_health: computeFollowupHealth(pendingFollowup) },
+      lead: { ...result.rows[0], followup_health: computeFollowupHealth(pendingFollowup), ...computeLeadSla(result.rows[0]) },
       followups: followups.rows,
       activities: activities.rows,
     });
@@ -175,6 +185,15 @@ const createLead = async (req, res) => {
        VALUES ($1, $2, 'created', 'Lead created', $3)`,
       [req.tenantId, result.rows[0].id, req.user.id]
     );
+
+    // Notify the assignee immediately — SLA clock starts now
+    if (assigned_to && assigned_to !== req.user.id) {
+      createNotification(
+        req.tenantId, assigned_to, 'New lead assigned to you',
+        `${name} — respond within 5 minutes to hit SLA`,
+        'assignment', 'lead', result.rows[0].id
+      ).catch(() => {});
+    }
 
     res.status(201).json({ message: 'Lead created.', lead: result.rows[0] });
   } catch (error) {
@@ -279,6 +298,9 @@ const updateLead = async (req, res) => {
          VALUES ($1, $2, 'stage_change', $3, $4)`,
         [req.tenantId, req.params.id, `Stage changed to ${req.body.stage}`, req.user.id]
       ).catch(() => {});
+      if ((prev.stage || '').toLowerCase() === 'new') {
+        recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: 'stage_change' }).catch(() => {});
+      }
     }
 
     // Log status change to lead_activities
@@ -327,6 +349,39 @@ const deleteLead = async (req, res) => {
     res.json({ message: 'Lead deleted.' });
   } catch (error) {
     console.error('Delete lead error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// POST /api/leads/:id/call-click — fired when a user clicks a tel: link, counts as first response
+const logCallClick = async (req, res) => {
+  try {
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
+       VALUES ($1, $2, 'call', 'Call Initiated', $3)`,
+      [req.tenantId, req.params.id, req.user.id]
+    ).catch(() => {});
+    const lead = await recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: 'call' });
+    res.json({ first_response_recorded: !!lead });
+  } catch (error) {
+    console.error('Log call click error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// POST /api/leads/:id/mark-contacted — manual "first response" action
+const markContacted = async (req, res) => {
+  try {
+    const lead = await recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: 'manual' });
+    if (!lead) return res.status(409).json({ error: 'This lead has already been marked as contacted.' });
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
+       VALUES ($1, $2, 'manual_contact', 'Marked as Contacted', $3)`,
+      [req.tenantId, req.params.id, req.user.id]
+    ).catch(() => {});
+    res.json({ lead });
+  } catch (error) {
+    console.error('Mark contacted error:', error);
     res.status(500).json({ error: 'Failed.' });
   }
 };
@@ -394,6 +449,7 @@ const addFollowup = async (req, res) => {
          : `Scheduled for ${demoTime}`,
        req.user.id]
     );
+    recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: isDemo ? 'demo_scheduled' : 'followup_scheduled' }).catch(() => {});
 
     // Send demo invite email to lead if email exists
     if (isDemo && meeting_url && lead.email) {
@@ -1045,4 +1101,4 @@ const exportLeads = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate, getLeadStats, exportLeads };
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate, getLeadStats, exportLeads, logCallClick, markContacted };

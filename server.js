@@ -139,6 +139,11 @@ app.listen(PORT, () => {
   const { runPlaybookGeneration } = require('./jobs/playbookGenerator');
   setTimeout(runPlaybookGeneration, 60 * 1000);            // first run 60s after boot
   setInterval(runPlaybookGeneration, 24 * 60 * 60 * 1000); // then every 24h
+
+  // Lead Response SLA monitor — runs every 1 minute (5-min target requires tight polling)
+  const { runLeadSlaMonitor } = require('./jobs/leadSlaMonitor');
+  setTimeout(runLeadSlaMonitor, 20 * 1000);
+  setInterval(runLeadSlaMonitor, 60 * 1000);
 });
 
 // Graceful shutdown

@@ -147,7 +147,13 @@ CREATE TABLE IF NOT EXISTS leads (
     -- Timestamps
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_contacted_at TIMESTAMP
+    last_contacted_at TIMESTAMP,
+
+    -- Response SLA (clock starts at created_at, not the user-editable lead_date)
+    first_response_at TIMESTAMP,
+    first_response_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    first_response_type VARCHAR(30),
+    response_time_seconds INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_leads_tenant ON leads(tenant_id);
@@ -157,6 +163,7 @@ CREATE INDEX IF NOT EXISTS idx_leads_assigned ON leads(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_leads_campaign ON leads(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(tenant_id, lead_score);
 CREATE INDEX IF NOT EXISTS idx_leads_created ON leads(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_sla ON leads(tenant_id, first_response_at, created_at);
 
 -- Lead activities (timeline)
 CREATE TABLE IF NOT EXISTS lead_activities (

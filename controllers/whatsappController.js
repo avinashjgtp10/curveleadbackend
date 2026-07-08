@@ -1,6 +1,7 @@
 const { query } = require('../config/db');
 const { sendTextMessage, sendTemplate } = require('../services/whatsappService');
 const { qualifyLead } = require('../services/groqService');
+const { recordFirstResponse } = require('../utils/leadResponse');
 
 // GET /api/whatsapp/inbox - Shared team inbox (all conversations)
 const getInbox = async (req, res) => {
@@ -93,6 +94,7 @@ const sendMessage = async (req, res) => {
 
     // Update lead's last contacted
     await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [lead_id]);
+    recordFirstResponse(req.tenantId, lead_id, { by: req.user.id, type: 'whatsapp' }).catch(() => {});
 
     res.status(201).json({ message: saved.rows[0], delivery: result });
   } catch (error) {

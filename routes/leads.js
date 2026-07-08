@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate, getLeadStats, exportLeads } = require('../controllers/leadController');
+const { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate, getLeadStats, exportLeads, logCallClick, markContacted } = require('../controllers/leadController');
 const { authenticate, adminOnly } = require('../middleware/auth');
 const { tenantContext, checkPlanLimit } = require('../middleware/tenant');
 const multer = require('multer');
@@ -31,5 +31,7 @@ router.put('/:id', updateLead);
 router.delete('/:id', adminOnly, deleteLead);
 router.post('/:id/note', addNote);
 router.post('/:id/followups', addFollowup);
+router.post('/:id/call-click', logCallClick);
+router.post('/:id/mark-contacted', markContacted);
 
 module.exports = router;

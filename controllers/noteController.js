@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { recordFirstResponse } = require('../utils/leadResponse');
 
 const getByLead = async (req, res) => {
   try {
@@ -31,6 +32,7 @@ const create = async (req, res) => {
       [req.tenantId, req.params.leadId, actTypeMap[note_type] || 'note', actTitleMap[note_type] || 'Note Added',
        note.trim().substring(0, 100), req.user.id]
     );
+    recordFirstResponse(req.tenantId, req.params.leadId, { by: req.user.id, type: note_type === 'call' ? 'call' : 'note' }).catch(() => {});
     res.status(201).json({ note: result.rows[0] });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };

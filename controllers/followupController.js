@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { recordFirstResponse } = require('../utils/leadResponse');
 
 // GET /api/followups - Get all followups with pagination
 const getFollowups = async (req, res) => {
@@ -101,6 +102,7 @@ const completeFollowup = async (req, res) => {
     const isDemo = f.followup_type === 'demo';
 
     await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [f.lead_id]);
+    recordFirstResponse(req.tenantId, f.lead_id, { by: req.user.id, type: 'followup_completed' }).catch(() => {});
 
     query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
