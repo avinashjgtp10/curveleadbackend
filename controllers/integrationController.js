@@ -180,9 +180,13 @@ const facebookAuth = async (req, res) => {
       `/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${encodeURIComponent(user_token)}`
     );
 
-    const pagesData = await fbGet(
-      `/me/accounts?access_token=${encodeURIComponent(tokenData.access_token)}&fields=id,name,access_token,fan_count`
-    );
+    const [pagesData, permsData] = await Promise.all([
+      fbGet(`/me/accounts?access_token=${encodeURIComponent(tokenData.access_token)}&fields=id,name,access_token,fan_count`),
+      fbGet(`/me/permissions?access_token=${encodeURIComponent(tokenData.access_token)}`).catch(e => ({ data: [], _error: e.message })),
+    ]);
+
+    console.log('facebookAuth debug — granted permissions:', JSON.stringify(permsData.data));
+    console.log('facebookAuth debug — pages returned:', pagesData.data?.length || 0);
 
     res.json({ pages: pagesData.data || [] });
   } catch (e) {
