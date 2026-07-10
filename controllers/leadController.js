@@ -152,7 +152,7 @@ const getLead = async (req, res) => {
 const createLead = async (req, res) => {
   try {
     const {
-      name, phone, email, location, source, source_detail, campaign_id,
+      name, phone, email, location, business_name, address, source, source_detail, campaign_id,
       stage, notes, deal_value, expected_close_date, tags, lead_date,
     } = req.body;
 
@@ -171,11 +171,11 @@ const createLead = async (req, res) => {
     }
 
     const result = await query(
-      `INSERT INTO leads (tenant_id, name, phone, email, location, source, source_detail, campaign_id,
+      `INSERT INTO leads (tenant_id, name, phone, email, location, business_name, address, source, source_detail, campaign_id,
                           stage, assigned_to, notes, deal_value, expected_close_date, tags, lead_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        RETURNING *`,
-      [req.tenantId, name, phone, email, location, source || 'manual', source_detail, campaign_id,
+      [req.tenantId, name, phone, email, location, business_name, address, source || 'manual', source_detail, campaign_id,
        stage || 'new', assigned_to, notes, deal_value || 0, expected_close_date, tags, lead_date || new Date()]
     );
 
@@ -206,7 +206,7 @@ const createLead = async (req, res) => {
 const updateLead = async (req, res) => {
   try {
     const allowedFields = [
-      'name', 'phone', 'email', 'location', 'source', 'source_detail', 'campaign_id',
+      'name', 'phone', 'email', 'location', 'business_name', 'address', 'source', 'source_detail', 'campaign_id',
       'stage', 'lead_status', 'assigned_to', 'notes', 'deal_value', 'expected_close_date',
       'tags', 'lead_score', 'score_reason', 'lost_reason', 'lead_date', 'advance_received',
     ];
