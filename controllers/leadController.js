@@ -5,9 +5,20 @@ const { recordFirstResponse } = require('../utils/leadResponse');
 const { createNotification } = require('./notificationController');
 
 // GET /api/leads - with filters
+const SORT_COLUMNS = {
+  name: 'l.name',
+  date: 'l.created_at',
+  phone: 'l.phone',
+  source: 'l.source',
+  score: 'l.intent_score',
+  stage: 'ls.pos',
+  status: 'l.lead_status',
+  assigned_to: 'u.name',
+};
+
 const getLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, page = 1, limit = 20 } = req.query;
+    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -55,10 +66,12 @@ const getLeads = async (req, res) => {
 
     // pf = the lead's current pending (not-completed) follow-up, if any — feeds both the
     // follow-up_health filter above and next_followup_at below.
+    // ls = the lead's stage row, used only to sort by pipeline position (ls.pos) instead of alphabetically.
     const fromClause = `
       FROM leads l
       LEFT JOIN users u ON l.assigned_to = u.id
       LEFT JOIN campaigns c ON l.campaign_id = c.id
+      LEFT JOIN lead_stages ls ON LOWER(ls.name) = LOWER(l.stage) AND ls.tenant_id = l.tenant_id
       LEFT JOIN LATERAL (
         SELECT next_followup_at, followup_type
         FROM lead_followups
@@ -67,6 +80,12 @@ const getLeads = async (req, res) => {
         LIMIT 1
       ) pf ON true
     `;
+
+    const sortColumn = SORT_COLUMNS[sort] || 'l.created_at';
+    const sortDir = dir === 'asc' ? 'ASC' : 'DESC';
+    const orderClause = sort
+      ? `ORDER BY ${sortColumn} ${sortDir} NULLS LAST, l.created_at DESC`
+      : 'ORDER BY l.created_at DESC';
 
     const leadsQuery = `
       SELECT l.*,
@@ -77,7 +96,7 @@ const getLeads = async (req, res) => {
              pf.followup_type as next_followup_type
       ${fromClause}
       ${whereClause}
-      ORDER BY l.created_at DESC
+      ${orderClause}
       LIMIT $${limitParam} OFFSET $${offsetParam}
     `;
 
