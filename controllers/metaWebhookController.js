@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { nextLeadNumber } = require('../utils/leadNumber');
 const axios = require('axios');
 
 // GET /api/webhook/meta - Verify webhook
@@ -91,10 +92,11 @@ const receiveLeadFormWebhook = async (req, res) => {
         continue;
       }
 
+      const leadNumber = await nextLeadNumber(tenant.id);
       await query(
-        `INSERT INTO leads (tenant_id, name, phone, email, source, source_detail, campaign_id, meta_lead_id, stage)
-         VALUES ($1, $2, $3, $4, 'meta_ads', $5, $6, $7, 'new')`,
-        [tenant.id, name || 'Unknown', phone, email || null, `Ad: ${adId}`, campaignId || null, leadgenId]
+        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, stage)
+         VALUES ($1, $2, $3, $4, $5, 'meta_ads', $6, $7, $8, 'new')`,
+        [tenant.id, leadNumber, name || 'Unknown', phone, email || null, `Ad: ${adId}`, campaignId || null, leadgenId]
       );
 
       console.log(`✅ Lead captured from Meta: ${name} (${phone}) for tenant ${tenant.id}`);

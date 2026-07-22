@@ -2,12 +2,14 @@ const { query, transaction } = require('../config/db');
 const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSED_AFTER_MINUTES } = require('../utils/leadSla');
 const { recordFirstResponse } = require('../utils/leadResponse');
+const { nextLeadNumber, reserveLeadNumbers } = require('../utils/leadNumber');
 const { createNotification } = require('./notificationController');
 
 // GET /api/leads - with filters
 const SORT_COLUMNS = {
   name: 'l.name',
   date: 'l.created_at',
+  lead_id: 'l.lead_number',
   phone: 'l.phone',
   source: 'l.source',
   score: 'l.intent_score',
@@ -52,7 +54,7 @@ const getLeads = async (req, res) => {
       else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
     }
     if (search) {
-      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i})`;
+      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.lead_number ILIKE $${i})`;
       params.push(`%${search}%`);
       i++;
     }
@@ -189,14 +191,18 @@ const createLead = async (req, res) => {
       return res.status(409).json({ error: 'Lead with this phone already exists.', existing_id: existing.rows[0].id });
     }
 
-    const result = await query(
-      `INSERT INTO leads (tenant_id, name, phone, email, location, business_name, address, source, source_detail, campaign_id,
-                          stage, assigned_to, notes, deal_value, expected_close_date, tags, lead_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-       RETURNING *`,
-      [req.tenantId, name, phone, email, location, business_name, address, source || 'manual', source_detail, campaign_id,
-       stage || 'new', assigned_to, notes, deal_value || 0, expected_close_date, tags, lead_date || new Date()]
-    );
+    const result = await transaction(async (client) => {
+      const leadNumber = await nextLeadNumber(req.tenantId, client);
+
+      return client.query(
+        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, location, business_name, address, source, source_detail, campaign_id,
+                            stage, assigned_to, notes, deal_value, expected_close_date, tags, lead_date)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+         RETURNING *`,
+        [req.tenantId, leadNumber, name, phone, email, location, business_name, address, source || 'manual', source_detail, campaign_id,
+         stage || 'new', assigned_to, notes, deal_value || 0, expected_close_date, tags, lead_date || new Date()]
+      );
+    });
 
     // Log activity
     await query(
@@ -980,6 +986,10 @@ const importLeads = async (req, res) => {
     );
     const validStages = new Set(stagesResult.rows.map(s => s.name));
 
+    // Reserve a block of Lead IDs up front (one per row, worst case) and hand them
+    // out in order as rows are actually inserted below.
+    const getNextLeadNumber = await reserveLeadNumbers(req.tenantId, rows.length);
+
     let inserted = 0, skipped = 0;
     const errors = [];
     const skipReasons = [];
@@ -1012,14 +1022,17 @@ const importLeads = async (req, res) => {
       const dv = parseFloat(String(lead.deal_value).replace(/[^0-9.]/g, ''));
       lead.deal_value = isNaN(dv) ? null : dv;
 
+      const leadNumber = getNextLeadNumber();
+
       try {
         const insertResult = await query(
-          `INSERT INTO leads (tenant_id, name, phone, email, source, stage, notes, deal_value, location, lead_date)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, stage, notes, deal_value, location, lead_date)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
            ON CONFLICT DO NOTHING
            RETURNING id`,
           [
             req.tenantId,
+            leadNumber,
             lead.name,
             lead.phone,
             lead.email || null,

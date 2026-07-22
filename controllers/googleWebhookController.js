@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { query } = require('../config/db');
+const { nextLeadNumber } = require('../utils/leadNumber');
 
 // POST /api/webhook/google — Google Ads Lead Form Extension webhook
 const receiveGoogleLead = async (req, res) => {
@@ -31,10 +32,11 @@ const receiveGoogleLead = async (req, res) => {
     const existing = await query('SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2', [tenantId, phone]);
     if (existing.rows.length) { console.log(`Google webhook: duplicate phone ${phone}`); return; }
 
+    const leadNumber = await nextLeadNumber(tenantId);
     await query(
-      `INSERT INTO leads (tenant_id, name, phone, email, source, source_detail, stage)
-       VALUES ($1,$2,$3,$4,'google_ads',$5,'new')`,
-      [tenantId, name, phone, email, `Campaign: ${gCampaignId || 'unknown'}`]
+      `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, stage)
+       VALUES ($1,$2,$3,$4,$5,'google_ads',$6,'new')`,
+      [tenantId, leadNumber, name, phone, email, `Campaign: ${gCampaignId || 'unknown'}`]
     );
 
     console.log(`✅ Google Ads lead captured: ${name} (${phone})`);

@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { query } = require('../config/db');
+const { nextLeadNumber } = require('../utils/leadNumber');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -9,10 +10,11 @@ const createLeadFromSource = async (tenantId, { name, phone, email, source, sour
   const existing = await query('SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2', [tenantId, phone]);
   if (existing.rows.length) return { duplicate: true, id: existing.rows[0].id };
 
+  const leadNumber = await nextLeadNumber(tenantId);
   const result = await query(
-    `INSERT INTO leads (tenant_id, name, phone, email, source, source_detail, campaign_id, stage)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,'new') RETURNING id`,
-    [tenantId, name || 'Unknown', phone, email || null, source, source_detail || null, campaign_id || null]
+    `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, stage)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'new') RETURNING id`,
+    [tenantId, leadNumber, name || 'Unknown', phone, email || null, source, source_detail || null, campaign_id || null]
   );
   return { duplicate: false, id: result.rows[0].id };
 };
@@ -301,10 +303,11 @@ const facebookSyncLeads = async (req, res) => {
         const phone = fields['phone_number'] || fields['phone'] || null;
         const email = fields['email'] || null;
 
+        const leadNumber = await nextLeadNumber(req.tenantId);
         await query(
-          `INSERT INTO leads (tenant_id, name, phone, email, source, source_detail, meta_lead_id, stage, created_at)
-           VALUES ($1,$2,$3,$4,'meta_ads',$5,$6,'new',$7) ON CONFLICT DO NOTHING`,
-          [req.tenantId, name, phone, email, form.name || 'Facebook Lead Ad', lead.id, new Date(lead.created_time)]
+          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, meta_lead_id, stage, created_at)
+           VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,'new',$8) ON CONFLICT DO NOTHING`,
+          [req.tenantId, leadNumber, name, phone, email, form.name || 'Facebook Lead Ad', lead.id, new Date(lead.created_time)]
         );
         created++;
       }

@@ -23,6 +23,14 @@ const getFollowups = async (req, res) => {
     if (lead_id) { where += ` AND f.lead_id = $${i++}`; params.push(lead_id); }
     if (type)    { where += ` AND f.followup_type = $${i++}`; params.push(type); }
 
+    // status='all' powers the per-lead history view — show pending items first (so the
+    // one actionable row is always on page 1), then completed ones most-recent-first.
+    // Every other status filter is already scoped to one is_completed value, where
+    // soonest-due-first is the useful order.
+    const orderBy = status === 'all'
+      ? 'f.is_completed ASC, f.next_followup_at DESC'
+      : 'f.next_followup_at ASC';
+
     const [result, countResult] = await Promise.all([
       query(
         `SELECT f.*, l.name as lead_name, l.phone as lead_phone, l.stage as lead_stage,
@@ -30,7 +38,7 @@ const getFollowups = async (req, res) => {
          FROM lead_followups f
          JOIN leads l ON f.lead_id = l.id
          LEFT JOIN users lu ON l.assigned_to = lu.id
-         ${where} ORDER BY f.next_followup_at ASC
+         ${where} ORDER BY ${orderBy}
          LIMIT $${i++} OFFSET $${i++}`,
         [...params, limit, offset]
       ),
