@@ -29,17 +29,27 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5174,https://www.curvelead.com,https://curvelead.com')
   .split(',').map(o => o.trim()).filter(Boolean);
 
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.warn(`CORS blocked: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
+// Endpoints meant to be embedded on arbitrary third-party business websites
+// (e.g. the lead-capture widget from /api/integrations/embed-script) must accept
+// any origin — they're authenticated by API key in a header, not by cookies.
+const PUBLIC_CORS_PATHS = ['/api/integrations/ingest'];
+
+app.use(cors((req, callback) => {
+  if (PUBLIC_CORS_PATHS.includes(req.path)) {
+    return callback(null, { origin: true, credentials: false });
+  }
+  callback(null, {
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) {
+        cb(null, true);
+      } else {
+        console.warn(`CORS blocked: ${origin}`);
+        cb(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true,
+  });
 }));
 
 // Body parsing
