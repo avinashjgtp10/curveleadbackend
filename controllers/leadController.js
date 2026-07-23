@@ -20,7 +20,7 @@ const SORT_COLUMNS = {
 
 const getLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, page = 1, limit = 20 } = req.query;
+    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, page = 1, limit = 20, hide_lost } = req.query;
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -33,6 +33,7 @@ const getLeads = async (req, res) => {
       params.push(req.user.id);
     }
 
+    if (hide_lost === 'true') { whereClause += ` AND COALESCE(ls.is_lost, false) = false`; }
     if (stage) { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`; params.push(stage); }
     if (lead_status) { whereClause += ` AND LOWER(l.lead_status) = LOWER($${i++})`; params.push(lead_status); }
     if (source) { whereClause += ` AND l.source = $${i++}`; params.push(source); }
