@@ -66,25 +66,6 @@ const extendTrial = async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-// POST /api/super-admin/tenants/:id/grant-subscription
-const grantSubscription = async (req, res) => {
-  try {
-    const { months, plan_id } = req.body;
-    const result = await query(
-      `UPDATE tenants SET
-       plan_id = COALESCE($1, plan_id),
-       subscription_status = 'active',
-       subscription_start = CURRENT_DATE,
-       subscription_end = CURRENT_DATE + ($2 || ' months')::INTERVAL,
-       updated_at = NOW()
-       WHERE id = $3 RETURNING *`,
-      [plan_id || null, months || 1, req.params.id]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Tenant not found.' });
-    res.json({ tenant: result.rows[0] });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
-};
-
 // GET /api/super-admin/plans
 const getPlans = async (req, res) => {
   try {
@@ -93,4 +74,4 @@ const getPlans = async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getPlatformStats, getTenants, updateTenant, extendTrial, grantSubscription, getPlans };
+module.exports = { getPlatformStats, getTenants, updateTenant, extendTrial, getPlans };
