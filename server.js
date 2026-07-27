@@ -1,4 +1,13 @@
 require('dotenv').config({ override: true });
+
+// Meta App ID is not secret (it's embedded in client-side Facebook SDK calls),
+// so it's safe to log in full. This makes prod/env drift on the Facebook
+// integration ("Invalid Client ID" from Graph API) visible in pm2 logs at boot.
+console.log(
+  `[startup] META_APP_ID=${process.env.META_APP_ID || '(not set)'} ` +
+  `META_APP_SECRET=${process.env.META_APP_SECRET ? 'set (' + process.env.META_APP_SECRET.length + ' chars)' : '(not set)'}`
+);
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
