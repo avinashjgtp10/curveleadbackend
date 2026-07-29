@@ -891,6 +891,93 @@ const bulkDelete = async (req, res) => {
   }
 };
 
+// GET /api/leads/duplicates - group leads by phone number, ignoring +91/0 prefixes
+// and other formatting, so e.g. "9876543210" and "+91 98765 43210" are one group.
+const getDuplicateLeads = async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) AS norm_phone,
+              json_agg(json_build_object(
+                'id', id, 'lead_number', lead_number, 'name', name, 'phone', phone,
+                'email', email, 'source', source, 'stage', stage, 'created_at', created_at
+              ) ORDER BY created_at ASC) AS leads
+       FROM leads
+       WHERE tenant_id = $1
+       GROUP BY norm_phone
+       HAVING COUNT(*) > 1
+       ORDER BY MIN(created_at) DESC`,
+      [req.tenantId]
+    );
+    res.json({ groups: result.rows });
+  } catch (error) {
+    console.error('getDuplicateLeads error:', error);
+    res.status(500).json({ error: 'Failed to find duplicate leads.' });
+  }
+};
+
+// Every table that carries a lead_id gets its rows re-pointed at the kept lead
+// before the duplicate row is deleted, so notes/calls/quotations aren't lost.
+const DUPLICATE_LEAD_CHILD_TABLES = [
+  'lead_activities', 'followups', 'lead_followups', 'lead_followup_attempts',
+  'whatsapp_messages', 'lead_notes', 'lead_attachments', 'quotations',
+  'brochure_shares', 'call_recordings', 'lead_stage_history', 'ai_voice_calls',
+];
+
+// POST /api/leads/duplicates/merge - fold remove_ids into keep_id
+const mergeDuplicateLeads = async (req, res) => {
+  try {
+    const { keep_id, remove_ids } = req.body;
+    if (!keep_id || !Array.isArray(remove_ids) || !remove_ids.length) {
+      return res.status(400).json({ error: 'keep_id and remove_ids are required.' });
+    }
+    if (remove_ids.includes(keep_id)) {
+      return res.status(400).json({ error: 'keep_id cannot also appear in remove_ids.' });
+    }
+
+    const owned = await query(
+      'SELECT id FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
+      [req.tenantId, [keep_id, ...remove_ids]]
+    );
+    if (owned.rows.length !== remove_ids.length + 1) {
+      return res.status(404).json({ error: 'One or more leads not found.' });
+    }
+
+    await transaction(async (client) => {
+      for (const table of DUPLICATE_LEAD_CHILD_TABLES) {
+        await client.query(
+          `UPDATE ${table} SET lead_id = $1 WHERE lead_id = ANY($2::uuid[])`,
+          [keep_id, remove_ids]
+        );
+      }
+
+      // Fill in any blanks on the kept lead using the most recent duplicate's data
+      await client.query(
+        `UPDATE leads k SET
+           email = COALESCE(k.email, d.email),
+           location = COALESCE(k.location, d.location),
+           meta_lead_id = COALESCE(k.meta_lead_id, d.meta_lead_id),
+           deal_value = GREATEST(k.deal_value, d.deal_value)
+         FROM (
+           SELECT email, location, meta_lead_id, deal_value FROM leads
+           WHERE id = ANY($2::uuid[]) ORDER BY created_at DESC LIMIT 1
+         ) d
+         WHERE k.id = $1`,
+        [keep_id, remove_ids]
+      );
+
+      await client.query(
+        'DELETE FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
+        [req.tenantId, remove_ids]
+      );
+    });
+
+    res.json({ merged: remove_ids.length, kept: keep_id });
+  } catch (error) {
+    console.error('mergeDuplicateLeads error:', error);
+    res.status(500).json({ error: 'Failed to merge duplicate leads.' });
+  }
+};
+
 // GET /api/leads/stages/all - Get pipeline stages
 const getStages = async (req, res) => {
   try {
@@ -1140,4 +1227,4 @@ const exportLeads = async (req, res) => {
   }
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, importLeads, getImportTemplate, getLeadStats, exportLeads, logCallClick, markContacted };
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, getDuplicateLeads, mergeDuplicateLeads, importLeads, getImportTemplate, getLeadStats, exportLeads, logCallClick, markContacted };
