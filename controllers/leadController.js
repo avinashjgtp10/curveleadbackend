@@ -917,10 +917,21 @@ const getDuplicateLeads = async (req, res) => {
 
 // Every table that carries a lead_id gets its rows re-pointed at the kept lead
 // before the duplicate row is deleted, so notes/calls/quotations aren't lost.
+// students.lead_id has no ON DELETE action (RESTRICT), so leaving it out would
+// make the DELETE below fail outright for any duplicate that was enrolled.
 const DUPLICATE_LEAD_CHILD_TABLES = [
   'lead_activities', 'followups', 'lead_followups', 'lead_followup_attempts',
   'whatsapp_messages', 'lead_notes', 'lead_attachments', 'quotations',
   'brochure_shares', 'call_recordings', 'lead_stage_history', 'ai_voice_calls',
+  'students',
+];
+
+// Nullable scalar columns on the lead itself worth carrying over from a removed
+// duplicate when the kept lead's own value is blank.
+const DUPLICATE_LEAD_FILL_COLUMNS = [
+  'email', 'location', 'meta_lead_id', 'source_detail', 'business_name', 'address',
+  'lead_status', 'intent_score', 'suggested_action', 'won_lost_reason', 'lost_reason',
+  'expected_close_date', 'score_reason', 'course_interest_id',
 ];
 
 // POST /api/leads/duplicates/merge - fold remove_ids into keep_id
@@ -950,19 +961,40 @@ const mergeDuplicateLeads = async (req, res) => {
         );
       }
 
-      // Fill in any blanks on the kept lead using the most recent duplicate's data
+      // Fill in any blanks on the kept lead — for each column, pull the most recent
+      // non-null value among the duplicates being removed.
+      const fillSet = DUPLICATE_LEAD_FILL_COLUMNS.map(col =>
+        `${col} = COALESCE(k.${col}, (SELECT ${col} FROM leads WHERE id = ANY($2::uuid[]) AND ${col} IS NOT NULL ORDER BY created_at DESC LIMIT 1))`
+      ).join(',\n           ');
       await client.query(
         `UPDATE leads k SET
-           email = COALESCE(k.email, d.email),
-           location = COALESCE(k.location, d.location),
-           meta_lead_id = COALESCE(k.meta_lead_id, d.meta_lead_id),
-           deal_value = GREATEST(k.deal_value, d.deal_value)
-         FROM (
-           SELECT email, location, meta_lead_id, deal_value FROM leads
-           WHERE id = ANY($2::uuid[]) ORDER BY created_at DESC LIMIT 1
-         ) d
+           ${fillSet},
+           deal_value = GREATEST(k.deal_value, (SELECT COALESCE(MAX(deal_value), 0) FROM leads WHERE id = ANY($2::uuid[]))),
+           advance_received = GREATEST(k.advance_received, (SELECT COALESCE(MAX(advance_received), 0) FROM leads WHERE id = ANY($2::uuid[])))
          WHERE k.id = $1`,
         [keep_id, remove_ids]
+      );
+
+      // Append the removed duplicates' notes onto the kept lead rather than losing them
+      await client.query(
+        `UPDATE leads k SET
+           notes = NULLIF(TRIM(BOTH E'\n' FROM CONCAT_WS(E'\n', NULLIF(TRIM(k.notes), ''), agg.notes)), '')
+         FROM (
+           SELECT string_agg(NULLIF(TRIM(notes), ''), E'\n') AS notes
+           FROM leads WHERE id = ANY($2::uuid[])
+         ) agg
+         WHERE k.id = $1 AND agg.notes IS NOT NULL`,
+        [keep_id, remove_ids]
+      );
+
+      // Union tags from the removed duplicates onto the kept lead
+      await client.query(
+        `UPDATE leads k SET tags = agg.tags
+         FROM (
+           SELECT ARRAY(SELECT DISTINCT unnest(tags) FROM leads WHERE id = ANY($1::uuid[])) AS tags
+         ) agg
+         WHERE k.id = $2 AND agg.tags IS NOT NULL AND array_length(agg.tags, 1) > 0`,
+        [[keep_id, ...remove_ids], keep_id]
       );
 
       await client.query(
