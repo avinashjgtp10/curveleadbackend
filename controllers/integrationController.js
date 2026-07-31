@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
+const { formatFieldDataNotes } = require('../utils/metaFieldData');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -302,12 +303,13 @@ const facebookSyncLeads = async (req, res) => {
         const name = fields['full_name'] || fields['name'] || 'Unknown';
         const phone = fields['phone_number'] || fields['phone'] || null;
         const email = fields['email'] || null;
+        const notes = formatFieldDataNotes(lead.field_data);
 
         const leadNumber = await nextLeadNumber(req.tenantId);
         await query(
-          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, meta_lead_id, stage, created_at)
-           VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,'new',$8) ON CONFLICT DO NOTHING`,
-          [req.tenantId, leadNumber, name, phone, email, form.name || 'Facebook Lead Ad', lead.id, new Date(lead.created_time)]
+          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, meta_lead_id, stage, created_at, notes)
+           VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,'new',$8,$9) ON CONFLICT DO NOTHING`,
+          [req.tenantId, leadNumber, name, phone, email, form.name || 'Facebook Lead Ad', lead.id, new Date(lead.created_time), notes]
         );
         created++;
       }
