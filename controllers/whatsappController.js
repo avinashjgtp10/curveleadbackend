@@ -70,16 +70,20 @@ const sendMessage = async (req, res) => {
       return res.status(400).json({ error: 'lead_id and message required.' });
     }
 
-    const leadResult = await query(
-      'SELECT phone, name FROM leads WHERE id = $1 AND tenant_id = $2',
-      [lead_id, req.tenantId]
-    );
+    const [leadResult, tenantResult] = await Promise.all([
+      query('SELECT phone, name FROM leads WHERE id = $1 AND tenant_id = $2', [lead_id, req.tenantId]),
+      query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]),
+    ]);
     if (leadResult.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
 
     const lead = leadResult.rows[0];
+    const { whatsapp_phone_number_id, whatsapp_access_token } = tenantResult.rows[0]?.settings || {};
+    const credentials = whatsapp_phone_number_id && whatsapp_access_token
+      ? { phone_number_id: whatsapp_phone_number_id, access_token: whatsapp_access_token }
+      : null;
     const result = template_name
-      ? await sendTemplate(lead.phone, template_name)
-      : await sendTextMessage(lead.phone, message);
+      ? await sendTemplate(lead.phone, template_name, 'en', [], credentials)
+      : await sendTextMessage(lead.phone, message, credentials);
 
     // Save to DB regardless of send success (for dev mode)
     const saved = await query(
@@ -172,7 +176,11 @@ const handleWebhook = async (req, res) => {
           );
 
           // Send AI reply
-          const sendResult = await sendTextMessage(fromPhone, aiResponse.reply);
+          const { whatsapp_phone_number_id, whatsapp_access_token } = tenant.settings || {};
+          const credentials = whatsapp_phone_number_id && whatsapp_access_token
+            ? { phone_number_id: whatsapp_phone_number_id, access_token: whatsapp_access_token }
+            : null;
+          const sendResult = await sendTextMessage(fromPhone, aiResponse.reply, credentials);
           await query(
             `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, is_ai_generated)
              VALUES ($1, $2, 'outbound', $3, 'text', $4, $5, true)`,
