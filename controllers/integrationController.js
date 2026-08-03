@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
+const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -14,9 +15,10 @@ const createLeadFromSource = async (tenantId, { name, phone, email, source, sour
   const leadNumber = await nextLeadNumber(tenantId);
   const result = await query(
     `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, stage)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'new') RETURNING id`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'new') RETURNING *`,
     [tenantId, leadNumber, name || 'Unknown', phone, email || null, source, source_detail || null, campaign_id || null]
   );
+  sendWelcomeMessage({ tenantId, lead: result.rows[0] }).catch(() => {});
   return { duplicate: false, id: result.rows[0].id };
 };
 
@@ -46,6 +48,10 @@ const getSettings = async (req, res) => {
       whatsapp_phone_number_id: settings.whatsapp_phone_number_id || '',
       whatsapp_access_token: settings.whatsapp_access_token ? '••••••••' : '',
       whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token),
+      whatsapp_auto_responder_enabled: !!settings.whatsapp_auto_responder_enabled,
+      whatsapp_auto_responder_message: settings.whatsapp_auto_responder_message || '',
+      ai_qualification_enabled: !!settings.ai_qualification_enabled,
+      business_description: settings.business_description || '',
     });
   } catch (e) {
     console.error('getSettings error:', e.message);
@@ -59,7 +65,11 @@ const getSettings = async (req, res) => {
 // ── PUT /api/integrations/settings ────────────────────────────────────────
 const updateSettings = async (req, res) => {
   try {
-    const { meta_page_id, meta_page_access_token, google_webhook_secret, whatsapp_phone_number_id, whatsapp_access_token, meta_dataset_id, meta_capi_access_token } = req.body;
+    const {
+      meta_page_id, meta_page_access_token, google_webhook_secret, whatsapp_phone_number_id, whatsapp_access_token,
+      meta_dataset_id, meta_capi_access_token, whatsapp_auto_responder_enabled, whatsapp_auto_responder_message,
+      ai_qualification_enabled, business_description,
+    } = req.body;
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
 
@@ -71,6 +81,10 @@ const updateSettings = async (req, res) => {
     if (whatsapp_access_token && !whatsapp_access_token.startsWith('•')) updated.whatsapp_access_token = whatsapp_access_token;
     if (meta_dataset_id !== undefined) updated.meta_dataset_id = meta_dataset_id;
     if (meta_capi_access_token && !meta_capi_access_token.startsWith('•')) updated.meta_capi_access_token = meta_capi_access_token;
+    if (whatsapp_auto_responder_enabled !== undefined) updated.whatsapp_auto_responder_enabled = whatsapp_auto_responder_enabled;
+    if (whatsapp_auto_responder_message !== undefined) updated.whatsapp_auto_responder_message = whatsapp_auto_responder_message;
+    if (ai_qualification_enabled !== undefined) updated.ai_qualification_enabled = ai_qualification_enabled;
+    if (business_description !== undefined) updated.business_description = business_description;
 
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
     res.json({ message: 'Integration settings saved.' });

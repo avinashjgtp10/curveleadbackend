@@ -1,6 +1,7 @@
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
+const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const axios = require('axios');
 
 // GET /api/webhook/meta - Verify webhook
@@ -95,11 +96,12 @@ const receiveLeadFormWebhook = async (req, res) => {
 
       const leadNumber = await nextLeadNumber(tenant.id);
       const notes = formatFieldDataNotes(leadData.field_data);
-      await query(
+      const inserted = await query(
         `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, stage, notes)
-         VALUES ($1, $2, $3, $4, $5, 'meta_ads', $6, $7, $8, 'new', $9)`,
+         VALUES ($1, $2, $3, $4, $5, 'meta_ads', $6, $7, $8, 'new', $9) RETURNING *`,
         [tenant.id, leadNumber, name || 'Unknown', phone, email || null, `Ad: ${adId}`, campaignId || null, leadgenId, notes]
       );
+      sendWelcomeMessage({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
 
       console.log(`✅ Lead captured from Meta: ${name} (${phone}) for tenant ${tenant.id}`);
     }

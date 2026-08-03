@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { substituteVars } = require('../utils/templateVars');
 
 const getAll = async (req, res) => {
   try {
@@ -74,12 +75,7 @@ const generate = async (req, res) => {
     const tmpl = tmplRes.rows[0];
     const lead = leadRes.rows[0] || {};
 
-    const message = tmpl.message
-      .replace(/\{\{name\}\}/gi, lead.name || '')
-      .replace(/\{\{phone\}\}/gi, lead.phone || '')
-      .replace(/\{\{email\}\}/gi, lead.email || '')
-      .replace(/\{\{city\}\}/gi, lead.location || '')
-      .replace(/\{\{source\}\}/gi, (lead.source || '').replace(/_/g, ' '));
+    const message = substituteVars(tmpl.message, lead);
 
     // Increment use count
     query('UPDATE message_templates SET use_count = use_count + 1 WHERE id=$1', [req.params.id]).catch(() => {});

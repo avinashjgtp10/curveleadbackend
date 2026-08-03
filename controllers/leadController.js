@@ -241,7 +241,7 @@ const updateLead = async (req, res) => {
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'business_name', 'address', 'source', 'source_detail', 'campaign_id',
       'stage', 'lead_status', 'assigned_to', 'notes', 'deal_value', 'expected_close_date',
-      'tags', 'lead_score', 'score_reason', 'lost_reason', 'lead_date', 'advance_received',
+      'tags', 'lead_score', 'score_reason', 'lost_reason', 'lead_date', 'advance_received', 'ai_paused',
     ];
 
     // Fetch current lead to capture prev values for history

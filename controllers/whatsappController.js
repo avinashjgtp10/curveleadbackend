@@ -2,6 +2,7 @@ const { query } = require('../config/db');
 const { sendTextMessage, sendTemplate } = require('../services/whatsappService');
 const { qualifyLead } = require('../services/groqService');
 const { recordFirstResponse } = require('../utils/leadResponse');
+const { changeLeadStage } = require('../utils/leadStage');
 
 // GET /api/whatsapp/inbox - Shared team inbox (all conversations)
 const getInbox = async (req, res) => {
@@ -92,8 +93,8 @@ const sendMessage = async (req, res) => {
       ]
     );
 
-    // Update lead's last contacted
-    await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [lead_id]);
+    // Update lead's last contacted, and pause AI auto-reply now that a human has taken over
+    await query('UPDATE leads SET last_contacted_at = NOW(), ai_paused = true WHERE id = $1', [lead_id]);
     recordFirstResponse(req.tenantId, lead_id, { by: req.user.id, type: 'whatsapp' }).catch(() => {});
 
     res.status(201).json({ message: saved.rows[0], delivery: result });
@@ -132,7 +133,7 @@ const handleWebhook = async (req, res) => {
 
       // Find lead by phone (across all tenants matching this WhatsApp number)
       const leadResult = await query(
-        'SELECT id, tenant_id, name, assigned_to FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
+        'SELECT id, tenant_id, name, assigned_to, ai_paused FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
         [fromPhone, fromPhone.replace(/^91/, '')]
       );
 
@@ -155,7 +156,7 @@ const handleWebhook = async (req, res) => {
       const tenant = tenantResult.rows[0];
       const aiEnabled = tenant?.settings?.ai_qualification_enabled;
 
-      if (aiEnabled) {
+      if (aiEnabled && !lead.ai_paused) {
         try {
           // Get recent messages for context
           const historyResult = await query(
@@ -180,9 +181,19 @@ const handleWebhook = async (req, res) => {
 
           // Update lead based on AI intent
           if (aiResponse.intent === 'not_interested') {
-            await query(`UPDATE leads SET stage = 'lost', lost_at = NOW(), lost_reason = 'Not interested' WHERE id = $1`, [lead.id]);
+            const lostStage = await query(
+              `SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_lost = true AND is_active = true LIMIT 1`,
+              [lead.tenant_id]
+            );
+            if (lostStage.rows.length) {
+              await changeLeadStage({
+                tenantId: lead.tenant_id, leadId: lead.id,
+                newStageName: lostStage.rows[0].name, lostReason: 'AI: Lead marked not interested',
+              });
+            }
           } else if (aiResponse.intent === 'ready_to_buy') {
-            await query(`UPDATE leads SET lead_score = 'hot', stage = 'qualified' WHERE id = $1`, [lead.id]);
+            await query(`UPDATE leads SET lead_score = 'hot' WHERE id = $1`, [lead.id]);
+            await changeLeadStage({ tenantId: lead.tenant_id, leadId: lead.id, newStageName: 'Qualified' });
           }
         } catch (e) {
           console.error('AI auto-reply failed:', e.message);
