@@ -31,7 +31,7 @@ const getStatuses = async (req, res) => {
 const getStatusesByStage = async (req, res) => {
   try {
     const stages = await query(
-      `SELECT id, name, color, pos, is_won, is_lost FROM lead_stages
+      `SELECT id, name, color, pos, is_won, is_lost, meta_event_name FROM lead_stages
        WHERE tenant_id = $1 AND is_active = true ORDER BY pos ASC`,
       [req.tenantId]
     );

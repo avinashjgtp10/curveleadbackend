@@ -66,7 +66,7 @@ const getStages = async (req, res) => {
 // POST /api/settings/stages
 const createStage = async (req, res) => {
   try {
-    const { name, color, is_won, is_lost } = req.body;
+    const { name, color, is_won, is_lost, meta_event_name } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'Stage name is required.' });
 
     const maxPos = await query(
@@ -76,9 +76,9 @@ const createStage = async (req, res) => {
     const nextPos = maxPos.rows[0].next_pos;
 
     const result = await query(
-      `INSERT INTO lead_stages (tenant_id, name, pos, position, color, is_won, is_lost, is_active)
-       VALUES ($1, $2, $3, $3, $4, $5, $6, true) RETURNING *`,
-      [req.tenantId, name.trim(), nextPos, color || 'gray', is_won || false, is_lost || false]
+      `INSERT INTO lead_stages (tenant_id, name, pos, position, color, is_won, is_lost, is_active, meta_event_name)
+       VALUES ($1, $2, $3, $3, $4, $5, $6, true, $7) RETURNING *`,
+      [req.tenantId, name.trim(), nextPos, color || 'gray', is_won || false, is_lost || false, meta_event_name || null]
     );
     res.status(201).json({ stage: result.rows[0] });
   } catch (error) { console.error('createStage error:', error); res.status(500).json({ error: 'Failed to create stage.' }); }
@@ -87,14 +87,14 @@ const createStage = async (req, res) => {
 // PUT /api/settings/stages/:id
 const updateStage = async (req, res) => {
   try {
-    const { name, color, is_active, is_won, is_lost } = req.body;
+    const { name, color, is_active, is_won, is_lost, meta_event_name } = req.body;
     const result = await query(
       `UPDATE lead_stages
        SET name = COALESCE($1, name), color = COALESCE($2, color),
            is_active = COALESCE($3, is_active), is_won = COALESCE($4, is_won),
-           is_lost = COALESCE($5, is_lost)
-       WHERE id = $6 AND tenant_id = $7 RETURNING *`,
-      [name ?? null, color ?? null, is_active ?? null, is_won ?? null, is_lost ?? null, req.params.id, req.tenantId]
+           is_lost = COALESCE($5, is_lost), meta_event_name = COALESCE($6, meta_event_name)
+       WHERE id = $7 AND tenant_id = $8 RETURNING *`,
+      [name ?? null, color ?? null, is_active ?? null, is_won ?? null, is_lost ?? null, meta_event_name ?? null, req.params.id, req.tenantId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Stage not found.' });
     res.json({ stage: result.rows[0] });

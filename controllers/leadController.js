@@ -4,6 +4,7 @@ const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSE
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { nextLeadNumber, reserveLeadNumbers } = require('../utils/leadNumber');
 const { createNotification } = require('./notificationController');
+const { sendLeadConversionEvent } = require('../utils/metaCapi');
 
 // GET /api/leads - with filters
 const SORT_COLUMNS = {
@@ -283,11 +284,13 @@ const updateLead = async (req, res) => {
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
 
     // Auto-set won_at / lost_at based on stage's is_won / is_lost flag
+    let stageMetaEvent = null;
     if (req.body.stage) {
       const stageInfo = await query(
-        'SELECT is_won, is_lost FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
+        'SELECT is_won, is_lost, meta_event_name FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
         [req.tenantId, req.body.stage]
       );
+      stageMetaEvent = stageInfo.rows[0]?.meta_event_name || null;
       if (stageInfo.rows[0]?.is_won) updates.push('won_at = NOW()');
       if (stageInfo.rows[0]?.is_lost) {
         updates.push('lost_at = NOW()');
@@ -332,6 +335,9 @@ const updateLead = async (req, res) => {
       ).catch(() => {});
       if ((prev.stage || '').toLowerCase() === 'new') {
         recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: 'stage_change' }).catch(() => {});
+      }
+      if (result.rows[0].meta_lead_id && stageMetaEvent) {
+        sendLeadConversionEvent({ tenantId: req.tenantId, lead: result.rows[0], eventName: stageMetaEvent }).catch(() => {});
       }
     }
 

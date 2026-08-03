@@ -32,6 +32,9 @@ const getSettings = async (req, res) => {
       meta_page_name: settings.meta_page_name || '',
       meta_page_access_token: settings.meta_page_access_token ? '••••••••' : '',
       meta_configured: !!(settings.meta_page_id && settings.meta_page_access_token),
+      meta_dataset_id: settings.meta_dataset_id || '',
+      meta_capi_access_token: settings.meta_capi_access_token ? '••••••••' : '',
+      meta_capi_configured: !!(settings.meta_dataset_id && settings.meta_capi_access_token),
       google_webhook_secret: settings.google_webhook_secret ? '••••••••' : '',
       google_configured: !!settings.google_webhook_secret,
       api_key: apiKey ? `${apiKey.slice(0, 8)}${'•'.repeat(24)}` : null,
@@ -56,7 +59,7 @@ const getSettings = async (req, res) => {
 // ── PUT /api/integrations/settings ────────────────────────────────────────
 const updateSettings = async (req, res) => {
   try {
-    const { meta_page_id, meta_page_access_token, google_webhook_secret, whatsapp_phone_number_id, whatsapp_access_token } = req.body;
+    const { meta_page_id, meta_page_access_token, google_webhook_secret, whatsapp_phone_number_id, whatsapp_access_token, meta_dataset_id, meta_capi_access_token } = req.body;
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
 
@@ -66,6 +69,8 @@ const updateSettings = async (req, res) => {
     if (google_webhook_secret && !google_webhook_secret.startsWith('•')) updated.google_webhook_secret = google_webhook_secret;
     if (whatsapp_phone_number_id !== undefined) updated.whatsapp_phone_number_id = whatsapp_phone_number_id;
     if (whatsapp_access_token && !whatsapp_access_token.startsWith('•')) updated.whatsapp_access_token = whatsapp_access_token;
+    if (meta_dataset_id !== undefined) updated.meta_dataset_id = meta_dataset_id;
+    if (meta_capi_access_token && !meta_capi_access_token.startsWith('•')) updated.meta_capi_access_token = meta_capi_access_token;
 
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
     res.json({ message: 'Integration settings saved.' });
@@ -322,4 +327,34 @@ const facebookSyncLeads = async (req, res) => {
   }
 };
 
-module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus };
+// ── GET /api/integrations/meta/capi-stats ──────────────────────────────────
+const getCapiStats = async (req, res) => {
+  try {
+    const defaultStage = await query(
+      `SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_active = true ORDER BY pos ASC LIMIT 1`,
+      [req.tenantId]
+    );
+    const defaultStageName = defaultStage.rows[0]?.name || 'new';
+
+    const stats = await query(
+      `SELECT
+         COUNT(*) FILTER (WHERE meta_lead_id IS NOT NULL) AS total_meta_leads,
+         COUNT(*) FILTER (WHERE meta_lead_id IS NOT NULL AND LOWER(stage) != LOWER($2)) AS leads_with_stage
+       FROM leads WHERE tenant_id = $1`,
+      [req.tenantId, defaultStageName]
+    );
+
+    const total = Number(stats.rows[0].total_meta_leads);
+    const withStage = Number(stats.rows[0].leads_with_stage);
+    res.json({
+      total_meta_leads: total,
+      leads_with_stage: withStage,
+      percent: total > 0 ? Math.round((withStage / total) * 100) : 0,
+    });
+  } catch (e) {
+    console.error('getCapiStats error:', e.message);
+    res.status(500).json({ error: 'Failed to load stats.' });
+  }
+};
+
+module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats };
