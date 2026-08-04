@@ -631,6 +631,12 @@ const getLeadStats = async (req, res) => {
     const staffFollowupClause = isStaff
       ? ` AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)`
       : '';
+    // Exclude follow-ups on leads currently sitting in a "lost" stage — they're dead, not overdue
+    const notLostClause = ` AND lead_id NOT IN (
+       SELECT l.id FROM leads l
+       JOIN lead_stages ls ON ls.tenant_id = l.tenant_id AND LOWER(ls.name) = LOWER(l.stage)
+       WHERE l.tenant_id = $1 AND ls.is_lost = true
+     )`;
 
     // Leads by stage
     const byStage = await query(
@@ -668,7 +674,7 @@ const getLeadStats = async (req, res) => {
     const todayFollowups = await query(
       `SELECT COUNT(*) FROM lead_followups
        WHERE tenant_id = $1 AND is_completed = false
-       AND DATE(next_followup_at) = CURRENT_DATE${staffFollowupClause}`,
+       AND DATE(next_followup_at) = CURRENT_DATE${staffFollowupClause}${notLostClause}`,
       baseParams
     );
 
@@ -676,7 +682,7 @@ const getLeadStats = async (req, res) => {
     const overdueFollowups = await query(
       `SELECT COUNT(*) FROM lead_followups
        WHERE tenant_id = $1 AND is_completed = false
-       AND next_followup_at < CURRENT_TIMESTAMP${staffFollowupClause}`,
+       AND next_followup_at < CURRENT_TIMESTAMP${staffFollowupClause}${notLostClause}`,
       baseParams
     );
 
@@ -750,7 +756,8 @@ const getTodayFollowups = async (req, res) => {
        FROM lead_followups f
        JOIN leads l ON f.lead_id = l.id
        LEFT JOIN users u ON l.assigned_to = u.id
-       ${where}
+       LEFT JOIN lead_stages ls ON ls.tenant_id = f.tenant_id AND LOWER(ls.name) = LOWER(l.stage)
+       ${where} AND COALESCE(ls.is_lost, false) = false
        ORDER BY f.next_followup_at ASC`,
       params
     );
