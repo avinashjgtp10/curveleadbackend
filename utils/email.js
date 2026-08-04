@@ -10,7 +10,7 @@ const createTransporter = () => {
   });
 };
 
-const sendEmail = async ({ to, subject, html, text }) => {
+const sendEmail = async ({ to, subject, html, text, fromName }) => {
   try {
     if (!process.env.EMAIL_USER) {
       console.log(`📧 Email (dev) → ${to}: ${subject}`);
@@ -19,7 +19,7 @@ const sendEmail = async ({ to, subject, html, text }) => {
 
     const transporter = createTransporter();
     const result = await transporter.sendMail({
-      from: `"${process.env.EMAIL_FROM_NAME || 'CurveLead'}" <${process.env.EMAIL_USER}>`,
+      from: `"${fromName || process.env.EMAIL_FROM_NAME || 'CurveLead'}" <${process.env.EMAIL_USER}>`,
       to, subject, html, text,
     });
     return { success: true, messageId: result.messageId };

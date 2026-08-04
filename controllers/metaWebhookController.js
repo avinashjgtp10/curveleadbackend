@@ -2,6 +2,7 @@ const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
+const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const axios = require('axios');
 
 // GET /api/webhook/meta - Verify webhook
@@ -102,6 +103,7 @@ const receiveLeadFormWebhook = async (req, res) => {
         [tenant.id, leadNumber, name || 'Unknown', phone, email || null, `Ad: ${adId}`, campaignId || null, leadgenId, notes]
       );
       sendWelcomeMessage({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
+      checkNewLeadTriggers({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
 
       console.log(`✅ Lead captured from Meta: ${name} (${phone}) for tenant ${tenant.id}`);
     }

@@ -4,6 +4,7 @@ const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSE
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { nextLeadNumber, reserveLeadNumbers } = require('../utils/leadNumber');
 const { createNotification } = require('./notificationController');
+const { checkNewLeadTriggers, checkStageChangeTriggers } = require('../utils/automationTriggers');
 const { sendLeadConversionEvent } = require('../utils/metaCapi');
 
 // GET /api/leads - with filters
@@ -228,6 +229,8 @@ const createLead = async (req, res) => {
       ).catch(() => {});
     }
 
+    checkNewLeadTriggers({ tenantId: req.tenantId, lead: result.rows[0] }).catch(() => {});
+
     res.status(201).json({ message: 'Lead created.', lead: result.rows[0] });
   } catch (error) {
     console.error('Create lead error:', error);
@@ -285,12 +288,14 @@ const updateLead = async (req, res) => {
 
     // Auto-set won_at / lost_at based on stage's is_won / is_lost flag
     let stageMetaEvent = null;
+    let stageIsLost = false;
     if (req.body.stage) {
       const stageInfo = await query(
         'SELECT is_won, is_lost, meta_event_name FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
         [req.tenantId, req.body.stage]
       );
       stageMetaEvent = stageInfo.rows[0]?.meta_event_name || null;
+      stageIsLost = !!stageInfo.rows[0]?.is_lost;
       if (stageInfo.rows[0]?.is_won) updates.push('won_at = NOW()');
       if (stageInfo.rows[0]?.is_lost) {
         updates.push('lost_at = NOW()');
@@ -339,6 +344,9 @@ const updateLead = async (req, res) => {
       if (result.rows[0].meta_lead_id && stageMetaEvent) {
         sendLeadConversionEvent({ tenantId: req.tenantId, lead: result.rows[0], eventName: stageMetaEvent }).catch(() => {});
       }
+      checkStageChangeTriggers({
+        tenantId: req.tenantId, leadId: req.params.id, newStage: req.body.stage, isLost: stageIsLost,
+      }).catch(() => {});
     }
 
     // Log status change to lead_activities

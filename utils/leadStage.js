@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const { sendLeadConversionEvent } = require('./metaCapi');
+const { checkStageChangeTriggers } = require('./automationTriggers');
 
 // Reusable core of a stage change: updates the lead, logs history + activity,
 // and fires a Meta CAPI event if the target stage is mapped. Used by system-driven
@@ -49,6 +50,10 @@ const changeLeadStage = async ({ tenantId, leadId, newStageName, lostReason = nu
   if (lead.meta_lead_id && info.meta_event_name) {
     sendLeadConversionEvent({ tenantId, lead, eventName: info.meta_event_name }).catch(() => {});
   }
+
+  checkStageChangeTriggers({
+    tenantId, leadId, newStage: newStageName, isLost: !!info.is_lost,
+  }).catch(() => {});
 };
 
 module.exports = { changeLeadStage };

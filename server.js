@@ -124,6 +124,7 @@ app.use('/api/notifications', apiLimiter, require('./routes/notifications'));
 app.use('/api/recordings', apiLimiter, require('./routes/recordings'));
 app.use('/api/ai-calling', apiLimiter, require('./routes/aiCalling'));
 app.use('/api/playbook', apiLimiter, require('./routes/playbook'));
+app.use('/api/automations', apiLimiter, require('./routes/automations'));
 
 // ============================================
 // 404 handler
@@ -163,6 +164,11 @@ app.listen(PORT, () => {
   const { runLeadSlaMonitor } = require('./jobs/leadSlaMonitor');
   setTimeout(runLeadSlaMonitor, 20 * 1000);
   setInterval(runLeadSlaMonitor, 60 * 1000);
+
+  // Automation sequence runner — sends due WhatsApp/email steps, runs every 5 minutes
+  const { runAutomationSequences } = require('./jobs/automationSequenceRunner');
+  setTimeout(runAutomationSequences, 30 * 1000);
+  setInterval(runAutomationSequences, 5 * 60 * 1000);
 });
 
 // Graceful shutdown
