@@ -197,7 +197,7 @@ const getDashboardSummary = async (req, res) => {
       ? ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)'
       : '';
 
-    const [summary, followupStats, pipeline, sources, team, recentLeads, trend, unassigned] = await Promise.all([
+    const [summary, followupStats, pipeline, sources, team, recentLeads, trend, unassigned, automation] = await Promise.all([
 
       // Core KPIs — this month vs last month
       query(`
@@ -312,6 +312,18 @@ const getDashboardSummary = async (req, res) => {
       isStaff
         ? Promise.resolve({ rows: [{ count: '0' }] })
         : query('SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND assigned_to IS NULL', [tid]),
+
+      // Automation & AI activity
+      query(`
+        SELECT
+          (SELECT COUNT(*) FROM automation_enrollments WHERE tenant_id = $1 AND status = 'active') as active_enrollments,
+          (SELECT COUNT(*) FROM automation_enrollments WHERE tenant_id = $1 AND status = 'completed'
+            AND completed_at >= DATE_TRUNC('month', NOW())) as completed_this_month,
+          (SELECT COUNT(*) FROM whatsapp_messages WHERE tenant_id = $1 AND is_ai_generated = true
+            AND sent_at >= NOW() - INTERVAL '7 days') as ai_replies_this_week,
+          (SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND source = 'meta_ads'
+            AND created_at >= DATE_TRUNC('day', NOW())) as meta_leads_today
+      `, [tid]),
     ]);
 
     const s = summary.rows[0];
@@ -350,6 +362,11 @@ const getDashboardSummary = async (req, res) => {
       critical_followups: parseInt(f.critical),
 
       unassigned_leads: isStaff ? 0 : parseInt(unassigned.rows[0].count),
+
+      active_enrollments:    parseInt(automation.rows[0].active_enrollments),
+      completed_this_month:  parseInt(automation.rows[0].completed_this_month),
+      ai_replies_this_week:  parseInt(automation.rows[0].ai_replies_this_week),
+      meta_leads_today:      parseInt(automation.rows[0].meta_leads_today),
 
       pipeline:    pipeline.rows.map(p => ({ ...p, count: parseInt(p.count), pipeline_value: parseFloat(p.pipeline_value) })),
       sources:     sources.rows.map(s => ({ ...s, total: parseInt(s.total), won: parseInt(s.won), conversion_rate: s.total > 0 ? ((s.won / s.total) * 100).toFixed(1) : '0.0' })),
