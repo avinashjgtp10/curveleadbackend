@@ -186,52 +186,86 @@ const getTimeline = async (req, res) => {
 };
 
 // GET /api/reports/summary - Dashboard summary
+// Resolves the ?period=this_month|last_month|custom (&date_from&date_to) query params
+// into a [start, end) range, plus the immediately preceding period of equal length
+// for "vs previous period" comparisons.
+const resolveDashboardRange = ({ period, date_from, date_to }) => {
+  const now = new Date();
+
+  if (period === 'last_month') {
+    const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const end = new Date(now.getFullYear(), now.getMonth(), 1);
+    const prevStart = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    return { start, end, prevStart, prevEnd: start };
+  }
+
+  if (period === 'custom' && date_from && date_to) {
+    const start = new Date(date_from);
+    const end = new Date(date_to);
+    end.setDate(end.getDate() + 1); // make end-of-day inclusive
+    const prevStart = new Date(start.getTime() - (end.getTime() - start.getTime()));
+    return { start, end, prevStart, prevEnd: start };
+  }
+
+  // Default: this month
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  return { start, end, prevStart, prevEnd: start };
+};
+
 const getDashboardSummary = async (req, res) => {
   try {
     const tid = req.tenantId;
     const isStaff = req.user.role === 'staff';
-    const uid = req.user.id;
-    const baseParams = isStaff ? [tid, uid] : [tid];
-    const sc = isStaff ? ' AND assigned_to = $2' : '';
-    const sfc = isStaff
-      ? ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)'
-      : '';
+    const uid = isStaff ? req.user.id : null;
+    const { start, end, prevStart, prevEnd } = resolveDashboardRange(req.query);
+
+    // Postgres requires every placeholder number up to the highest referenced to actually
+    // appear in the query text (gaps break type inference), so each query below gets only
+    // the params it actually uses, numbered contiguously from $1.
+    // compareParams: $1 tenant, $2 range start, $3 range end, $4 prev start, $5 prev end, $6 staff id (nullable)
+    const compareParams = [tid, start, end, prevStart, prevEnd, uid];
+    // rangeParams: $1 tenant, $2 range start, $3 range end, $4 staff id (nullable)
+    const rangeParams = [tid, start, end, uid];
+    const rsc = ' AND ($4::uuid IS NULL OR assigned_to = $4)';
+    // liveParams: $1 tenant, $2 staff id (nullable) — for always-live, non-period-scoped queries
+    const liveParams = [tid, uid];
+    const lsfc = ' AND ($2::uuid IS NULL OR lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2))';
 
     const [summary, followupStats, pipeline, sources, team, recentLeads, trend, unassigned, automation] = await Promise.all([
 
-      // Core KPIs — this month vs last month
+      // Core KPIs — selected period vs the immediately preceding period of equal length
       query(`
         SELECT
           COUNT(*) as total_leads,
-          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW())) as leads_this_month,
-          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
-                           AND created_at < DATE_TRUNC('month', NOW())) as leads_last_month,
+          COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3) as leads_in_period,
+          COUNT(*) FILTER (WHERE created_at >= $4 AND created_at < $5) as leads_prev_period,
           COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW())) as leads_today,
           COUNT(*) FILTER (WHERE lead_score = 'hot') as hot_leads,
           COUNT(*) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as total_won,
           COUNT(*) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
-            AND won_at >= DATE_TRUNC('month', NOW())) as won_this_month,
+            AND won_at >= $2 AND won_at < $3) as won_in_period,
           COALESCE(SUM(deal_value) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as total_revenue,
           COALESCE(SUM(deal_value) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
-            AND won_at >= DATE_TRUNC('month', NOW())), 0) as revenue_this_month,
+            AND won_at >= $2 AND won_at < $3), 0) as revenue_in_period,
           COALESCE(SUM(deal_value) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
-            AND won_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
-            AND won_at < DATE_TRUNC('month', NOW())), 0) as revenue_last_month,
+            AND won_at >= $4 AND won_at < $5), 0) as revenue_prev_period,
           COALESCE(SUM(advance_received) FILTER (WHERE LOWER(stage) IN (
-            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as total_advance_collected,
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
+            AND won_at >= $2 AND won_at < $3), 0) as advance_collected_in_period,
           COALESCE(SUM(deal_value - advance_received) FILTER (WHERE LOWER(stage) IN (
-            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as total_balance_due,
-          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
-                           AND created_at < DATE_TRUNC('month', NOW())) as _leads_lm
-        FROM leads WHERE tenant_id = $1${sc}
-      `, baseParams),
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
+            AND won_at >= $2 AND won_at < $3), 0) as balance_due_in_period
+        FROM leads WHERE tenant_id = $1${' AND ($6::uuid IS NULL OR assigned_to = $6)'}
+      `, compareParams),
 
-      // Today's action items from lead_followups
+      // Today's action items from lead_followups — always live, not period-scoped
       query(`
         SELECT
           COUNT(*) FILTER (WHERE DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as today,
@@ -240,80 +274,71 @@ const getDashboardSummary = async (req, res) => {
           COUNT(*) FILTER (WHERE is_completed = false AND next_followup_at < NOW() - INTERVAL '${MISSED_AFTER_HOURS} hours'
                            AND next_followup_at >= NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours') as missed,
           COUNT(*) FILTER (WHERE is_completed = false AND next_followup_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours') as critical
-        FROM lead_followups WHERE tenant_id = $1${sfc}
-      `, baseParams),
+        FROM lead_followups WHERE tenant_id = $1${lsfc}
+      `, liveParams),
 
-      // Pipeline: leads per stage
+      // Pipeline: leads created in the selected period, per stage
       query(`
         SELECT ls.name, ls.color, ls.pos, ls.is_won, ls.is_lost,
                COUNT(l.id) as count,
                COALESCE(SUM(l.deal_value), 0) as pipeline_value
         FROM lead_stages ls
-        LEFT JOIN leads l ON LOWER(l.stage) = LOWER(ls.name) AND l.tenant_id = ls.tenant_id${isStaff ? ' AND l.assigned_to = $2' : ''}
+        LEFT JOIN leads l ON LOWER(l.stage) = LOWER(ls.name) AND l.tenant_id = ls.tenant_id
+          AND l.created_at >= $2 AND l.created_at < $3
+          AND ($4::uuid IS NULL OR l.assigned_to = $4)
         WHERE ls.tenant_id = $1 AND ls.is_active = true
         GROUP BY ls.id, ls.name, ls.color, ls.pos, ls.is_won, ls.is_lost
         ORDER BY ls.pos ASC
-      `, baseParams),
+      `, rangeParams),
 
-      // Lead sources — top 6
+      // Lead sources — top 6, leads created in the selected period
       query(`
         SELECT
           COALESCE(source, 'Unknown') as source,
           COUNT(*) as total,
           COUNT(*) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won
-        FROM leads WHERE tenant_id = $1${sc}
+        FROM leads WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${rsc}
         GROUP BY source ORDER BY total DESC LIMIT 6
-      `, baseParams),
+      `, rangeParams),
 
-      // Team performance — admin sees all; staff sees only themselves
-      isStaff
-        ? query(`
-            SELECT
-              u.name,
-              COUNT(l.id) as total_leads,
-              COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
-                SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
-              COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
-                SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue
-            FROM users u
-            LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
-            WHERE u.tenant_id = $1 AND u.id = $2
-            GROUP BY u.id, u.name
-          `, baseParams)
-        : query(`
-            SELECT
-              u.name,
-              COUNT(l.id) as total_leads,
-              COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
-                SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
-              COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
-                SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue
-            FROM users u
-            LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
-            WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin', 'staff')
-            GROUP BY u.id, u.name ORDER BY won DESC, total_leads DESC LIMIT 8
-          `, [tid]),
+      // Team performance — admin sees all; staff sees only themselves. Leads created in period.
+      query(`
+        SELECT
+          u.name,
+          COUNT(l.id) as total_leads,
+          COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
+          COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue
+        FROM users u
+        LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
+          AND l.created_at >= $2 AND l.created_at < $3
+        WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin', 'staff')
+          AND ($4::uuid IS NULL OR u.id = $4)
+        GROUP BY u.id, u.name ORDER BY won DESC, total_leads DESC LIMIT 8
+      `, rangeParams),
 
-      // Recent 6 leads
+      // Recent 6 leads — from the selected period
       query(`
         SELECT id, name, phone, source, lead_score, stage, created_at
-        FROM leads WHERE tenant_id = $1${sc} ORDER BY created_at DESC LIMIT 6
-      `, baseParams),
+        FROM leads WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${rsc}
+        ORDER BY created_at DESC LIMIT 6
+      `, rangeParams),
 
-      // Last 14-day trend
+      // Daily lead-creation trend across the selected period
       query(`
         SELECT DATE_TRUNC('day', created_at) as day, COUNT(*) as count
-        FROM leads WHERE tenant_id = $1${sc} AND created_at >= NOW() - INTERVAL '14 days'
+        FROM leads WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${rsc}
         GROUP BY day ORDER BY day ASC
-      `, baseParams),
+      `, rangeParams),
 
-      // Unassigned leads (admin only)
+      // Unassigned leads (admin only) — always live
       isStaff
         ? Promise.resolve({ rows: [{ count: '0' }] })
         : query('SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND assigned_to IS NULL', [tid]),
 
-      // Automation & AI activity
+      // Automation & AI activity — always live (not period-scoped)
       query(`
         SELECT
           (SELECT COUNT(*) FROM automation_enrollments WHERE tenant_id = $1 AND status = 'active') as active_enrollments,
@@ -336,24 +361,25 @@ const getDashboardSummary = async (req, res) => {
     };
 
     res.json({
+      period_start: start.toISOString(),
+      period_end:   new Date(end.getTime() - 1).toISOString(), // inclusive last moment, for display
+
       total_leads:       parseInt(s.total_leads),
       leads_today:       parseInt(s.leads_today),
-      leads_this_month:  parseInt(s.leads_this_month),
-      leads_last_month:  parseInt(s.leads_last_month),
-      leads_change:      pct(s.leads_this_month, s._leads_lm),
+      leads_in_period:   parseInt(s.leads_in_period),
+      leads_change:      pct(s.leads_in_period, s.leads_prev_period),
       hot_leads:         parseInt(s.hot_leads),
       total_won:         parseInt(s.total_won),
-      won_this_month:    parseInt(s.won_this_month),
+      won_in_period:     parseInt(s.won_in_period),
       total_revenue:     parseFloat(s.total_revenue),
-      revenue_this_month: parseFloat(s.revenue_this_month),
-      revenue_last_month: parseFloat(s.revenue_last_month),
-      revenue_change:    pct(s.revenue_this_month, s.revenue_last_month),
-      total_advance_collected: parseFloat(s.total_advance_collected),
-      total_balance_due: parseFloat(s.total_balance_due),
-      conversion_rate:   s.leads_this_month > 0
-                          ? ((s.won_this_month / s.leads_this_month) * 100).toFixed(1)
+      revenue_in_period: parseFloat(s.revenue_in_period),
+      revenue_change:    pct(s.revenue_in_period, s.revenue_prev_period),
+      advance_collected_in_period: parseFloat(s.advance_collected_in_period),
+      balance_due_in_period: parseFloat(s.balance_due_in_period),
+      conversion_rate:   s.leads_in_period > 0
+                          ? ((s.won_in_period / s.leads_in_period) * 100).toFixed(1)
                           : '0.0',
-      avg_deal_value:    s.total_won > 0 ? Math.round(s.total_revenue / s.total_won) : 0,
+      avg_deal_value:    s.won_in_period > 0 ? Math.round(s.revenue_in_period / s.won_in_period) : 0,
 
       followups_today:   parseInt(f.today),
       overdue_followups: parseInt(f.overdue),

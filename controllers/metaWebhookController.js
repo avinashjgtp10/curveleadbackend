@@ -3,6 +3,7 @@ const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
+const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const axios = require('axios');
 
 // GET /api/webhook/meta - Verify webhook
@@ -104,6 +105,7 @@ const receiveLeadFormWebhook = async (req, res) => {
       );
       sendWelcomeMessage({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
       checkNewLeadTriggers({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
+      notifyNewLead({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
 
       console.log(`✅ Lead captured from Meta: ${name} (${phone}) for tenant ${tenant.id}`);
     }

@@ -5,6 +5,7 @@ const { recordFirstResponse } = require('../utils/leadResponse');
 const { nextLeadNumber, reserveLeadNumbers } = require('../utils/leadNumber');
 const { createNotification } = require('./notificationController');
 const { checkNewLeadTriggers, checkStageChangeTriggers } = require('../utils/automationTriggers');
+const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { sendLeadConversionEvent } = require('../utils/metaCapi');
 
 // GET /api/leads - with filters
@@ -230,6 +231,7 @@ const createLead = async (req, res) => {
     }
 
     checkNewLeadTriggers({ tenantId: req.tenantId, lead: result.rows[0] }).catch(() => {});
+    notifyNewLead({ tenantId: req.tenantId, lead: result.rows[0] }).catch(() => {});
 
     res.status(201).json({ message: 'Lead created.', lead: result.rows[0] });
   } catch (error) {

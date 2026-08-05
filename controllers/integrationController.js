@@ -4,6 +4,7 @@ const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
+const { notifyNewLead } = require('../utils/leadNotifyEmail');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,7 @@ const createLeadFromSource = async (tenantId, { name, phone, email, source, sour
   );
   sendWelcomeMessage({ tenantId, lead: result.rows[0] }).catch(() => {});
   checkNewLeadTriggers({ tenantId, lead: result.rows[0] }).catch(() => {});
+  notifyNewLead({ tenantId, lead: result.rows[0] }).catch(() => {});
   return { duplicate: false, id: result.rows[0].id };
 };
 
