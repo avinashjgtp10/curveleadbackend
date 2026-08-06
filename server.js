@@ -169,6 +169,11 @@ app.listen(PORT, () => {
   const { runAutomationSequences } = require('./jobs/automationSequenceRunner');
   setTimeout(runAutomationSequences, 30 * 1000);
   setInterval(runAutomationSequences, 5 * 60 * 1000);
+
+  // Meta ad spend/performance sync — runs every 6 hours
+  const { runMetaAdInsightsSync } = require('./jobs/metaAdInsightsSync');
+  setTimeout(runMetaAdInsightsSync, 45 * 1000);
+  setInterval(runMetaAdInsightsSync, 6 * 60 * 60 * 1000);
 });
 
 // Graceful shutdown

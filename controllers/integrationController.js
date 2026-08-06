@@ -6,6 +6,7 @@ const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
+const { syncTenantAdInsights } = require('../utils/metaAdInsights');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,8 @@ const getSettings = async (req, res) => {
       whatsapp_auto_responder_message: settings.whatsapp_auto_responder_message || '',
       ai_qualification_enabled: !!settings.ai_qualification_enabled,
       business_description: settings.business_description || '',
+      meta_ad_account_id: settings.meta_ad_account_id || '',
+      meta_ads_configured: !!(settings.meta_ad_account_id && settings.meta_ads_access_token),
     });
   } catch (e) {
     console.error('getSettings error:', e.message);
@@ -73,7 +76,7 @@ const updateSettings = async (req, res) => {
     const {
       meta_page_id, meta_page_access_token, google_webhook_secret, whatsapp_phone_number_id, whatsapp_access_token,
       meta_dataset_id, meta_capi_access_token, whatsapp_auto_responder_enabled, whatsapp_auto_responder_message,
-      ai_qualification_enabled, business_description,
+      ai_qualification_enabled, business_description, meta_ad_account_id,
     } = req.body;
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
@@ -90,6 +93,7 @@ const updateSettings = async (req, res) => {
     if (whatsapp_auto_responder_message !== undefined) updated.whatsapp_auto_responder_message = whatsapp_auto_responder_message;
     if (ai_qualification_enabled !== undefined) updated.ai_qualification_enabled = ai_qualification_enabled;
     if (business_description !== undefined) updated.business_description = business_description;
+    if (meta_ad_account_id !== undefined) updated.meta_ad_account_id = meta_ad_account_id;
 
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
     res.json({ message: 'Integration settings saved.' });
@@ -215,6 +219,18 @@ const facebookAuth = async (req, res) => {
     console.log('facebookAuth debug — granted permissions:', JSON.stringify(permsData.data));
     console.log('facebookAuth debug — pages returned:', pagesData.data?.length || 0);
 
+    // Persist the long-lived USER token (not just the per-page tokens derived below)
+    // — this is what's needed for ad-account listing and ads Insights, which are
+    // user-level, not page-level, permissions.
+    const grantedScopes = (permsData.data || []).filter(p => p.status === 'granted').map(p => p.permission);
+    if (grantedScopes.includes('ads_read')) {
+      const settingsResult = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+      const current = settingsResult.rows[0]?.settings || {};
+      await query('UPDATE tenants SET settings = $1 WHERE id = $2', [
+        JSON.stringify({ ...current, meta_ads_access_token: tokenData.access_token }), req.tenantId,
+      ]);
+    }
+
     res.json({ pages: pagesData.data || [] });
   } catch (e) {
     console.error('facebookAuth:', e.message);
@@ -251,6 +267,39 @@ const facebookConnectPage = async (req, res) => {
   } catch (e) {
     console.error('facebookConnectPage:', e.message);
     res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// ── GET /api/integrations/facebook/ad-accounts ─────────────────────────────
+const getAdAccounts = async (req, res) => {
+  try {
+    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const { meta_ads_access_token } = result.rows[0]?.settings || {};
+    if (!meta_ads_access_token) {
+      return res.status(400).json({ error: 'Reconnect Facebook to grant ads access first.', needs_reconnect: true });
+    }
+
+    const data = await fbGet(
+      `/me/adaccounts?fields=id,name,account_status&access_token=${encodeURIComponent(meta_ads_access_token)}`
+    );
+    res.json({ ad_accounts: data.data || [] });
+  } catch (e) {
+    console.error('getAdAccounts:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+};
+
+// ── POST /api/integrations/facebook/sync-ad-insights ───────────────────────
+const syncAdInsightsNow = async (req, res) => {
+  try {
+    const result = await syncTenantAdInsights(req.tenantId);
+    if (result.reason === 'not_configured') {
+      return res.status(400).json({ error: 'Connect an ad account first.' });
+    }
+    res.json({ message: `Synced ${result.synced} campaign(s).`, synced: result.synced });
+  } catch (e) {
+    console.error('syncAdInsightsNow:', e.message);
+    res.status(400).json({ error: e.message });
   }
 };
 
@@ -382,4 +431,4 @@ const getCapiStats = async (req, res) => {
   }
 };
 
-module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats };
+module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
