@@ -5,6 +5,7 @@ const { formatFieldDataNotes } = require('../utils/metaFieldData');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
+const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -313,7 +314,8 @@ const facebookSyncLeads = async (req, res) => {
 
     for (const form of formsData.data || []) {
       const leadsData = await fbGet(
-        `/${form.id}/leads?access_token=${encodeURIComponent(meta_page_access_token)}&limit=100&fields=id,created_time,field_data`
+        `/${form.id}/leads?access_token=${encodeURIComponent(meta_page_access_token)}&limit=100`
+        + `&fields=id,created_time,field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name`
       );
 
       for (const lead of leadsData.data || []) {
@@ -328,11 +330,16 @@ const facebookSyncLeads = async (req, res) => {
         const email = fields['email'] || null;
         const notes = formatFieldDataNotes(lead.field_data);
 
+        const campaignId = await findOrCreateMetaCampaign({
+          tenantId: req.tenantId, campaignId: lead.campaign_id, campaignName: lead.campaign_name, adsetId: lead.adset_id,
+        });
+
         const leadNumber = await nextLeadNumber(req.tenantId);
         await query(
-          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, meta_lead_id, stage, created_at, notes)
-           VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,'new',$8,$9) ON CONFLICT DO NOTHING`,
-          [req.tenantId, leadNumber, name, phone, email, form.name || 'Facebook Lead Ad', lead.id, new Date(lead.created_time), notes]
+          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, meta_ad_id, meta_adset_id, stage, created_at, notes)
+           VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,$8,$9,$10,'new',$11,$12) ON CONFLICT DO NOTHING`,
+          [req.tenantId, leadNumber, name, phone, email, lead.ad_name || form.name || 'Facebook Lead Ad',
+           campaignId || null, lead.id, lead.ad_id || null, lead.adset_id || null, new Date(lead.created_time), notes]
         );
         created++;
       }

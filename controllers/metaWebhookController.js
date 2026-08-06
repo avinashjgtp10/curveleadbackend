@@ -4,6 +4,7 @@ const { formatFieldDataNotes } = require('../utils/metaFieldData');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
+const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const axios = require('axios');
 
 // GET /api/webhook/meta - Verify webhook
@@ -51,12 +52,19 @@ const receiveLeadFormWebhook = async (req, res) => {
         continue;
       }
 
-      // Fetch lead details using the tenant's page access token
+      // Fetch lead details using the tenant's page access token — including
+      // campaign/adset/ad fields, which Meta returns directly here (verified
+      // live) without needing any ads_read permission or extra API call.
       let leadData;
       try {
         const response = await axios.get(
           `https://graph.facebook.com/v25.0/${leadgenId}`,
-          { params: { access_token: tenant.page_access_token } }
+          {
+            params: {
+              access_token: tenant.page_access_token,
+              fields: 'field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,form_id,created_time',
+            },
+          }
         );
         leadData = response.data;
       } catch (e) {
@@ -70,12 +78,12 @@ const receiveLeadFormWebhook = async (req, res) => {
         fields[f.name] = f.values?.[0];
       });
 
-      // Try to match campaign by ad_id
-      const campaignResult = await query(
-        `SELECT id FROM campaigns WHERE tenant_id = $1 AND (utm_campaign = $2 OR description LIKE $3) LIMIT 1`,
-        [tenant.id, adId, `%${adId}%`]
-      );
-      const campaignId = campaignResult.rows[0]?.id;
+      const campaignId = await findOrCreateMetaCampaign({
+        tenantId: tenant.id,
+        campaignId: leadData.campaign_id,
+        campaignName: leadData.campaign_name,
+        adsetId: leadData.adset_id,
+      });
 
       const phone = fields.phone_number || fields.phone || '';
       const name = fields.full_name || `${fields.first_name || ''} ${fields.last_name || ''}`.trim();
@@ -99,9 +107,10 @@ const receiveLeadFormWebhook = async (req, res) => {
       const leadNumber = await nextLeadNumber(tenant.id);
       const notes = formatFieldDataNotes(leadData.field_data);
       const inserted = await query(
-        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, stage, notes)
-         VALUES ($1, $2, $3, $4, $5, 'meta_ads', $6, $7, $8, 'new', $9) RETURNING *`,
-        [tenant.id, leadNumber, name || 'Unknown', phone, email || null, `Ad: ${adId}`, campaignId || null, leadgenId, notes]
+        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, meta_ad_id, meta_adset_id, stage, notes)
+         VALUES ($1, $2, $3, $4, $5, 'meta_ads', $6, $7, $8, $9, $10, 'new', $11) RETURNING *`,
+        [tenant.id, leadNumber, name || 'Unknown', phone, email || null, leadData.ad_name || `Ad: ${adId}`,
+         campaignId || null, leadgenId, leadData.ad_id || adId || null, leadData.adset_id || null, notes]
       );
       sendWelcomeMessage({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
       checkNewLeadTriggers({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
