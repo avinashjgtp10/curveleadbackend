@@ -17,8 +17,10 @@ const getCampaigns = async (req, res) => {
     const result = await query(
       `SELECT c.*,
               (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads,
-              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND stage = 'won') as won_leads,
-              (SELECT COALESCE(SUM(deal_value), 0) FROM leads WHERE campaign_id = c.id AND stage = 'won') as revenue,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
+                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as won_leads,
+              (SELECT COALESCE(SUM(deal_value), 0) FROM leads WHERE campaign_id = c.id
+                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as revenue,
               u.name as created_by_name
        FROM campaigns c
        LEFT JOIN users u ON c.created_by = u.id
@@ -71,13 +73,35 @@ const getCampaign = async (req, res) => {
     // Get recent leads
     const recentLeads = await query(
       `SELECT id, name, phone, email, stage, lead_score, created_at
-       FROM leads WHERE campaign_id = $1 AND tenant_id = $2 
+       FROM leads WHERE campaign_id = $1 AND tenant_id = $2
        ORDER BY created_at DESC LIMIT 20`,
       [req.params.id, req.tenantId]
     );
 
+    // Won-ness is tenant-configurable (lead_stages.is_won), not the literal string 'won'
+    const wonStats = await query(
+      `SELECT COUNT(*) as won_leads, COALESCE(SUM(deal_value), 0) as revenue
+       FROM leads WHERE campaign_id = $1 AND tenant_id = $2
+         AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_won = true)`,
+      [req.params.id, req.tenantId]
+    );
+
+    const totalLeads = stageBreakdown.rows.reduce((sum, s) => sum + parseInt(s.count), 0);
+    const wonLeads = parseInt(wonStats.rows[0].won_leads) || 0;
+    const revenue = parseFloat(wonStats.rows[0].revenue) || 0;
+    const spend = parseFloat(result.rows[0].actual_spend) || 0;
+
     res.json({
-      campaign: result.rows[0],
+      campaign: {
+        ...result.rows[0],
+        total_leads: totalLeads,
+        won_leads: wonLeads,
+        revenue,
+        cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0,
+        cost_per_won: wonLeads > 0 ? (spend / wonLeads).toFixed(2) : 0,
+        conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
+        roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
+      },
       stageBreakdown: stageBreakdown.rows,
       recentLeads: recentLeads.rows,
     });
