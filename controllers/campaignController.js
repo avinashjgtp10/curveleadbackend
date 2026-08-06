@@ -70,12 +70,21 @@ const getCampaign = async (req, res) => {
       [req.params.id, req.tenantId]
     );
 
-    // Get recent leads
+    // Leads list — filterable by stage/score/search, unlike the KPIs above
+    // (which always reflect the whole campaign regardless of the list filter)
+    const { stage, lead_score, search } = req.query;
+    let leadsWhere = 'WHERE campaign_id = $1 AND tenant_id = $2';
+    const leadsParams = [req.params.id, req.tenantId];
+    let li = 3;
+    if (stage) { leadsWhere += ` AND LOWER(stage) = LOWER($${li++})`; leadsParams.push(stage); }
+    if (lead_score) { leadsWhere += ` AND lead_score = $${li++}`; leadsParams.push(lead_score); }
+    if (search) { leadsWhere += ` AND (name ILIKE $${li} OR phone ILIKE $${li})`; leadsParams.push(`%${search}%`); li++; }
+
     const recentLeads = await query(
       `SELECT id, name, phone, email, stage, lead_score, created_at
-       FROM leads WHERE campaign_id = $1 AND tenant_id = $2
-       ORDER BY created_at DESC LIMIT 20`,
-      [req.params.id, req.tenantId]
+       FROM leads ${leadsWhere}
+       ORDER BY created_at DESC LIMIT 100`,
+      leadsParams
     );
 
     // Won-ness is tenant-configurable (lead_stages.is_won), not the literal string 'won'
