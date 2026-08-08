@@ -37,7 +37,42 @@ const syncTenantAdInsights = async (tenantId) => {
     synced++;
   }
 
-  return { synced };
+  const adsSynced = await syncTenantAdLevelInsights(tenantId, meta_ad_account_id, meta_ads_access_token);
+
+  return { synced, ads_synced: adsSynced };
+};
+
+// Same idea as the campaign-level sync above, but at the individual ad level —
+// which ad creative is actually driving results, not just the campaign as a whole.
+const syncTenantAdLevelInsights = async (tenantId, adAccountId, accessToken) => {
+  const url = `${GRAPH}/${adAccountId}/insights`
+    + `?level=ad&fields=ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,spend,impressions,clicks`
+    + `&date_preset=maximum&limit=200&access_token=${encodeURIComponent(accessToken)}`;
+
+  const response = await fetch(url);
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
+
+  let synced = 0;
+  for (const row of data.data || []) {
+    if (!row.ad_id) continue;
+    const campaignId = await findOrCreateMetaCampaign({
+      tenantId, campaignId: row.campaign_id, campaignName: row.campaign_name, adsetId: row.adset_id,
+    });
+
+    await query(
+      `INSERT INTO meta_ads (tenant_id, campaign_id, meta_ad_id, meta_adset_id, name, spend, impressions, clicks)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (tenant_id, meta_ad_id) DO UPDATE SET
+         campaign_id = EXCLUDED.campaign_id, meta_adset_id = EXCLUDED.meta_adset_id, name = EXCLUDED.name,
+         spend = EXCLUDED.spend, impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks, updated_at = NOW()`,
+      [tenantId, campaignId || null, row.ad_id, row.adset_id || null, row.ad_name || null,
+       parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0]
+    );
+    synced++;
+  }
+
+  return synced;
 };
 
 module.exports = { syncTenantAdInsights };

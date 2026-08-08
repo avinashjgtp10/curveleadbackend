@@ -120,6 +120,36 @@ const getCampaign = async (req, res) => {
   }
 };
 
+// GET /api/campaigns/:id/ads - Ad-level spend/performance within a campaign
+const getCampaignAds = async (req, res) => {
+  try {
+    const owned = await query('SELECT id FROM campaigns WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (!owned.rows.length) return res.status(404).json({ error: 'Campaign not found.' });
+
+    const result = await query(
+      `SELECT a.*,
+              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = a.meta_ad_id AND tenant_id = a.tenant_id) as total_leads,
+              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = a.meta_ad_id AND tenant_id = a.tenant_id
+                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = a.tenant_id AND is_won = true)) as won_leads
+       FROM meta_ads a
+       WHERE a.campaign_id = $1 AND a.tenant_id = $2
+       ORDER BY a.spend DESC`,
+      [req.params.id, req.tenantId]
+    );
+
+    const ads = result.rows.map(a => {
+      const totalLeads = parseInt(a.total_leads) || 0;
+      const spend = parseFloat(a.spend) || 0;
+      return { ...a, total_leads: totalLeads, won_leads: parseInt(a.won_leads) || 0, cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0 };
+    });
+
+    res.json({ ads });
+  } catch (error) {
+    console.error('Get campaign ads error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
 // POST /api/campaigns
 const createCampaign = async (req, res) => {
   try {
@@ -221,4 +251,4 @@ const getCampaignStats = async (req, res) => {
   }
 };
 
-module.exports = { getCampaigns, getCampaign, createCampaign, updateCampaign, deleteCampaign, getCampaignStats };
+module.exports = { getCampaigns, getCampaign, getCampaignAds, createCampaign, updateCampaign, deleteCampaign, getCampaignStats };
