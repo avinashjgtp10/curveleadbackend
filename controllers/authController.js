@@ -283,4 +283,80 @@ const changePassword = async (req, res) => {
   }
 };
 
-module.exports = { signup, login, getProfile, forgotPassword, resetPassword, changePassword };
+// GET /api/auth/invite/:token - Look up a pending invite (no auth required)
+const getInviteInfo = async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT i.email, i.name, i.role, i.expires_at, i.accepted_at, t.name as tenant_name
+       FROM invitations i JOIN tenants t ON t.id = i.tenant_id
+       WHERE i.token = $1`,
+      [req.params.token]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Invalid invitation link.' });
+    const invite = result.rows[0];
+    if (invite.accepted_at) return res.status(400).json({ error: 'This invitation has already been used.' });
+    if (new Date(invite.expires_at) < new Date()) return res.status(400).json({ error: 'This invitation has expired.' });
+
+    res.json({ email: invite.email, name: invite.name, role: invite.role, tenant_name: invite.tenant_name });
+  } catch (error) {
+    console.error('Get invite info error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// POST /api/auth/accept-invite - Create the account and log in
+const acceptInvite = async (req, res) => {
+  try {
+    const { token, name, password } = req.body;
+    if (!token || !name || !password) return res.status(400).json({ error: 'Name and password are required.' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+
+    const inviteResult = await query(
+      'SELECT * FROM invitations WHERE token = $1',
+      [token]
+    );
+    if (!inviteResult.rows.length) return res.status(400).json({ error: 'Invalid invitation link.' });
+    const invite = inviteResult.rows[0];
+    if (invite.accepted_at) return res.status(400).json({ error: 'This invitation has already been used.' });
+    if (new Date(invite.expires_at) < new Date()) return res.status(400).json({ error: 'This invitation has expired.' });
+
+    const existingUser = await query('SELECT id FROM users WHERE email = $1', [invite.email]);
+    if (existingUser.rows.length > 0) return res.status(409).json({ error: 'An account with this email already exists.' });
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    const userResult = await query(
+      `INSERT INTO users (tenant_id, name, email, password_hash, role, team_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, name, email, role, tenant_id, team_id`,
+      [invite.tenant_id, name, invite.email, passwordHash, invite.role, invite.team_id]
+    );
+    await query('UPDATE invitations SET accepted_at = NOW() WHERE id = $1', [invite.id]);
+
+    const user = userResult.rows[0];
+    const tenantResult = await query(
+      `SELECT t.name, t.slug, t.business_type, t.subscription_status, t.trial_ends_at,
+              t.subscription_start, t.subscription_end, p.name as plan_name
+       FROM tenants t LEFT JOIN plans p ON t.plan_id = p.id WHERE t.id = $1`,
+      [invite.tenant_id]
+    );
+    const tenant = tenantResult.rows[0];
+
+    const token_ = generateToken(user.id);
+    res.status(201).json({
+      message: 'Welcome aboard!',
+      token: token_,
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, tenant_id: user.tenant_id },
+      tenant: {
+        id: invite.tenant_id, name: tenant.name, slug: tenant.slug, business_type: tenant.business_type,
+        subscriptionStatus: tenant.subscription_status, trialEndsAt: tenant.trial_ends_at,
+        subscriptionStart: tenant.subscription_start, subscriptionEnd: tenant.subscription_end,
+        planName: tenant.plan_name,
+      },
+    });
+  } catch (error) {
+    console.error('Accept invite error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+module.exports = { signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite };

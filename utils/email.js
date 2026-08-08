@@ -44,4 +44,20 @@ const sendPasswordResetEmail = async (email, resetUrl, businessName) => {
   });
 };
 
-module.exports = { sendEmail, sendPasswordResetEmail };
+const sendInviteEmail = async (email, inviteUrl, businessName, inviterName) => {
+  return sendEmail({
+    to: email,
+    fromName: businessName,
+    subject: `${inviterName} invited you to join ${businessName} on CurveLead`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
+        <h2>You're invited to ${businessName}</h2>
+        <p>${inviterName} has invited you to join their team on CurveLead. Click below to set up your account:</p>
+        <a href="${inviteUrl}" style="display: inline-block; background: #4f46e5; color: white; padding: 12px 32px; border-radius: 8px; text-decoration: none; margin: 20px 0;">Accept Invitation</a>
+        <p style="color: #999; font-size: 13px;">This link expires in 7 days.</p>
+      </div>
+    `,
+  });
+};
+
+module.exports = { sendEmail, sendPasswordResetEmail, sendInviteEmail };
