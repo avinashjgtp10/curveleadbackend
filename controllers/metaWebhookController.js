@@ -37,7 +37,7 @@ const receiveLeadFormWebhook = async (req, res) => {
 
       // Find tenant by page_id and get their stored access token
       const tenantResult = await query(
-        `SELECT id, settings->>'meta_page_access_token' AS page_access_token
+        `SELECT id, name, settings->>'meta_page_access_token' AS page_access_token
          FROM tenants WHERE settings->>'meta_page_id' = $1 LIMIT 1`,
         [pageId]
       );
@@ -62,7 +62,7 @@ const receiveLeadFormWebhook = async (req, res) => {
           {
             params: {
               access_token: tenant.page_access_token,
-              fields: 'field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,form_id,created_time',
+              fields: 'field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,form_id,created_time,platform',
             },
           }
         );
@@ -105,7 +105,10 @@ const receiveLeadFormWebhook = async (req, res) => {
       }
 
       const leadNumber = await nextLeadNumber(tenant.id);
-      const notes = formatFieldDataNotes(leadData.field_data);
+      const notes = formatFieldDataNotes(leadData.field_data, {
+        platform: leadData.platform, tenantName: tenant.name,
+        campaignName: leadData.campaign_name, adsetName: leadData.adset_name, adName: leadData.ad_name,
+      });
       const inserted = await query(
         `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, meta_ad_id, meta_adset_id, stage, notes)
          VALUES ($1, $2, $3, $4, $5, 'meta_ads', $6, $7, $8, $9, $10, 'new', $11) RETURNING *`,

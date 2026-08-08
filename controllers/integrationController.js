@@ -350,7 +350,8 @@ const facebookSubscriptionStatus = async (req, res) => {
 // ── POST /api/integrations/facebook/sync-leads ────────────────────────────
 const facebookSyncLeads = async (req, res) => {
   try {
-    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const result = await query('SELECT name, settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const tenantName = result.rows[0]?.name;
     const settings = result.rows[0]?.settings || {};
     const { meta_page_id, meta_page_access_token } = settings;
     if (!meta_page_id || !meta_page_access_token) return res.status(400).json({ error: 'Connect a Facebook page first.' });
@@ -364,7 +365,7 @@ const facebookSyncLeads = async (req, res) => {
     for (const form of formsData.data || []) {
       const leadsData = await fbGet(
         `/${form.id}/leads?access_token=${encodeURIComponent(meta_page_access_token)}&limit=100`
-        + `&fields=id,created_time,field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name`
+        + `&fields=id,created_time,field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,platform`
       );
 
       for (const lead of leadsData.data || []) {
@@ -377,7 +378,10 @@ const facebookSyncLeads = async (req, res) => {
         const name = fields['full_name'] || fields['name'] || 'Unknown';
         const phone = fields['phone_number'] || fields['phone'] || null;
         const email = fields['email'] || null;
-        const notes = formatFieldDataNotes(lead.field_data);
+        const notes = formatFieldDataNotes(lead.field_data, {
+          platform: lead.platform, tenantName,
+          campaignName: lead.campaign_name, adsetName: lead.adset_name, adName: lead.ad_name,
+        });
 
         const campaignId = await findOrCreateMetaCampaign({
           tenantId: req.tenantId, campaignId: lead.campaign_id, campaignName: lead.campaign_name, adsetId: lead.adset_id,
