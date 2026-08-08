@@ -6,9 +6,12 @@ const getStaff = async (req, res) => {
   try {
     const result = await query(
       `SELECT u.id, u.name, u.email, u.phone, u.role, u.is_active, u.last_login, u.created_at,
+              u.team_id, t.name as team_name,
               (SELECT COUNT(*) FROM leads WHERE assigned_to = u.id) as assigned_leads,
               (SELECT COUNT(*) FROM leads WHERE assigned_to = u.id AND stage = 'won') as won_leads
-       FROM users u WHERE u.tenant_id = $1 ORDER BY u.created_at DESC`,
+       FROM users u
+       LEFT JOIN teams t ON t.id = u.team_id
+       WHERE u.tenant_id = $1 ORDER BY u.created_at DESC`,
       [req.tenantId]
     );
     res.json({ staff: result.rows });
@@ -38,7 +41,7 @@ const createStaff = async (req, res) => {
 // PUT /api/staff/:id
 const updateStaff = async (req, res) => {
   try {
-    const allowedFields = ['name', 'phone', 'role', 'is_active'];
+    const allowedFields = ['name', 'phone', 'role', 'is_active', 'team_id'];
     const updates = [];
     const params = [req.params.id, req.tenantId];
     let i = 3;
@@ -46,14 +49,14 @@ const updateStaff = async (req, res) => {
     for (const field of allowedFields) {
       if (req.body[field] !== undefined) {
         updates.push(`${field} = $${i++}`);
-        params.push(req.body[field]);
+        params.push(field === 'team_id' ? (req.body[field] || null) : req.body[field]);
       }
     }
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
 
     const result = await query(
       `UPDATE users SET ${updates.join(', ')} WHERE id = $1 AND tenant_id = $2
-       RETURNING id, name, email, phone, role, is_active`,
+       RETURNING id, name, email, phone, role, is_active, team_id`,
       params
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Staff not found.' });
