@@ -1,31 +1,23 @@
-const nodemailer = require('nodemailer');
-
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_APP_PASSWORD,
-    },
-  });
-};
+const axios = require('axios');
 
 const sendEmail = async ({ to, subject, html, text, fromName }) => {
   try {
-    if (!process.env.EMAIL_USER) {
+    if (!process.env.RESEND_API_KEY) {
       console.log(`📧 Email (dev) → ${to}: ${subject}`);
       return { success: true, dev: true };
     }
 
-    const transporter = createTransporter();
-    const result = await transporter.sendMail({
-      from: `"${fromName || process.env.EMAIL_FROM_NAME || 'CurveLead'}" <${process.env.EMAIL_USER}>`,
-      to, subject, html, text,
-    });
-    return { success: true, messageId: result.messageId };
+    const from = `${fromName || process.env.EMAIL_FROM_NAME || 'CurveLead'} <${process.env.EMAIL_FROM_ADDRESS}>`;
+    const result = await axios.post(
+      'https://api.resend.com/emails',
+      { from, to, subject, html, text },
+      { headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' } }
+    );
+    return { success: true, messageId: result.data.id };
   } catch (error) {
-    console.error('Email error:', error.message);
-    return { success: false, error: error.message };
+    const message = error.response?.data?.message || error.message;
+    console.error('Email error:', message);
+    return { success: false, error: message };
   }
 };
 

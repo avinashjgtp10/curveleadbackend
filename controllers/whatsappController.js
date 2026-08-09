@@ -3,6 +3,7 @@ const { sendTextMessage, sendTemplate } = require('../services/whatsappService')
 const { qualifyLead } = require('../services/groqService');
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { changeLeadStage } = require('../utils/leadStage');
+const { resolveWhatsAppCredentials, findNumberOwner } = require('../utils/whatsappCredentials');
 
 // GET /api/whatsapp/inbox - Shared team inbox (all conversations)
 const getInbox = async (req, res) => {
@@ -70,17 +71,11 @@ const sendMessage = async (req, res) => {
       return res.status(400).json({ error: 'lead_id and message required.' });
     }
 
-    const [leadResult, tenantResult] = await Promise.all([
-      query('SELECT phone, name FROM leads WHERE id = $1 AND tenant_id = $2', [lead_id, req.tenantId]),
-      query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]),
-    ]);
+    const leadResult = await query('SELECT phone, name, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2', [lead_id, req.tenantId]);
     if (leadResult.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
 
     const lead = leadResult.rows[0];
-    const { whatsapp_phone_number_id, whatsapp_access_token } = tenantResult.rows[0]?.settings || {};
-    const credentials = whatsapp_phone_number_id && whatsapp_access_token
-      ? { phone_number_id: whatsapp_phone_number_id, access_token: whatsapp_access_token }
-      : null;
+    const credentials = await resolveWhatsAppCredentials(req.tenantId, lead.assigned_to);
     const result = template_name
       ? await sendTemplate(lead.phone, template_name, 'en', [], credentials)
       : await sendTextMessage(lead.phone, message, credentials);
@@ -130,16 +125,28 @@ const handleWebhook = async (req, res) => {
     const messages = change?.value?.messages;
     if (!messages) return;
 
+    // Which of our numbers this message arrived on — the tenant's shared number,
+    // or a specific rep's own connected number.
+    const receivingNumberId = change?.value?.metadata?.phone_number_id;
+    const numberOwner = await findNumberOwner(receivingNumberId);
+
     for (const msg of messages) {
       const fromPhone = msg.from; // e.g. "919876543210"
       const messageText = msg.text?.body || `[${msg.type}]`;
       const waMessageId = msg.id;
 
-      // Find lead by phone (across all tenants matching this WhatsApp number)
-      const leadResult = await query(
-        'SELECT id, tenant_id, name, assigned_to, ai_paused FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
-        [fromPhone, fromPhone.replace(/^91/, '')]
-      );
+      // If the message arrived on a rep's own number, scope the lookup to their
+      // tenant. Otherwise fall back to matching by phone across all tenants
+      // (shared tenant-level number, or a number we don't recognize).
+      const leadResult = numberOwner
+        ? await query(
+            'SELECT id, tenant_id, name, assigned_to, ai_paused FROM leads WHERE tenant_id = $1 AND (phone = $2 OR phone = $3) LIMIT 1',
+            [numberOwner.tenant_id, fromPhone, fromPhone.replace(/^91/, '')]
+          )
+        : await query(
+            'SELECT id, tenant_id, name, assigned_to, ai_paused FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
+            [fromPhone, fromPhone.replace(/^91/, '')]
+          );
 
       if (leadResult.rows.length === 0) {
         console.log(`Unknown WhatsApp number: ${fromPhone}`);
@@ -147,6 +154,12 @@ const handleWebhook = async (req, res) => {
       }
 
       const lead = leadResult.rows[0];
+
+      // A message landing on a rep's personal number implicitly claims the lead for them.
+      if (numberOwner && !lead.assigned_to) {
+        await query('UPDATE leads SET assigned_to = $1 WHERE id = $2', [numberOwner.id, lead.id]);
+        lead.assigned_to = numberOwner.id;
+      }
 
       // Save inbound message
       await query(
@@ -175,11 +188,8 @@ const handleWebhook = async (req, res) => {
             { business_name: tenant.name, description: tenant.settings?.business_description }
           );
 
-          // Send AI reply
-          const { whatsapp_phone_number_id, whatsapp_access_token } = tenant.settings || {};
-          const credentials = whatsapp_phone_number_id && whatsapp_access_token
-            ? { phone_number_id: whatsapp_phone_number_id, access_token: whatsapp_access_token }
-            : null;
+          // Send AI reply — from the assigned rep's own number if they have one
+          const credentials = await resolveWhatsAppCredentials(lead.tenant_id, lead.assigned_to);
           const sendResult = await sendTextMessage(fromPhone, aiResponse.reply, credentials);
           await query(
             `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, is_ai_generated)

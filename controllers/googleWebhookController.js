@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
+const { checkNewLeadTriggers } = require('../utils/automationTriggers');
+const { applyAssignmentRules } = require('../utils/leadAssignment');
+const { notifyNewLead } = require('../utils/leadNotifyEmail');
 
 // POST /api/webhook/google — Google Ads Lead Form Extension webhook
 const receiveGoogleLead = async (req, res) => {
@@ -33,11 +36,14 @@ const receiveGoogleLead = async (req, res) => {
     if (existing.rows.length) { console.log(`Google webhook: duplicate phone ${phone}`); return; }
 
     const leadNumber = await nextLeadNumber(tenantId);
-    await query(
+    const inserted = await query(
       `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, stage)
-       VALUES ($1,$2,$3,$4,$5,'google_ads',$6,'new')`,
+       VALUES ($1,$2,$3,$4,$5,'google_ads',$6,'new') RETURNING *`,
       [tenantId, leadNumber, name, phone, email, `Campaign: ${gCampaignId || 'unknown'}`]
     );
+    applyAssignmentRules({ tenantId, lead: inserted.rows[0] }).catch(() => {});
+    checkNewLeadTriggers({ tenantId, lead: inserted.rows[0] }).catch(() => {});
+    notifyNewLead({ tenantId, lead: inserted.rows[0] }).catch(() => {});
 
     console.log(`✅ Google Ads lead captured: ${name} (${phone})`);
   } catch (e) {

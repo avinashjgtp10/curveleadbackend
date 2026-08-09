@@ -3,6 +3,7 @@ const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
+const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const axios = require('axios');
@@ -116,6 +117,7 @@ const receiveLeadFormWebhook = async (req, res) => {
          campaignId || null, leadgenId, leadData.ad_id || adId || null, leadData.adset_id || null, notes]
       );
       sendWelcomeMessage({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
+      applyAssignmentRules({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
       checkNewLeadTriggers({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
       notifyNewLead({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
 

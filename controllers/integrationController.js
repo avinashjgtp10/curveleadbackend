@@ -4,6 +4,7 @@ const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
+const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { syncTenantAdInsights } = require('../utils/metaAdInsights');
@@ -23,6 +24,7 @@ const createLeadFromSource = async (tenantId, { name, phone, email, source, sour
     [tenantId, leadNumber, name || 'Unknown', phone, email || null, source, source_detail || null, campaign_id || null]
   );
   sendWelcomeMessage({ tenantId, lead: result.rows[0] }).catch(() => {});
+  applyAssignmentRules({ tenantId, lead: result.rows[0] }).catch(() => {});
   checkNewLeadTriggers({ tenantId, lead: result.rows[0] }).catch(() => {});
   notifyNewLead({ tenantId, lead: result.rows[0] }).catch(() => {});
   return { duplicate: false, id: result.rows[0].id };

@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { query } = require('../config/db');
 const { sendInviteEmail } = require('../utils/email');
+const { PERMISSIONS, ROLE_DEFAULTS } = require('../utils/permissions');
 
 const INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -155,6 +156,120 @@ const revokeInvitation = async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
 
+// GET /api/staff/:id/permissions - Effective permission set (overrides + role defaults)
+const getUserPermissions = async (req, res) => {
+  try {
+    const userRes = await query('SELECT role FROM users WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (!userRes.rows.length) return res.status(404).json({ error: 'Staff not found.' });
+    const role = userRes.rows[0].role;
+
+    const overridesRes = await query(
+      'SELECT permission_key, granted FROM user_permissions WHERE user_id = $1',
+      [req.params.id]
+    );
+    const overrides = Object.fromEntries(overridesRes.rows.map(r => [r.permission_key, r.granted]));
+    const defaults = ROLE_DEFAULTS[role] || [];
+
+    const permissions = Object.keys(PERMISSIONS).map(key => ({
+      key,
+      label: PERMISSIONS[key],
+      granted: key in overrides ? overrides[key] : defaults.includes(key),
+    }));
+
+    res.json({ role, permissions });
+  } catch (error) { console.error('Get permissions error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// PUT /api/staff/:id/permissions - body: { permissions: { 'leads.delete': true, ... } }
+const updateUserPermissions = async (req, res) => {
+  try {
+    const { permissions } = req.body;
+    if (!permissions || typeof permissions !== 'object') return res.status(400).json({ error: 'permissions object required.' });
+
+    const userRes = await query('SELECT id FROM users WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (!userRes.rows.length) return res.status(404).json({ error: 'Staff not found.' });
+
+    for (const [key, granted] of Object.entries(permissions)) {
+      if (!(key in PERMISSIONS)) continue;
+      await query(
+        `INSERT INTO user_permissions (tenant_id, user_id, permission_key, granted)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (user_id, permission_key) DO UPDATE SET granted = EXCLUDED.granted`,
+        [req.tenantId, req.params.id, key, !!granted]
+      );
+    }
+
+    res.json({ message: 'Permissions updated.' });
+  } catch (error) { console.error('Update permissions error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// Shared by the self-service ("me") and admin-managed WhatsApp number endpoints.
+const fetchWhatsAppNumber = async (userId, tenantId) => {
+  const result = await query(
+    'SELECT whatsapp_phone_number_id, whatsapp_access_token FROM users WHERE id = $1 AND tenant_id = $2',
+    [userId, tenantId]
+  );
+  if (!result.rows.length) return null;
+  const { whatsapp_phone_number_id, whatsapp_access_token } = result.rows[0];
+  return {
+    whatsapp_phone_number_id: whatsapp_phone_number_id || '',
+    whatsapp_access_token: whatsapp_access_token ? '••••••••' : '',
+    configured: !!(whatsapp_phone_number_id && whatsapp_access_token),
+  };
+};
+
+const saveWhatsAppNumber = async (userId, tenantId, { whatsapp_phone_number_id, whatsapp_access_token }) => {
+  const sets = [];
+  const params = [];
+  let i = 1;
+  if (whatsapp_phone_number_id !== undefined) { sets.push(`whatsapp_phone_number_id = $${i++}`); params.push(whatsapp_phone_number_id || null); }
+  if (whatsapp_access_token && !whatsapp_access_token.startsWith('•')) { sets.push(`whatsapp_access_token = $${i++}`); params.push(whatsapp_access_token); }
+  if (!sets.length) return { rowCount: 0 };
+  params.push(userId, tenantId);
+  return query(`UPDATE users SET ${sets.join(', ')} WHERE id = $${i++} AND tenant_id = $${i} RETURNING id`, params);
+};
+
+// GET /api/staff/me/whatsapp-number
+const getMyWhatsAppNumber = async (req, res) => {
+  try {
+    const config = await fetchWhatsAppNumber(req.user.id, req.tenantId);
+    res.json(config);
+  } catch (error) { console.error('Get my WhatsApp number error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// PUT /api/staff/me/whatsapp-number
+const updateMyWhatsAppNumber = async (req, res) => {
+  try {
+    const result = await saveWhatsAppNumber(req.user.id, req.tenantId, req.body);
+    if (!result.rowCount) return res.status(400).json({ error: 'No fields to update.' });
+    res.json({ message: 'WhatsApp number saved.' });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'That WhatsApp number is already connected to another team member.' });
+    console.error('Update my WhatsApp number error:', error); res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// GET /api/staff/:id/whatsapp-number
+const getStaffWhatsAppNumber = async (req, res) => {
+  try {
+    const config = await fetchWhatsAppNumber(req.params.id, req.tenantId);
+    if (!config) return res.status(404).json({ error: 'Staff not found.' });
+    res.json(config);
+  } catch (error) { console.error('Get staff WhatsApp number error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// PUT /api/staff/:id/whatsapp-number
+const updateStaffWhatsAppNumber = async (req, res) => {
+  try {
+    const result = await saveWhatsAppNumber(req.params.id, req.tenantId, req.body);
+    if (!result.rowCount) return res.status(404).json({ error: 'Staff not found, or no fields to update.' });
+    res.json({ message: 'WhatsApp number saved.' });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'That WhatsApp number is already connected to another team member.' });
+    console.error('Update staff WhatsApp number error:', error); res.status(500).json({ error: 'Failed.' });
+  }
+};
+
 // DELETE /api/staff/:id
 const deleteStaff = async (req, res) => {
   try {
@@ -172,4 +287,8 @@ const deleteStaff = async (req, res) => {
   } catch (error) { console.error('Delete staff error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getStaff, createStaff, updateStaff, deleteStaff, inviteStaff, getInvitations, resendInvitation, revokeInvitation };
+module.exports = {
+  getStaff, createStaff, updateStaff, deleteStaff, inviteStaff, getInvitations, resendInvitation, revokeInvitation,
+  getUserPermissions, updateUserPermissions,
+  getMyWhatsAppNumber, updateMyWhatsAppNumber, getStaffWhatsAppNumber, updateStaffWhatsAppNumber,
+};

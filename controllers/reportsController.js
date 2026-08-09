@@ -95,11 +95,15 @@ const getReportByStaff = async (req, res) => {
               COUNT(l.id) FILTER (WHERE l.stage = 'won') as won,
               COUNT(l.id) FILTER (WHERE l.stage = 'lost') as lost,
               COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won'), 0) as revenue,
-              (SELECT COUNT(*) FROM followups WHERE assigned_to = u.id AND completed = false) as pending_followups
+              ROUND(AVG(l.response_time_seconds) FILTER (WHERE l.response_time_seconds IS NOT NULL)) as avg_response_seconds,
+              (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
+                WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = false) as pending_followups,
+              (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
+                WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = true) as completed_followups
        FROM users u
        LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = u.tenant_id
        WHERE u.tenant_id = $1 AND u.is_active = true${userFilter}
-       GROUP BY u.id, u.name, u.email
+       GROUP BY u.id, u.name, u.email, u.tenant_id
        ORDER BY revenue DESC`,
       params
     );
@@ -109,6 +113,9 @@ const getReportByStaff = async (req, res) => {
       total_leads: parseInt(s.total_leads),
       won: parseInt(s.won),
       lost: parseInt(s.lost),
+      avg_response_seconds: s.avg_response_seconds !== null ? parseInt(s.avg_response_seconds) : null,
+      pending_followups: parseInt(s.pending_followups),
+      completed_followups: parseInt(s.completed_followups),
       conversion_rate: s.total_leads > 0 ? ((s.won / s.total_leads) * 100).toFixed(1) : 0,
     }));
 
@@ -310,7 +317,11 @@ const getDashboardSummary = async (req, res) => {
           COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
           COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
-            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue,
+          ROUND(AVG(l.response_time_seconds) FILTER (WHERE l.response_time_seconds IS NOT NULL)) as avg_response_seconds,
+          (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
+            WHERE l2.tenant_id = $1 AND l2.assigned_to = u.id
+              AND lf.is_completed = true AND lf.completed_at >= $2 AND lf.completed_at < $3) as completed_followups
         FROM users u
         LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
           AND l.created_at >= $2 AND l.created_at < $3
@@ -396,7 +407,14 @@ const getDashboardSummary = async (req, res) => {
 
       pipeline:    pipeline.rows.map(p => ({ ...p, count: parseInt(p.count), pipeline_value: parseFloat(p.pipeline_value) })),
       sources:     sources.rows.map(s => ({ ...s, total: parseInt(s.total), won: parseInt(s.won), conversion_rate: s.total > 0 ? ((s.won / s.total) * 100).toFixed(1) : '0.0' })),
-      team:        team.rows.map(t => ({ ...t, total_leads: parseInt(t.total_leads), won: parseInt(t.won), revenue: parseFloat(t.revenue) })),
+      team:        team.rows.map(t => ({
+        ...t,
+        total_leads: parseInt(t.total_leads),
+        won: parseInt(t.won),
+        revenue: parseFloat(t.revenue),
+        avg_response_seconds: t.avg_response_seconds !== null ? parseInt(t.avg_response_seconds) : null,
+        completed_followups: parseInt(t.completed_followups),
+      })),
       recentLeads: recentLeads.rows,
       trend:       trend.rows,
     });
