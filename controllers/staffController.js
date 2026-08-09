@@ -276,9 +276,9 @@ const deleteStaff = async (req, res) => {
     if (req.params.id === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself.' });
 
     const userId = req.params.id;
-    // Unassign leads and followups before deleting (ON DELETE SET NULL handles created_by columns)
+    // Unassign leads before deleting (ON DELETE SET NULL handles created_by columns;
+    // lead_followups has no assigned_to of its own — it follows the lead's)
     await query('UPDATE leads SET assigned_to = NULL WHERE assigned_to = $1', [userId]);
-    await query('UPDATE followups SET assigned_to = NULL WHERE assigned_to = $1', [userId]);
 
     const result = await query('DELETE FROM users WHERE id = $1 AND tenant_id = $2 RETURNING id',
       [userId, req.tenantId]);

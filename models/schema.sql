@@ -180,26 +180,8 @@ CREATE TABLE IF NOT EXISTS lead_activities (
 
 CREATE INDEX IF NOT EXISTS idx_lead_activities ON lead_activities(tenant_id, lead_id, created_at DESC);
 
--- Follow-ups (scheduled tasks)
-CREATE TABLE IF NOT EXISTS followups (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
-    lead_id UUID REFERENCES leads(id) ON DELETE CASCADE,
-    assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
-    title VARCHAR(200),
-    description TEXT,
-    type VARCHAR(30) DEFAULT 'call', -- call, whatsapp, email, meeting, task
-    scheduled_at TIMESTAMP NOT NULL,
-    completed_at TIMESTAMP,
-    completed BOOLEAN DEFAULT false,
-    outcome TEXT,
-    created_by UUID REFERENCES users(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_followups_tenant ON followups(tenant_id, completed);
-CREATE INDEX IF NOT EXISTS idx_followups_lead ON followups(lead_id);
-CREATE INDEX IF NOT EXISTS idx_followups_scheduled ON followups(scheduled_at) WHERE completed = false;
+-- Note: follow-up scheduling lives in lead_followups (added later, see migration_*.sql
+-- files) — the legacy 'followups' table this file used to define was dropped as unused.
 
 -- ⭐ WhatsApp Messages (shared inbox)
 CREATE TABLE IF NOT EXISTS whatsapp_messages (

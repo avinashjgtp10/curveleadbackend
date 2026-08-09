@@ -53,22 +53,6 @@ const getFollowups = async (req, res) => {
   } catch (error) { console.error('Get followups error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
-// POST /api/followups
-const createFollowup = async (req, res) => {
-  try {
-    const { lead_id, title, description, type, scheduled_at, assigned_to } = req.body;
-    if (!lead_id || !scheduled_at) return res.status(400).json({ error: 'lead_id and scheduled_at required.' });
-
-    const result = await query(
-      `INSERT INTO followups (tenant_id, lead_id, title, description, type, scheduled_at, assigned_to, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.tenantId, lead_id, title, description, type || 'call', scheduled_at, assigned_to, req.user.id]
-    );
-
-    res.status(201).json({ followup: result.rows[0] });
-  } catch (error) { console.error('Create followup error:', error); res.status(500).json({ error: 'Failed.' }); }
-};
-
 // PUT /api/followups/:id
 const updateFollowup = async (req, res) => {
   try {
@@ -154,4 +138,4 @@ const deleteFollowup = async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getFollowups, createFollowup, updateFollowup, completeFollowup, deleteFollowup };
+module.exports = { getFollowups, updateFollowup, completeFollowup, deleteFollowup };
