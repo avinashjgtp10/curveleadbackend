@@ -210,7 +210,7 @@ const createLead = async (req, res) => {
                             stage, assigned_to, notes, deal_value, expected_close_date, tags, lead_date)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
          RETURNING *`,
-        [req.tenantId, leadNumber, name, phone, email, location, business_name, address, source || 'manual', source_detail, campaign_id,
+        [req.tenantId, leadNumber, name, phone, email, location, business_name, address, source || 'manual', source_detail, campaign_id || null,
          stage || 'new', assigned_to, notes, deal_value || 0, expected_close_date, tags, lead_date || new Date()]
       );
     });
