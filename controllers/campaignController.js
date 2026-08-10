@@ -1,4 +1,34 @@
 const { query } = require('../config/db');
+const { rankCampaigns } = require('../utils/campaignInsights');
+
+// Lightweight, unfiltered/unpaginated metrics for every campaign in the tenant —
+// used only as the baseline other campaigns get compared against for verdicts.
+const getBaselineMetrics = async (tenantId) => {
+  const result = await query(
+    `SELECT c.id,
+            (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads,
+            (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
+               AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as won_leads,
+            (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
+               AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_lost = true)) as lost_leads,
+            (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND lead_score = 'hot') as hot_leads
+     FROM campaigns c WHERE c.tenant_id = $1`,
+    [tenantId]
+  );
+  return result.rows.map(c => {
+    const totalLeads = parseInt(c.total_leads) || 0;
+    const wonLeads = parseInt(c.won_leads) || 0;
+    const lostLeads = parseInt(c.lost_leads) || 0;
+    const hotLeads = parseInt(c.hot_leads) || 0;
+    return {
+      id: c.id,
+      total_leads: totalLeads,
+      conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
+      disqualified_rate: totalLeads > 0 ? ((lostLeads / totalLeads) * 100).toFixed(1) : 0,
+      hot_rate: totalLeads > 0 ? ((hotLeads / totalLeads) * 100).toFixed(1) : 0,
+    };
+  });
+};
 
 // GET /api/campaigns - List all campaigns with metrics
 const getCampaigns = async (req, res) => {
@@ -19,6 +49,9 @@ const getCampaigns = async (req, res) => {
               (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads,
               (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
                  AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as won_leads,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
+                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_lost = true)) as lost_leads,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND lead_score = 'hot') as hot_leads,
               (SELECT COALESCE(SUM(deal_value), 0) FROM leads WHERE campaign_id = c.id
                  AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as revenue,
               u.name as created_by_name
@@ -30,22 +63,31 @@ const getCampaigns = async (req, res) => {
       [...params, limit, offset]
     );
 
-    // Calculate CPL & ROI for each campaign
+    // Calculate CPL, quality mix & ROI for each campaign
     const campaigns = result.rows.map(c => {
       const totalLeads = parseInt(c.total_leads) || 0;
       const wonLeads = parseInt(c.won_leads) || 0;
+      const lostLeads = parseInt(c.lost_leads) || 0;
+      const hotLeads = parseInt(c.hot_leads) || 0;
       const spend = parseFloat(c.actual_spend) || 0;
       const revenue = parseFloat(c.revenue) || 0;
       return {
         ...c,
+        total_leads: totalLeads,
+        won_leads: wonLeads,
+        lost_leads: lostLeads,
+        hot_leads: hotLeads,
         cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0,
         cost_per_won: wonLeads > 0 ? (spend / wonLeads).toFixed(2) : 0,
         conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
+        disqualified_rate: totalLeads > 0 ? ((lostLeads / totalLeads) * 100).toFixed(1) : 0,
+        hot_rate: totalLeads > 0 ? ((hotLeads / totalLeads) * 100).toFixed(1) : 0,
         roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
       };
     });
 
-    res.json({ campaigns });
+    const baseline = await getBaselineMetrics(req.tenantId);
+    res.json({ campaigns: rankCampaigns(campaigns, baseline) });
   } catch (error) {
     console.error('Get campaigns error:', error);
     res.status(500).json({ error: 'Failed.' });
@@ -87,30 +129,50 @@ const getCampaign = async (req, res) => {
       leadsParams
     );
 
-    // Won-ness is tenant-configurable (lead_stages.is_won), not the literal string 'won'
-    const wonStats = await query(
-      `SELECT COUNT(*) as won_leads, COALESCE(SUM(deal_value), 0) as revenue
-       FROM leads WHERE campaign_id = $1 AND tenant_id = $2
-         AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_won = true)`,
-      [req.params.id, req.tenantId]
-    );
+    // Won/lost-ness is tenant-configurable (lead_stages.is_won/is_lost), not the literal string
+    const [wonStats, lostStats, scoreStats] = await Promise.all([
+      query(
+        `SELECT COUNT(*) as won_leads, COALESCE(SUM(deal_value), 0) as revenue
+         FROM leads WHERE campaign_id = $1 AND tenant_id = $2
+           AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_won = true)`,
+        [req.params.id, req.tenantId]
+      ),
+      query(
+        `SELECT COUNT(*) as lost_leads
+         FROM leads WHERE campaign_id = $1 AND tenant_id = $2
+           AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_lost = true)`,
+        [req.params.id, req.tenantId]
+      ),
+      query(`SELECT COUNT(*) as hot_leads FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND lead_score = 'hot'`,
+        [req.params.id, req.tenantId]),
+    ]);
 
     const totalLeads = stageBreakdown.rows.reduce((sum, s) => sum + parseInt(s.count), 0);
     const wonLeads = parseInt(wonStats.rows[0].won_leads) || 0;
+    const lostLeads = parseInt(lostStats.rows[0].lost_leads) || 0;
+    const hotLeads = parseInt(scoreStats.rows[0].hot_leads) || 0;
     const revenue = parseFloat(wonStats.rows[0].revenue) || 0;
     const spend = parseFloat(result.rows[0].actual_spend) || 0;
 
+    const campaignMetrics = {
+      ...result.rows[0],
+      total_leads: totalLeads,
+      won_leads: wonLeads,
+      lost_leads: lostLeads,
+      hot_leads: hotLeads,
+      revenue,
+      cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0,
+      cost_per_won: wonLeads > 0 ? (spend / wonLeads).toFixed(2) : 0,
+      conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
+      disqualified_rate: totalLeads > 0 ? ((lostLeads / totalLeads) * 100).toFixed(1) : 0,
+      hot_rate: totalLeads > 0 ? ((hotLeads / totalLeads) * 100).toFixed(1) : 0,
+      roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
+    };
+
+    const baseline = await getBaselineMetrics(req.tenantId);
+
     res.json({
-      campaign: {
-        ...result.rows[0],
-        total_leads: totalLeads,
-        won_leads: wonLeads,
-        revenue,
-        cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0,
-        cost_per_won: wonLeads > 0 ? (spend / wonLeads).toFixed(2) : 0,
-        conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
-        roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
-      },
+      campaign: rankCampaigns([campaignMetrics], baseline)[0],
       stageBreakdown: stageBreakdown.rows,
       recentLeads: recentLeads.rows,
     });
