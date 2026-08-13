@@ -6,6 +6,7 @@ const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
+const { isMetaLeadDeleted } = require('../utils/deletedLeads');
 const axios = require('axios');
 
 // GET /api/webhook/meta - Verify webhook
@@ -50,6 +51,11 @@ const receiveLeadFormWebhook = async (req, res) => {
 
       if (!tenant.page_access_token) {
         console.warn(`Tenant ${tenant.id} has no page access token for page ${pageId}`);
+        continue;
+      }
+
+      if (await isMetaLeadDeleted(tenant.id, leadgenId)) {
+        console.log(`Meta lead ${leadgenId} was previously deleted, skipping`);
         continue;
       }
 

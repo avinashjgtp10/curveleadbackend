@@ -30,4 +30,13 @@ const findNumberOwner = async (phoneNumberId) => {
   return result.rows[0] || null;
 };
 
-module.exports = { resolveWhatsAppCredentials, findNumberOwner };
+// Given the phone_number_id Meta says a message was received on, finds the
+// tenant whose shared WhatsApp number that is (as opposed to a rep's own
+// connected number — see findNumberOwner above).
+const findTenantBySharedNumber = async (phoneNumberId) => {
+  if (!phoneNumberId) return null;
+  const result = await query(`SELECT id FROM tenants WHERE settings->>'whatsapp_phone_number_id' = $1`, [phoneNumberId]);
+  return result.rows[0]?.id || null;
+};
+
+module.exports = { resolveWhatsAppCredentials, findNumberOwner, findTenantBySharedNumber };

@@ -3,7 +3,12 @@ const { sendTextMessage, sendTemplate } = require('../services/whatsappService')
 const { qualifyLead } = require('../services/groqService');
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { changeLeadStage } = require('../utils/leadStage');
-const { resolveWhatsAppCredentials, findNumberOwner } = require('../utils/whatsappCredentials');
+const { resolveWhatsAppCredentials, findNumberOwner, findTenantBySharedNumber } = require('../utils/whatsappCredentials');
+const { nextLeadNumber } = require('../utils/leadNumber');
+const { resolveCampaignFromAdId } = require('../utils/metaCampaignMatch');
+const { applyAssignmentRules } = require('../utils/leadAssignment');
+const { notifyNewLead } = require('../utils/leadNotifyEmail');
+const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 
 // GET /api/whatsapp/inbox - Shared team inbox (all conversations)
 const getInbox = async (req, res) => {
@@ -103,6 +108,39 @@ const sendMessage = async (req, res) => {
   }
 };
 
+// A Click-to-WhatsApp ad's first message includes a `referral` block with the
+// ad ID that drove the conversation — the same attribution signal lead-gen
+// forms get via campaign_id, just delivered inside the message webhook
+// instead of a separate leadgen event. Resolves it to a campaign (via the
+// tenant's connected ad account, if any) and creates the lead.
+const createLeadFromWhatsAppReferral = async ({ tenantId, fromPhone, contactName, referral }) => {
+  const existing = await query('SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2', [tenantId, fromPhone]);
+  if (existing.rows.length) return null; // race with another inbound message — let the next iteration handle it
+
+  const matched = await resolveCampaignFromAdId({ tenantId, adId: referral.source_id });
+  const leadNumber = await nextLeadNumber(tenantId);
+  const notesParts = ['Started via Click-to-WhatsApp ad.'];
+  if (referral.headline) notesParts.push(`Ad headline: ${referral.headline}`);
+  if (matched?.adName) notesParts.push(`Ad: ${matched.adName}`);
+
+  const inserted = await query(
+    `INSERT INTO leads (tenant_id, lead_number, name, phone, source, source_detail, campaign_id, meta_ad_id, stage, notes)
+     VALUES ($1, $2, $3, $4, 'whatsapp', $5, $6, $7, 'new', $8) RETURNING *`,
+    [
+      tenantId, leadNumber, contactName || 'Unknown', fromPhone,
+      matched?.adName || referral.headline || null,
+      matched?.campaignId || null, referral.source_id, notesParts.join('\n'),
+    ]
+  );
+  const lead = inserted.rows[0];
+
+  applyAssignmentRules({ tenantId, lead }).then(() => notifyNewLead({ tenantId, lead })).catch(() => {});
+  checkNewLeadTriggers({ tenantId, lead }).catch(() => {});
+
+  console.log(`✅ WhatsApp lead captured from ad: ${lead.name} (${fromPhone}) for tenant ${tenantId}`);
+  return lead;
+};
+
 // POST /api/whatsapp/webhook - Receive incoming messages from Meta
 const handleWebhook = async (req, res) => {
   // Verification (GET)
@@ -129,6 +167,7 @@ const handleWebhook = async (req, res) => {
     // or a specific rep's own connected number.
     const receivingNumberId = change?.value?.metadata?.phone_number_id;
     const numberOwner = await findNumberOwner(receivingNumberId);
+    const contacts = change?.value?.contacts || [];
 
     for (const msg of messages) {
       const fromPhone = msg.from; // e.g. "919876543210"
@@ -148,12 +187,26 @@ const handleWebhook = async (req, res) => {
             [fromPhone, fromPhone.replace(/^91/, '')]
           );
 
-      if (leadResult.rows.length === 0) {
+      let lead = leadResult.rows[0] || null;
+
+      if (!lead) {
+        // Unknown number — only auto-create a lead if this conversation started
+        // from a Click-to-WhatsApp ad, so it can be attributed to a campaign.
+        // Organic messages from unrecognized numbers are still dropped.
+        const referral = msg.referral;
+        if (referral?.source_type === 'ad' && referral.source_id) {
+          const tenantId = numberOwner?.tenant_id || await findTenantBySharedNumber(receivingNumberId);
+          if (tenantId) {
+            const contactName = contacts.find(c => c.wa_id === fromPhone)?.profile?.name;
+            lead = await createLeadFromWhatsAppReferral({ tenantId, fromPhone, contactName, referral });
+          }
+        }
+      }
+
+      if (!lead) {
         console.log(`Unknown WhatsApp number: ${fromPhone}`);
         continue;
       }
-
-      const lead = leadResult.rows[0];
 
       // A message landing on a rep's personal number implicitly claims the lead for them.
       if (numberOwner && !lead.assigned_to) {

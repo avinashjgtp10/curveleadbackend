@@ -3,6 +3,7 @@ const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = requ
 const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSED_AFTER_MINUTES } = require('../utils/leadSla');
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { nextLeadNumber, reserveLeadNumbers } = require('../utils/leadNumber');
+const { tombstoneMetaLead } = require('../utils/deletedLeads');
 const { createNotification } = require('./notificationController');
 const { checkNewLeadTriggers, checkStageChangeTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
@@ -394,9 +395,10 @@ const updateLead = async (req, res) => {
 // DELETE /api/leads/:id
 const deleteLead = async (req, res) => {
   try {
-    const result = await query('DELETE FROM leads WHERE id = $1 AND tenant_id = $2 RETURNING id',
+    const result = await query('DELETE FROM leads WHERE id = $1 AND tenant_id = $2 RETURNING id, meta_lead_id',
       [req.params.id, req.tenantId]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
+    tombstoneMetaLead(req.tenantId, result.rows[0].meta_lead_id).catch(() => {});
     res.json({ message: 'Lead deleted.' });
   } catch (error) {
     console.error('Delete lead error:', error);
@@ -906,9 +908,12 @@ const bulkDelete = async (req, res) => {
     if (!ids?.length) return res.status(400).json({ error: 'No lead IDs provided.' });
 
     const result = await query(
-      'DELETE FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[]) RETURNING id',
+      'DELETE FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[]) RETURNING id, meta_lead_id',
       [req.tenantId, ids]
     );
+    for (const row of result.rows) {
+      tombstoneMetaLead(req.tenantId, row.meta_lead_id).catch(() => {});
+    }
 
     res.json({ deleted: result.rowCount });
   } catch (error) {

@@ -8,6 +8,7 @@ const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { syncTenantAdInsights } = require('../utils/metaAdInsights');
+const { isMetaLeadDeleted } = require('../utils/deletedLeads');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -374,6 +375,7 @@ const facebookSyncLeads = async (req, res) => {
       for (const lead of leadsData.data || []) {
         const dup = await query('SELECT id FROM leads WHERE tenant_id = $1 AND meta_lead_id = $2', [req.tenantId, lead.id]);
         if (dup.rows.length) { skipped++; continue; }
+        if (await isMetaLeadDeleted(req.tenantId, lead.id)) { skipped++; continue; }
 
         const fields = {};
         for (const f of lead.field_data || []) fields[f.name] = f.values?.[0] || '';
