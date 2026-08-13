@@ -118,6 +118,9 @@ const getCampaign = async (req, res) => {
     let leadsWhere = 'WHERE campaign_id = $1 AND tenant_id = $2';
     const leadsParams = [req.params.id, req.tenantId];
     let li = 3;
+    // Staff can only see (and open) their own assigned leads — same restriction
+    // getLead enforces, so nothing shows up here that 404s when clicked.
+    if (req.user.role === 'staff') { leadsWhere += ` AND assigned_to = $${li++}`; leadsParams.push(req.user.id); }
     if (stage) { leadsWhere += ` AND LOWER(stage) = LOWER($${li++})`; leadsParams.push(stage); }
     if (lead_score) { leadsWhere += ` AND lead_score = $${li++}`; leadsParams.push(lead_score); }
     if (search) { leadsWhere += ` AND (name ILIKE $${li} OR phone ILIKE $${li})`; leadsParams.push(`%${search}%`); li++; }
