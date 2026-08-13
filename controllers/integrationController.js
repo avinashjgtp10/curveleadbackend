@@ -24,9 +24,10 @@ const createLeadFromSource = async (tenantId, { name, phone, email, source, sour
     [tenantId, leadNumber, name || 'Unknown', phone, email || null, source, source_detail || null, campaign_id || null]
   );
   sendWelcomeMessage({ tenantId, lead: result.rows[0] }).catch(() => {});
-  applyAssignmentRules({ tenantId, lead: result.rows[0] }).catch(() => {});
+  applyAssignmentRules({ tenantId, lead: result.rows[0] })
+    .then(() => notifyNewLead({ tenantId, lead: result.rows[0] }))
+    .catch(() => {});
   checkNewLeadTriggers({ tenantId, lead: result.rows[0] }).catch(() => {});
-  notifyNewLead({ tenantId, lead: result.rows[0] }).catch(() => {});
   return { duplicate: false, id: result.rows[0].id };
 };
 
@@ -390,12 +391,17 @@ const facebookSyncLeads = async (req, res) => {
         });
 
         const leadNumber = await nextLeadNumber(req.tenantId);
-        await query(
+        const insertResult = await query(
           `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, meta_ad_id, meta_adset_id, stage, created_at, notes)
-           VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,$8,$9,$10,'new',$11,$12) ON CONFLICT DO NOTHING`,
+           VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,$8,$9,$10,'new',$11,$12) ON CONFLICT DO NOTHING RETURNING *`,
           [req.tenantId, leadNumber, name, phone, email, lead.ad_name || form.name || 'Facebook Lead Ad',
            campaignId || null, lead.id, lead.ad_id || null, lead.adset_id || null, new Date(lead.created_time), notes]
         );
+        if (insertResult.rows[0]) {
+          applyAssignmentRules({ tenantId: req.tenantId, lead: insertResult.rows[0] })
+            .then(() => notifyNewLead({ tenantId: req.tenantId, lead: insertResult.rows[0] }))
+            .catch(() => {});
+        }
         created++;
       }
     }

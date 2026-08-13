@@ -41,9 +41,10 @@ const receiveGoogleLead = async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,'google_ads',$6,'new') RETURNING *`,
       [tenantId, leadNumber, name, phone, email, `Campaign: ${gCampaignId || 'unknown'}`]
     );
-    applyAssignmentRules({ tenantId, lead: inserted.rows[0] }).catch(() => {});
+    applyAssignmentRules({ tenantId, lead: inserted.rows[0] })
+      .then(() => notifyNewLead({ tenantId, lead: inserted.rows[0] }))
+      .catch(() => {});
     checkNewLeadTriggers({ tenantId, lead: inserted.rows[0] }).catch(() => {});
-    notifyNewLead({ tenantId, lead: inserted.rows[0] }).catch(() => {});
 
     console.log(`✅ Google Ads lead captured: ${name} (${phone})`);
   } catch (e) {

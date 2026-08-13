@@ -231,9 +231,10 @@ const createLead = async (req, res) => {
       ).catch(() => {});
     }
 
-    applyAssignmentRules({ tenantId: req.tenantId, lead: result.rows[0] }).catch(() => {});
+    applyAssignmentRules({ tenantId: req.tenantId, lead: result.rows[0] })
+      .then(() => notifyNewLead({ tenantId: req.tenantId, lead: result.rows[0] }))
+      .catch(() => {});
     checkNewLeadTriggers({ tenantId: req.tenantId, lead: result.rows[0] }).catch(() => {});
-    notifyNewLead({ tenantId: req.tenantId, lead: result.rows[0] }).catch(() => {});
 
     res.status(201).json({ message: 'Lead created.', lead: result.rows[0] });
   } catch (error) {

@@ -117,9 +117,10 @@ const receiveLeadFormWebhook = async (req, res) => {
          campaignId || null, leadgenId, leadData.ad_id || adId || null, leadData.adset_id || null, notes]
       );
       sendWelcomeMessage({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
-      applyAssignmentRules({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
+      applyAssignmentRules({ tenantId: tenant.id, lead: inserted.rows[0] })
+        .then(() => notifyNewLead({ tenantId: tenant.id, lead: inserted.rows[0] }))
+        .catch(() => {});
       checkNewLeadTriggers({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
-      notifyNewLead({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
 
       console.log(`✅ Lead captured from Meta: ${name} (${phone}) for tenant ${tenant.id}`);
     }
