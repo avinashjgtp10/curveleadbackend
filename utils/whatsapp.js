@@ -48,14 +48,14 @@ const sendWhatsAppMessage = async (to, message) => {
 };
 
 // Fee reminder template
-const sendFeeReminder = async (phone, studentName, amount, dueDate, academyName) => {
-  const message = `🎓 *${academyName}*\n\nDear ${studentName},\n\nThis is a reminder that your fee installment of *₹${amount.toLocaleString('en-IN')}* is due on *${new Date(dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}*.\n\nPlease make the payment at the earliest.\n\nThank you! 🙏`;
+const sendFeeReminder = async (phone, studentName, amount, dueDate, businessName) => {
+  const message = `🎓 *${businessName}*\n\nDear ${studentName},\n\nThis is a reminder that your fee installment of *₹${amount.toLocaleString('en-IN')}* is due on *${new Date(dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}*.\n\nPlease make the payment at the earliest.\n\nThank you! 🙏`;
   return sendWhatsAppMessage(phone, message);
 };
 
 // Payment confirmation
-const sendPaymentConfirmation = async (phone, studentName, amount, receiptNo, academyName) => {
-  const message = `🎓 *${academyName}*\n\n✅ Payment Received!\n\nDear ${studentName},\n\nWe have received your payment of *₹${amount.toLocaleString('en-IN')}*.\n\nReceipt No: ${receiptNo}\n\nThank you! 🙏`;
+const sendPaymentConfirmation = async (phone, studentName, amount, receiptNo, businessName) => {
+  const message = `🎓 *${businessName}*\n\n✅ Payment Received!\n\nDear ${studentName},\n\nWe have received your payment of *₹${amount.toLocaleString('en-IN')}*.\n\nReceipt No: ${receiptNo}\n\nThank you! 🙏`;
   return sendWhatsAppMessage(phone, message);
 };
 

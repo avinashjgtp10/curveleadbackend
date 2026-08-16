@@ -90,8 +90,8 @@ CREATE INDEX IF NOT EXISTS idx_leads_campaign ON leads(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(tenant_id, lead_score);
 
 -- ============================================
--- 4. DROP UNUSED TABLES (academy-specific)
--- WARNING: This deletes all academy data!
+-- 4. DROP UNUSED TABLES (legacy, tenant-specific)
+-- WARNING: This deletes all legacy tenant data!
 -- Uncomment only after backup!
 -- ============================================
 

@@ -84,7 +84,7 @@ const completeFollowup = async (req, res) => {
   try {
     const { outcome } = req.body;
     const result = await query(
-      `UPDATE lead_followups SET is_completed = true, outcome = $1
+      `UPDATE lead_followups SET is_completed = true, outcome = $1, completed_at = NOW()
        WHERE id = $2 AND tenant_id = $3 RETURNING *`,
       [outcome, req.params.id, req.tenantId]
     );

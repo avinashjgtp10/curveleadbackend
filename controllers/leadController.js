@@ -25,7 +25,7 @@ const SORT_COLUMNS = {
 
 const getLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, page = 1, limit = 20, hide_stages } = req.query;
+    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, page = 1, limit = 20, hide_stages, has_attachment, stalled } = req.query;
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -47,6 +47,8 @@ const getLeads = async (req, res) => {
     }
     if (stage) { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`; params.push(stage); }
     if (lead_status) { whereClause += ` AND LOWER(l.lead_status) = LOWER($${i++})`; params.push(lead_status); }
+    if (has_attachment === 'yes') { whereClause += ` AND EXISTS (SELECT 1 FROM lead_attachments la WHERE la.lead_id = l.id)`; }
+    else if (has_attachment === 'no') { whereClause += ` AND NOT EXISTS (SELECT 1 FROM lead_attachments la WHERE la.lead_id = l.id)`; }
     if (source) { whereClause += ` AND l.source = $${i++}`; params.push(source); }
     if (score) { whereClause += ` AND l.lead_score = $${i++}`; params.push(score); }
     // Follow-up Health — deterministic bucket computed from the lead's pending lead_followups row (pf.next_followup_at)
@@ -61,6 +63,13 @@ const getLeads = async (req, res) => {
     else if (sla_status === 'sla_breached') { whereClause += ` AND l.first_response_at IS NULL AND l.created_at <= NOW() - INTERVAL '${ESCALATION_AFTER_MINUTES} minutes' AND l.created_at > NOW() - INTERVAL '${MISSED_AFTER_MINUTES} minutes'`; }
     else if (sla_status === 'missed_lead') { whereClause += ` AND l.first_response_at IS NULL AND l.created_at <= NOW() - INTERVAL '${MISSED_AFTER_MINUTES} minutes'`; }
     else if (sla_status === 'responded_5min') { whereClause += ` AND l.first_response_at IS NOT NULL AND l.response_time_seconds <= ${TARGET_RESPONSE_MINUTES * 60}`; }
+    // Stalled — live snapshot (not period-filtered): still open, no follow-up due soon (or one
+    // overdue past the critical threshold), and untouched (l.updated_at) for the same window.
+    if (stalled === 'true') {
+      whereClause += ` AND COALESCE(ls.is_won, false) = false AND COALESCE(ls.is_lost, false) = false
+        AND (pf.next_followup_at IS NULL OR pf.next_followup_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours')
+        AND l.updated_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours'`;
+    }
     if (req.user.role !== 'staff') {
       if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
       else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
@@ -107,7 +116,8 @@ const getLeads = async (req, res) => {
              c.name as campaign_name,
              c.source as campaign_source,
              pf.next_followup_at as next_followup_at,
-             pf.followup_type as next_followup_type
+             pf.followup_type as next_followup_type,
+             (SELECT COUNT(*) FROM lead_attachments la WHERE la.lead_id = l.id) as attachment_count
       ${fromClause}
       ${whereClause}
       ${orderClause}
@@ -118,7 +128,7 @@ const getLeads = async (req, res) => {
     const countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params.slice(0, -2));
 
     res.json({
-      leads: result.rows.map(r => ({ ...r, ...computeLeadSla(r) })),
+      leads: result.rows.map(r => ({ ...r, attachment_count: parseInt(r.attachment_count), ...computeLeadSla(r) })),
       pagination: {
         total: parseInt(countResult.rows[0].count),
         page: parseInt(page),
@@ -460,7 +470,7 @@ const addFollowup = async (req, res) => {
     const tenantSettings = tenantRes.rows[0]?.settings || {};
 
     await query(
-      `UPDATE lead_followups SET is_completed = true WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
+      `UPDATE lead_followups SET is_completed = true, completed_at = NOW() WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
       [req.params.id, req.tenantId]
     );
 
@@ -578,7 +588,7 @@ const addNote = async (req, res) => {
 
     // Mark previous incomplete followups as completed
     await query(
-      `UPDATE lead_followups SET is_completed = true 
+      `UPDATE lead_followups SET is_completed = true, completed_at = NOW()
        WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
       [req.params.id, req.tenantId]
     );
