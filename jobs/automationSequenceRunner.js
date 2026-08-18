@@ -8,7 +8,7 @@ const runAutomationSequences = async () => {
     const due = await query(`
       SELECT e.id AS enrollment_id, e.tenant_id, e.lead_id, e.sequence_id, e.current_step,
              l.name, l.phone, l.email, l.location, l.source,
-             t.name AS tenant_name, t.settings AS tenant_settings
+             t.name AS tenant_name, t.email AS tenant_email, t.settings AS tenant_settings
       FROM automation_enrollments e
       JOIN leads l ON l.id = e.lead_id
       JOIN tenants t ON t.id = e.tenant_id
@@ -45,7 +45,8 @@ const runAutomationSequences = async () => {
           ).catch(() => {});
         } else if (step.channel === 'email' && row.email) {
           const subject = substituteVars(step.email_subject || `Message from ${row.tenant_name || 'us'}`, lead);
-          await sendEmail({ to: row.email, subject, text: message, fromName: row.tenant_name });
+          const replyTo = row.tenant_settings?.email_reply_to || row.tenant_email || undefined;
+          await sendEmail({ to: row.email, subject, text: message, fromName: row.tenant_name, replyTo });
           await query(
             `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
              VALUES ($1,$2,'email',$3,$4)`,

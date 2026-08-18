@@ -4,6 +4,7 @@ const { nextLeadNumber } = require('../utils/leadNumber');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
+const { notifyNewLeadToAdmins } = require('./notificationController');
 
 // POST /api/webhook/google — Google Ads Lead Form Extension webhook
 const receiveGoogleLead = async (req, res) => {
@@ -45,6 +46,7 @@ const receiveGoogleLead = async (req, res) => {
       .then(() => notifyNewLead({ tenantId, lead: inserted.rows[0] }))
       .catch(() => {});
     checkNewLeadTriggers({ tenantId, lead: inserted.rows[0] }).catch(() => {});
+    notifyNewLeadToAdmins(tenantId, inserted.rows[0]).catch(() => {});
 
     console.log(`✅ Google Ads lead captured: ${name} (${phone})`);
   } catch (e) {

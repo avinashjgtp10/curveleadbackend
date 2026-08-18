@@ -62,4 +62,19 @@ const createNotification = async (tenantId, userId, title, message, type = 'info
   } catch (error) { console.error('Create notification error:', error); }
 };
 
-module.exports = { getNotifications, markAsRead, markAllAsRead, getUnreadCount, createNotification };
+// Notifies every active admin in the tenant that a new lead came in, from any source.
+// excludeUserId skips the admin who just created it themselves (manual lead entry).
+const notifyNewLeadToAdmins = async (tenantId, lead, excludeUserId = null) => {
+  try {
+    const admins = await query(
+      `SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND is_active = true${excludeUserId ? ' AND id != $2' : ''}`,
+      excludeUserId ? [tenantId, excludeUserId] : [tenantId]
+    );
+    const source = (lead.source || 'manual').replace(/_/g, ' ');
+    await Promise.all(admins.rows.map(a =>
+      createNotification(tenantId, a.id, 'New lead', `${lead.name} — from ${source}`, 'new_lead', 'lead', lead.id)
+    ));
+  } catch (error) { console.error('Notify admins new lead error:', error); }
+};
+
+module.exports = { getNotifications, markAsRead, markAllAsRead, getUnreadCount, createNotification, notifyNewLeadToAdmins };

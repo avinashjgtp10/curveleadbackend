@@ -175,6 +175,12 @@ app.listen(PORT, () => {
   const { runMetaAdInsightsSync } = require('./jobs/metaAdInsightsSync');
   setTimeout(runMetaAdInsightsSync, 45 * 1000);
   setInterval(runMetaAdInsightsSync, 6 * 60 * 60 * 1000);
+
+  // Daily report email — polls every 15 min, only actually sends once per
+  // tenant per day (inside the target UTC hour, guarded by last-sent date)
+  const { runDailyReportEmail } = require('./jobs/dailyReportEmail');
+  setTimeout(runDailyReportEmail, 40 * 1000);
+  setInterval(runDailyReportEmail, 15 * 60 * 1000);
 });
 
 // Graceful shutdown

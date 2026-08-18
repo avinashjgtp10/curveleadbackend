@@ -6,6 +6,7 @@ const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
+const { notifyNewLeadToAdmins } = require('./notificationController');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { syncTenantAdInsights } = require('../utils/metaAdInsights');
 const { isMetaLeadDeleted } = require('../utils/deletedLeads');
@@ -29,6 +30,7 @@ const createLeadFromSource = async (tenantId, { name, phone, email, source, sour
     .then(() => notifyNewLead({ tenantId, lead: result.rows[0] }))
     .catch(() => {});
   checkNewLeadTriggers({ tenantId, lead: result.rows[0] }).catch(() => {});
+  notifyNewLeadToAdmins(tenantId, result.rows[0]).catch(() => {});
   return { duplicate: false, id: result.rows[0].id };
 };
 
@@ -235,7 +237,23 @@ const facebookAuth = async (req, res) => {
       ]);
     }
 
-    res.json({ pages: pagesData.data || [] });
+    // Resolve which Business Portfolio the user authorized, if they granted business_management.
+    let businesses = [];
+    if (grantedScopes.includes('business_management')) {
+      const businessesData = await fbGet(
+        `/me/businesses?access_token=${encodeURIComponent(tokenData.access_token)}&fields=id,name`
+      ).catch(e => ({ data: [], _error: e.message }));
+      businesses = businessesData.data || [];
+      if (businesses.length) {
+        const settingsResult = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+        const current = settingsResult.rows[0]?.settings || {};
+        await query('UPDATE tenants SET settings = $1 WHERE id = $2', [
+          JSON.stringify({ ...current, meta_business_id: businesses[0].id, meta_business_name: businesses[0].name }), req.tenantId,
+        ]);
+      }
+    }
+
+    res.json({ pages: pagesData.data || [], businesses });
   } catch (e) {
     console.error('facebookAuth:', e.message);
     res.status(400).json({ error: e.message });
@@ -403,6 +421,7 @@ const facebookSyncLeads = async (req, res) => {
           applyAssignmentRules({ tenantId: req.tenantId, lead: insertResult.rows[0] })
             .then(() => notifyNewLead({ tenantId: req.tenantId, lead: insertResult.rows[0] }))
             .catch(() => {});
+          notifyNewLeadToAdmins(req.tenantId, insertResult.rows[0]).catch(() => {});
         }
         created++;
       }

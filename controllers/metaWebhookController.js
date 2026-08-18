@@ -5,6 +5,7 @@ const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
+const { notifyNewLeadToAdmins } = require('./notificationController');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { isMetaLeadDeleted } = require('../utils/deletedLeads');
 const axios = require('axios');
@@ -127,6 +128,7 @@ const receiveLeadFormWebhook = async (req, res) => {
         .then(() => notifyNewLead({ tenantId: tenant.id, lead: inserted.rows[0] }))
         .catch(() => {});
       checkNewLeadTriggers({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
+      notifyNewLeadToAdmins(tenant.id, inserted.rows[0]).catch(() => {});
 
       console.log(`✅ Lead captured from Meta: ${name} (${phone}) for tenant ${tenant.id}`);
     }

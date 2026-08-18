@@ -4,7 +4,7 @@ const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSE
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { nextLeadNumber, reserveLeadNumbers } = require('../utils/leadNumber');
 const { tombstoneMetaLead } = require('../utils/deletedLeads');
-const { createNotification } = require('./notificationController');
+const { createNotification, notifyNewLeadToAdmins } = require('./notificationController');
 const { checkNewLeadTriggers, checkStageChangeTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
@@ -241,6 +241,7 @@ const createLead = async (req, res) => {
         'assignment', 'lead', result.rows[0].id
       ).catch(() => {});
     }
+    notifyNewLeadToAdmins(req.tenantId, result.rows[0], req.user.id).catch(() => {});
 
     applyAssignmentRules({ tenantId: req.tenantId, lead: result.rows[0] })
       .then(() => notifyNewLead({ tenantId: req.tenantId, lead: result.rows[0] }))
@@ -465,9 +466,10 @@ const addFollowup = async (req, res) => {
     if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
     const lead = leadCheck.rows[0];
 
-    const tenantRes = await query('SELECT name, settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const tenantRes = await query('SELECT name, email, settings FROM tenants WHERE id = $1', [req.tenantId]);
     const tenantName = tenantRes.rows[0]?.name || 'CurveLead';
     const tenantSettings = tenantRes.rows[0]?.settings || {};
+    const tenantReplyTo = tenantSettings.email_reply_to || tenantRes.rows[0]?.email || undefined;
 
     await query(
       `UPDATE lead_followups SET is_completed = true, completed_at = NOW() WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
@@ -519,6 +521,8 @@ const addFollowup = async (req, res) => {
       const { sendEmail } = require('../utils/email');
       sendEmail({
         to: lead.email,
+        fromName: tenantName,
+        replyTo: tenantReplyTo,
         subject: `Your Demo is Scheduled — ${tenantName}`,
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; background: #f9fafb; border-radius: 12px;">

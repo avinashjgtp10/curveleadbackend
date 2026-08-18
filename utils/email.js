@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const sendEmail = async ({ to, subject, html, text, fromName }) => {
+const sendEmail = async ({ to, subject, html, text, fromName, replyTo }) => {
   try {
     if (!process.env.RESEND_API_KEY) {
       console.log(`📧 Email (dev) → ${to}: ${subject}`);
@@ -10,7 +10,7 @@ const sendEmail = async ({ to, subject, html, text, fromName }) => {
     const from = `${fromName || process.env.EMAIL_FROM_NAME || 'CurveLead'} <${process.env.EMAIL_FROM_ADDRESS}>`;
     const result = await axios.post(
       'https://api.resend.com/emails',
-      { from, to, subject, html, text },
+      { from, to, subject, html, text, ...(replyTo ? { reply_to: replyTo } : {}) },
       { headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' } }
     );
     return { success: true, messageId: result.data.id };
