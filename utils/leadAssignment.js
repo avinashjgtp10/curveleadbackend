@@ -72,4 +72,4 @@ const applyAssignmentRules = async ({ tenantId, lead }) => {
   }
 };
 
-module.exports = { applyAssignmentRules };
+module.exports = { applyAssignmentRules, pickRoundRobinMember };
