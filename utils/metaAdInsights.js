@@ -51,7 +51,7 @@ const syncTenantAdInsights = async (tenantId) => {
 // campaigns are otherwise excluded from the default listing.
 const STATUSES = ['ACTIVE', 'PAUSED', 'DELETED', 'ARCHIVED', 'PENDING_REVIEW',
   'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO', 'CAMPAIGN_PAUSED',
-  'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES'];
+  'IN_PROCESS', 'WITH_ISSUES'];
 
 const fetchCampaignStatuses = async (adAccountId, accessToken) => {
   const url = `${GRAPH}/${adAccountId}/campaigns`
