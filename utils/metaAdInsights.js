@@ -23,7 +23,17 @@ const syncTenantAdInsights = async (tenantId) => {
   const data = await response.json();
   if (data.error) throw new Error(data.error.message);
 
-  const statusById = await fetchCampaignStatuses(meta_ad_account_id, meta_ads_access_token);
+  // Best-effort: a failure here (bad token, permission, transient Meta error)
+  // must not block the spend/impressions/clicks sync that already worked
+  // before status tracking existed. statusById stays null on failure, which
+  // skips the status column entirely below rather than defaulting everyone
+  // to "paused".
+  let statusById = null;
+  try {
+    statusById = await fetchCampaignStatuses(meta_ad_account_id, meta_ads_access_token);
+  } catch (e) {
+    console.error('fetchCampaignStatuses failed, skipping status sync:', e.message);
+  }
 
   let synced = 0;
   for (const row of data.data || []) {
@@ -32,11 +42,18 @@ const syncTenantAdInsights = async (tenantId) => {
     });
     if (!campaignId) continue;
 
-    const status = statusById.get(row.campaign_id) === 'ACTIVE' ? 'active' : 'paused';
-    await query(
-      `UPDATE campaigns SET actual_spend = $1, impressions = $2, clicks = $3, status = $4, updated_at = NOW() WHERE id = $5`,
-      [parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0, status, campaignId]
-    );
+    if (statusById) {
+      const status = statusById.get(row.campaign_id) === 'ACTIVE' ? 'active' : 'paused';
+      await query(
+        `UPDATE campaigns SET actual_spend = $1, impressions = $2, clicks = $3, status = $4, updated_at = NOW() WHERE id = $5`,
+        [parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0, status, campaignId]
+      );
+    } else {
+      await query(
+        `UPDATE campaigns SET actual_spend = $1, impressions = $2, clicks = $3, updated_at = NOW() WHERE id = $4`,
+        [parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0, campaignId]
+      );
+    }
     synced++;
   }
 
@@ -54,13 +71,17 @@ const STATUSES = ['ACTIVE', 'PAUSED', 'DELETED', 'ARCHIVED', 'PENDING_REVIEW',
   'IN_PROCESS', 'WITH_ISSUES'];
 
 const fetchCampaignStatuses = async (adAccountId, accessToken) => {
+  const filtering = JSON.stringify([{ field: 'effective_status', operator: 'IN', value: STATUSES }]);
   const url = `${GRAPH}/${adAccountId}/campaigns`
-    + `?fields=id,effective_status&effective_status=${encodeURIComponent(JSON.stringify(STATUSES))}`
+    + `?fields=id,effective_status&filtering=${encodeURIComponent(filtering)}`
     + `&limit=500&access_token=${encodeURIComponent(accessToken)}`;
 
   const response = await fetch(url);
   const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
+  if (data.error) {
+    console.error('fetchCampaignStatuses Graph API error:', JSON.stringify(data.error));
+    throw new Error(data.error.message);
+  }
 
   return new Map((data.data || []).map(c => [c.id, c.effective_status]));
 };
