@@ -23,6 +23,8 @@ const syncTenantAdInsights = async (tenantId) => {
   const data = await response.json();
   if (data.error) throw new Error(data.error.message);
 
+  const statusById = await fetchCampaignStatuses(meta_ad_account_id, meta_ads_access_token);
+
   let synced = 0;
   for (const row of data.data || []) {
     const campaignId = await findOrCreateMetaCampaign({
@@ -30,9 +32,10 @@ const syncTenantAdInsights = async (tenantId) => {
     });
     if (!campaignId) continue;
 
+    const status = statusById.get(row.campaign_id) === 'ACTIVE' ? 'active' : 'paused';
     await query(
-      `UPDATE campaigns SET actual_spend = $1, impressions = $2, clicks = $3, updated_at = NOW() WHERE id = $4`,
-      [parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0, campaignId]
+      `UPDATE campaigns SET actual_spend = $1, impressions = $2, clicks = $3, status = $4, updated_at = NOW() WHERE id = $5`,
+      [parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0, status, campaignId]
     );
     synced++;
   }
@@ -40,6 +43,26 @@ const syncTenantAdInsights = async (tenantId) => {
   const adsSynced = await syncTenantAdLevelInsights(tenantId, meta_ad_account_id, meta_ads_access_token);
 
   return { synced, ads_synced: adsSynced };
+};
+
+// Insights rows carry no status — Meta only exposes effective_status on the
+// campaign node itself. Fetched separately and joined in by campaign_id.
+// effective_status is requested explicitly since paused/deleted/archived
+// campaigns are otherwise excluded from the default listing.
+const STATUSES = ['ACTIVE', 'PAUSED', 'DELETED', 'ARCHIVED', 'PENDING_REVIEW',
+  'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO', 'CAMPAIGN_PAUSED',
+  'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES'];
+
+const fetchCampaignStatuses = async (adAccountId, accessToken) => {
+  const url = `${GRAPH}/${adAccountId}/campaigns`
+    + `?fields=id,effective_status&effective_status=${encodeURIComponent(JSON.stringify(STATUSES))}`
+    + `&limit=500&access_token=${encodeURIComponent(accessToken)}`;
+
+  const response = await fetch(url);
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
+
+  return new Map((data.data || []).map(c => [c.id, c.effective_status]));
 };
 
 // Same idea as the campaign-level sync above, but at the individual ad level —
