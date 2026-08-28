@@ -229,7 +229,7 @@ const facebookAuth = async (req, res) => {
     // — this is what's needed for ad-account listing and ads Insights, which are
     // user-level, not page-level, permissions.
     const grantedScopes = (permsData.data || []).filter(p => p.status === 'granted').map(p => p.permission);
-    if (grantedScopes.includes('ads_read')) {
+    if (grantedScopes.includes('ads_read') || grantedScopes.includes('ads_management')) {
       const settingsResult = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
       const current = settingsResult.rows[0]?.settings || {};
       await query('UPDATE tenants SET settings = $1 WHERE id = $2', [
