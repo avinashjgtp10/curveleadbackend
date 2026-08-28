@@ -3,16 +3,72 @@ const { findOrCreateMetaCampaign } = require('./metaCampaignMatch');
 
 const GRAPH = 'https://graph.facebook.com/v25.0';
 
-// Pulls campaign-level spend/impressions/clicks from Meta's Ads Insights API
-// for one tenant's connected ad account, upserting into `campaigns` via the
-// same find-or-create helper attribution uses. date_preset=maximum (all-time
-// since the campaign began) to match how actual_spend has always been used —
-// a running total, not a period figure.
+// The Ads Manager statuses to pull — Insights only ever returns campaigns that
+// have delivered something, but Ads Manager itself lists every campaign in
+// these states regardless of spend (including ones still in draft/review).
+const STATUSES = ['ACTIVE', 'PAUSED', 'DELETED', 'ARCHIVED', 'PENDING_REVIEW',
+  'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO', 'CAMPAIGN_PAUSED',
+  'IN_PROCESS', 'WITH_ISSUES'];
+
+// Every campaign in the ad account as Ads Manager shows it (id, name, status),
+// paginated — independent of whether the campaign has spent anything yet.
+const fetchAllCampaigns = async (adAccountId, accessToken) => {
+  const filtering = JSON.stringify([{ field: 'effective_status', operator: 'IN', value: STATUSES }]);
+  const campaigns = new Map();
+  let url = `${GRAPH}/${adAccountId}/campaigns`
+    + `?fields=id,name,effective_status&filtering=${encodeURIComponent(filtering)}`
+    + `&limit=200&access_token=${encodeURIComponent(accessToken)}`;
+
+  while (url) {
+    const response = await fetch(url);
+    const data = await response.json();
+    if (data.error) {
+      console.error('fetchAllCampaigns Graph API error:', JSON.stringify(data.error));
+      throw new Error(data.error.message);
+    }
+    for (const c of data.data || []) {
+      campaigns.set(c.id, { name: c.name, status: c.effective_status });
+    }
+    url = data.paging?.next || null;
+  }
+
+  return campaigns;
+};
+
+// Pulls every campaign in the tenant's connected ad account — matching what
+// they see in Ads Manager, not just ones that have generated leads or spend —
+// then layers spend/impressions/clicks on top for whichever have delivered.
+// Upserts into `campaigns` via the same find-or-create helper attribution uses.
+// date_preset=maximum (all-time since the campaign began) to match how
+// actual_spend has always been used — a running total, not a period figure.
 const syncTenantAdInsights = async (tenantId) => {
   const result = await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]);
   const { meta_ad_account_id, meta_ads_access_token } = result.rows[0]?.settings || {};
   if (!meta_ad_account_id || !meta_ads_access_token) {
     return { synced: 0, reason: 'not_configured' };
+  }
+
+  // Best-effort: a failure here (bad token, permission, transient Meta error)
+  // must not block the spend/impressions/clicks sync below, which worked
+  // before full-campaign-list syncing existed.
+  let allCampaigns = null;
+  try {
+    allCampaigns = await fetchAllCampaigns(meta_ad_account_id, meta_ads_access_token);
+  } catch (e) {
+    console.error('fetchAllCampaigns failed, falling back to insights-only sync:', e.message);
+  }
+
+  let synced = 0;
+  if (allCampaigns) {
+    for (const [campaignId, info] of allCampaigns) {
+      const dbId = await findOrCreateMetaCampaign({ tenantId, campaignId, campaignName: info.name });
+      if (!dbId) continue;
+      await query(
+        `UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2`,
+        [info.status === 'ACTIVE' ? 'active' : 'paused', dbId]
+      );
+      synced++;
+    }
   }
 
   const url = `${GRAPH}/${meta_ad_account_id}/insights`
@@ -23,67 +79,24 @@ const syncTenantAdInsights = async (tenantId) => {
   const data = await response.json();
   if (data.error) throw new Error(data.error.message);
 
-  // Best-effort: a failure here (bad token, permission, transient Meta error)
-  // must not block the spend/impressions/clicks sync that already worked
-  // before status tracking existed. statusById stays null on failure, which
-  // skips the status column entirely below rather than defaulting everyone
-  // to "paused".
-  let statusById = null;
-  try {
-    statusById = await fetchCampaignStatuses(meta_ad_account_id, meta_ads_access_token);
-  } catch (e) {
-    console.error('fetchCampaignStatuses failed, skipping status sync:', e.message);
-  }
-
-  let synced = 0;
   for (const row of data.data || []) {
     const campaignId = await findOrCreateMetaCampaign({
       tenantId, campaignId: row.campaign_id, campaignName: row.campaign_name,
     });
     if (!campaignId) continue;
 
-    if (statusById) {
-      const status = statusById.get(row.campaign_id) === 'ACTIVE' ? 'active' : 'paused';
-      await query(
-        `UPDATE campaigns SET actual_spend = $1, impressions = $2, clicks = $3, status = $4, updated_at = NOW() WHERE id = $5`,
-        [parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0, status, campaignId]
-      );
-    } else {
-      await query(
-        `UPDATE campaigns SET actual_spend = $1, impressions = $2, clicks = $3, updated_at = NOW() WHERE id = $4`,
-        [parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0, campaignId]
-      );
-    }
-    synced++;
+    await query(
+      `UPDATE campaigns SET actual_spend = $1, impressions = $2, clicks = $3, updated_at = NOW() WHERE id = $4`,
+      [parseFloat(row.spend) || 0, parseInt(row.impressions) || 0, parseInt(row.clicks) || 0, campaignId]
+    );
+    // Fallback path (fetchAllCampaigns failed) — insights rows are the only
+    // source of synced campaigns, so count them here instead.
+    if (!allCampaigns) synced++;
   }
 
   const adsSynced = await syncTenantAdLevelInsights(tenantId, meta_ad_account_id, meta_ads_access_token);
 
   return { synced, ads_synced: adsSynced };
-};
-
-// Insights rows carry no status — Meta only exposes effective_status on the
-// campaign node itself. Fetched separately and joined in by campaign_id.
-// effective_status is requested explicitly since paused/deleted/archived
-// campaigns are otherwise excluded from the default listing.
-const STATUSES = ['ACTIVE', 'PAUSED', 'DELETED', 'ARCHIVED', 'PENDING_REVIEW',
-  'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO', 'CAMPAIGN_PAUSED',
-  'IN_PROCESS', 'WITH_ISSUES'];
-
-const fetchCampaignStatuses = async (adAccountId, accessToken) => {
-  const filtering = JSON.stringify([{ field: 'effective_status', operator: 'IN', value: STATUSES }]);
-  const url = `${GRAPH}/${adAccountId}/campaigns`
-    + `?fields=id,effective_status&filtering=${encodeURIComponent(filtering)}`
-    + `&limit=500&access_token=${encodeURIComponent(accessToken)}`;
-
-  const response = await fetch(url);
-  const data = await response.json();
-  if (data.error) {
-    console.error('fetchCampaignStatuses Graph API error:', JSON.stringify(data.error));
-    throw new Error(data.error.message);
-  }
-
-  return new Map((data.data || []).map(c => [c.id, c.effective_status]));
 };
 
 // Same idea as the campaign-level sync above, but at the individual ad level —
