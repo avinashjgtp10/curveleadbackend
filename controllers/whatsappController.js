@@ -160,6 +160,24 @@ const handleWebhook = async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
     const change = entry?.changes?.[0];
+
+    // Delivery receipts for our own outbound messages — sent/delivered/read/failed —
+    // arrive here separately from inbound messages, keyed by the wa_message_id we
+    // stored when we sent it.
+    const statuses = change?.value?.statuses;
+    if (statuses) {
+      for (const s of statuses) {
+        const at = s.timestamp ? new Date(Number(s.timestamp) * 1000) : new Date();
+        if (s.status === 'delivered') {
+          await query(`UPDATE whatsapp_messages SET status='delivered', delivered_at=$1 WHERE wa_message_id=$2`, [at, s.id]).catch(() => {});
+        } else if (s.status === 'read') {
+          await query(`UPDATE whatsapp_messages SET status='read', read_at=$1 WHERE wa_message_id=$2`, [at, s.id]).catch(() => {});
+        } else if (s.status === 'failed') {
+          await query(`UPDATE whatsapp_messages SET status='failed' WHERE wa_message_id=$1`, [s.id]).catch(() => {});
+        }
+      }
+    }
+
     const messages = change?.value?.messages;
     if (!messages) return;
 
