@@ -1,5 +1,5 @@
 const { query } = require('../config/db');
-const { substituteVars } = require('../utils/templateVars');
+const { substituteTemplateVars } = require('../utils/templateVars');
 
 const getAll = async (req, res) => {
   try {
@@ -63,19 +63,28 @@ const generate = async (req, res) => {
   try {
     const { lead_id } = req.body;
 
-    const [tmplRes, leadRes] = await Promise.all([
+    const [tmplRes, leadRes, tenantRes] = await Promise.all([
       query('SELECT * FROM message_templates WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]),
       lead_id
-        ? query('SELECT name, phone, email, location, source FROM leads WHERE id=$1 AND tenant_id=$2', [lead_id, req.tenantId])
+        ? query(
+            `SELECT l.name, l.phone, l.email, l.location, l.source,
+                    c.name AS course_name, c.fee_amount, c.duration_value, c.duration_unit
+             FROM leads l
+             LEFT JOIN courses c ON c.id = l.course_interest_id
+             WHERE l.id=$1 AND l.tenant_id=$2`,
+            [lead_id, req.tenantId]
+          )
         : Promise.resolve({ rows: [] }),
+      query('SELECT name, phone FROM tenants WHERE id=$1', [req.tenantId]),
     ]);
 
     if (!tmplRes.rows.length) return res.status(404).json({ error: 'Template not found.' });
 
     const tmpl = tmplRes.rows[0];
     const lead = leadRes.rows[0] || {};
+    const tenant = tenantRes.rows[0] || {};
 
-    const message = substituteVars(tmpl.message, lead);
+    const message = substituteTemplateVars(tmpl.message, lead, tenant);
 
     // Increment use count
     query('UPDATE message_templates SET use_count = use_count + 1 WHERE id=$1', [req.params.id]).catch(() => {});
