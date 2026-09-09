@@ -4,11 +4,19 @@ const { uploadToS3, deleteFromS3 } = require('../config/s3');
 const getAll = async (req, res) => {
   try {
     const { category } = req.query;
-    let where = 'WHERE tenant_id = $1';
+    let where = 'WHERE b.tenant_id = $1';
     const params = [req.tenantId];
-    if (category) { where += ` AND category = $${params.length + 1}`; params.push(category); }
+    if (category) { where += ` AND b.category = $${params.length + 1}`; params.push(category); }
 
-    const result = await query(`SELECT * FROM brochures ${where} ORDER BY created_at DESC`, params);
+    const result = await query(
+      `SELECT b.*, COUNT(bs.id)::int AS times_shared
+       FROM brochures b
+       LEFT JOIN brochure_shares bs ON bs.brochure_id = b.id
+       ${where}
+       GROUP BY b.id
+       ORDER BY b.created_at DESC`,
+      params
+    );
     res.json({ brochures: result.rows });
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };

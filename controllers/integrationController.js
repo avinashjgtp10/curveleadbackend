@@ -3,6 +3,7 @@ const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
+const { verifyWhatsAppNumber } = require('../services/whatsappService');
 const { checkNewLeadTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
@@ -38,9 +39,24 @@ const createLeadFromSource = async (tenantId, { name, phone, email, source, sour
 const getSettings = async (req, res) => {
   try {
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
-    const settings = result.rows[0]?.settings || {};
+    let settings = result.rows[0]?.settings || {};
     // Never expose the raw api_key — send masked version
     const apiKey = settings.api_key || null;
+
+    // Legacy rows saved before verification existed have never been checked
+    // against Meta — verify them now so stale/invalid credentials don't keep
+    // showing as "Connected".
+    let whatsappError = '';
+    if (settings.whatsapp_phone_number_id && settings.whatsapp_access_token && !settings.whatsapp_verified_name && !settings.whatsapp_display_number) {
+      const verify = await verifyWhatsAppNumber(settings.whatsapp_phone_number_id, settings.whatsapp_access_token);
+      if (verify.verified) {
+        settings = { ...settings, whatsapp_display_number: verify.display_phone_number, whatsapp_verified_name: verify.verified_name };
+        query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(settings), req.tenantId]).catch(() => {});
+      } else {
+        whatsappError = verify.error;
+      }
+    }
+
     res.json({
       meta_page_id: settings.meta_page_id || '',
       meta_page_name: settings.meta_page_name || '',
@@ -59,7 +75,10 @@ const getSettings = async (req, res) => {
       // WhatsApp Business API (per-tenant)
       whatsapp_phone_number_id: settings.whatsapp_phone_number_id || '',
       whatsapp_access_token: settings.whatsapp_access_token ? '••••••••' : '',
-      whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token),
+      whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token) && !whatsappError,
+      whatsapp_display_number: settings.whatsapp_display_number || '',
+      whatsapp_verified_name: settings.whatsapp_verified_name || '',
+      whatsapp_error: whatsappError,
       whatsapp_auto_responder_enabled: !!settings.whatsapp_auto_responder_enabled,
       whatsapp_auto_responder_message: settings.whatsapp_auto_responder_message || '',
       ai_qualification_enabled: !!settings.ai_qualification_enabled,
@@ -91,8 +110,24 @@ const updateSettings = async (req, res) => {
     if (meta_page_id !== undefined) updated.meta_page_id = meta_page_id;
     if (meta_page_access_token && !meta_page_access_token.startsWith('•')) updated.meta_page_access_token = meta_page_access_token;
     if (google_webhook_secret && !google_webhook_secret.startsWith('•')) updated.google_webhook_secret = google_webhook_secret;
+    const whatsappCredsChanged = whatsapp_phone_number_id !== undefined
+      || (whatsapp_access_token !== undefined && !whatsapp_access_token.startsWith('•'));
     if (whatsapp_phone_number_id !== undefined) updated.whatsapp_phone_number_id = whatsapp_phone_number_id;
-    if (whatsapp_access_token && !whatsapp_access_token.startsWith('•')) updated.whatsapp_access_token = whatsapp_access_token;
+    if (whatsapp_access_token !== undefined && !whatsapp_access_token.startsWith('•')) updated.whatsapp_access_token = whatsapp_access_token;
+
+    if (whatsappCredsChanged) {
+      if (updated.whatsapp_phone_number_id && updated.whatsapp_access_token) {
+        const verify = await verifyWhatsAppNumber(updated.whatsapp_phone_number_id, updated.whatsapp_access_token);
+        if (!verify.verified) {
+          return res.status(400).json({ error: `Could not connect to WhatsApp: ${verify.error}` });
+        }
+        updated.whatsapp_display_number = verify.display_phone_number;
+        updated.whatsapp_verified_name = verify.verified_name;
+      } else {
+        updated.whatsapp_display_number = '';
+        updated.whatsapp_verified_name = '';
+      }
+    }
     if (meta_dataset_id !== undefined) updated.meta_dataset_id = meta_dataset_id;
     if (meta_capi_access_token && !meta_capi_access_token.startsWith('•')) updated.meta_capi_access_token = meta_capi_access_token;
     if (whatsapp_auto_responder_enabled !== undefined) updated.whatsapp_auto_responder_enabled = whatsapp_auto_responder_enabled;
