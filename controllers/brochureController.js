@@ -1,5 +1,8 @@
 const { query } = require('../config/db');
 const { uploadToS3, deleteFromS3 } = require('../config/s3');
+const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
+const { sendTextMessage } = require('../services/whatsappService');
+const { recordFirstResponse } = require('../utils/leadResponse');
 
 const getAll = async (req, res) => {
   try {
@@ -56,7 +59,7 @@ const shareWithLead = async (req, res) => {
 
     const [brochureRes, leadRes, tenantRes] = await Promise.all([
       query('SELECT * FROM brochures WHERE id=$1 AND tenant_id=$2', [brochureId, req.tenantId]),
-      query('SELECT name, phone FROM leads WHERE id=$1 AND tenant_id=$2', [leadId, req.tenantId]),
+      query('SELECT name, phone, assigned_to FROM leads WHERE id=$1 AND tenant_id=$2', [leadId, req.tenantId]),
       query('SELECT name, phone FROM tenants WHERE id=$1', [req.tenantId]),
     ]);
 
@@ -66,12 +69,7 @@ const shareWithLead = async (req, res) => {
     const brochure = brochureRes.rows[0];
     const lead = leadRes.rows[0];
     const tenant = tenantRes.rows[0];
-
-    // Log the share (non-fatal if table doesn't exist yet)
-    query(
-      'INSERT INTO brochure_shares (tenant_id, brochure_id, lead_id, shared_by) VALUES ($1,$2,$3,$4)',
-      [req.tenantId, brochureId, leadId, req.user.id]
-    ).catch(() => {});
+    if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number.' });
 
     const msg = [
       `Hi ${lead.name}! 👋`,
@@ -84,8 +82,20 @@ const shareWithLead = async (req, res) => {
       `— ${tenant.name}`,
     ].filter(l => l !== null).join('\n');
 
-    const phone = (lead.phone || '').replace(/\D/g, '').slice(-10);
-    const whatsapp_url = phone ? `https://wa.me/91${phone}?text=${encodeURIComponent(msg)}` : null;
+    const credentials = await resolveWhatsAppCredentials(req.tenantId, lead.assigned_to);
+    const result = await sendTextMessage(lead.phone, msg, credentials);
+
+    await query(
+      `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, sent_by)
+       VALUES ($1,$2,'outbound',$3,'text',$4,$5,$6)`,
+      [req.tenantId, leadId, msg, result.wa_message_id || null, result.success ? 'sent' : 'failed', req.user.id]
+    );
+
+    // Log the share (non-fatal if table doesn't exist yet)
+    query(
+      'INSERT INTO brochure_shares (tenant_id, brochure_id, lead_id, shared_by) VALUES ($1,$2,$3,$4)',
+      [req.tenantId, brochureId, leadId, req.user.id]
+    ).catch(() => {});
 
     query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
@@ -93,7 +103,10 @@ const shareWithLead = async (req, res) => {
       [req.tenantId, leadId, `Brochure "${brochure.name}" shared via WhatsApp`, req.user.id]
     ).catch(() => {});
 
-    res.json({ whatsapp_url, message: msg });
+    await query('UPDATE leads SET last_contacted_at = NOW(), ai_paused = true WHERE id = $1', [leadId]);
+    recordFirstResponse(req.tenantId, leadId, { by: req.user.id, type: 'whatsapp' }).catch(() => {});
+
+    res.json({ sent: result.success, dev: !!result.dev, message: msg, error: result.success ? undefined : result.error });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
