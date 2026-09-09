@@ -84,4 +84,23 @@ const sendTemplate = async (to, templateName, languageCode = 'en', parameters = 
   }
 };
 
-module.exports = { sendTextMessage, sendTemplate };
+/**
+ * Verify a Phone Number ID + Access Token pair actually works, by asking
+ * Meta for that number's details.
+ */
+const verifyWhatsAppNumber = async (phoneNumberId, accessToken) => {
+  try {
+    const response = await axios.get(`${META_API_URL}/${phoneNumberId}`, {
+      params: { fields: 'verified_name,display_phone_number', access_token: accessToken },
+    });
+    return {
+      verified: true,
+      display_phone_number: response.data.display_phone_number || '',
+      verified_name: response.data.verified_name || '',
+    };
+  } catch (error) {
+    return { verified: false, error: error.response?.data?.error?.message || error.message };
+  }
+};
+
+module.exports = { sendTextMessage, sendTemplate, verifyWhatsAppNumber };
