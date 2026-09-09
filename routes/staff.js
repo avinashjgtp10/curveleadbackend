@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   getStaff, createStaff, updateStaff, deleteStaff, inviteStaff, getInvitations, resendInvitation, revokeInvitation,
-  getUserPermissions, updateUserPermissions,
+  getUserPermissions, updateUserPermissions, setStaffPassword,
   getMyWhatsAppNumber, updateMyWhatsAppNumber, getStaffWhatsAppNumber, updateStaffWhatsAppNumber,
 } = require('../controllers/staffController');
 const { authenticate, adminOnly } = require('../middleware/auth');
@@ -24,6 +24,7 @@ router.put('/me/whatsapp-number', updateMyWhatsAppNumber);
 router.get('/:id/whatsapp-number', requirePermission('staff.manage'), getStaffWhatsAppNumber);
 router.put('/:id/whatsapp-number', requirePermission('staff.manage'), updateStaffWhatsAppNumber);
 router.put('/:id', requirePermission('staff.manage'), updateStaff);
+router.put('/:id/password', requirePermission('staff.manage'), setStaffPassword);
 router.delete('/:id', requirePermission('staff.manage'), deleteStaff);
 
 module.exports = router;

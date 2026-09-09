@@ -71,11 +71,12 @@ const getReportBySource = async (req, res) => {
 
     const result = await query(
       `SELECT source,
-              COUNT(*) as total_leads,
-              COUNT(*) FILTER (WHERE stage = 'won') as won,
-              COUNT(*) FILTER (WHERE stage = 'lost') as lost,
-              COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as revenue
-       FROM leads WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${sc}
+              COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3) as total_leads,
+              COUNT(*) FILTER (WHERE stage = 'won' AND won_at >= $2 AND won_at < $3) as won,
+              COUNT(*) FILTER (WHERE stage = 'lost' AND created_at >= $2 AND created_at < $3) as lost,
+              COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won' AND won_at >= $2 AND won_at < $3), 0) as revenue
+       FROM leads WHERE tenant_id = $1
+         AND ((created_at >= $2 AND created_at < $3) OR (stage = 'won' AND won_at >= $2 AND won_at < $3))${sc}
        GROUP BY source ORDER BY total_leads DESC`,
       params
     );
@@ -104,11 +105,11 @@ const getReportByStaff = async (req, res) => {
 
     const result = await query(
       `SELECT u.id, u.name, u.email,
-              COUNT(l.id) as total_leads,
-              COUNT(l.id) FILTER (WHERE l.stage = 'won') as won,
-              COUNT(l.id) FILTER (WHERE l.stage = 'lost') as lost,
-              COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won'), 0) as revenue,
-              ROUND(AVG(l.response_time_seconds) FILTER (WHERE l.response_time_seconds IS NOT NULL)) as avg_response_seconds,
+              COUNT(l.id) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3) as total_leads,
+              COUNT(l.id) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3) as won,
+              COUNT(l.id) FILTER (WHERE l.stage = 'lost' AND l.created_at >= $2 AND l.created_at < $3) as lost,
+              COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3), 0) as revenue,
+              ROUND(AVG(l.response_time_seconds) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3 AND l.response_time_seconds IS NOT NULL)) as avg_response_seconds,
               (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
                 WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = false) as pending_followups,
               (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
@@ -122,7 +123,7 @@ const getReportByStaff = async (req, res) => {
                   AND wm.is_ai_generated = false AND wm.sent_at >= $2 AND wm.sent_at < $3) as manual_sent
        FROM users u
        LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = u.tenant_id
-         AND l.created_at >= $2 AND l.created_at < $3
+         AND ((l.created_at >= $2 AND l.created_at < $3) OR (l.won_at >= $2 AND l.won_at < $3))
        WHERE u.tenant_id = $1 AND u.is_active = true${userFilter}
        GROUP BY u.id, u.name, u.email, u.tenant_id
        ORDER BY revenue DESC`,
@@ -158,12 +159,12 @@ const getReportByCampaign = async (req, res) => {
 
     const result = await query(
       `SELECT c.id, c.name, c.source, c.budget, c.actual_spend, c.status,
-              COUNT(l.id) as total_leads,
-              COUNT(l.id) FILTER (WHERE l.stage = 'won') as won,
-              COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won'), 0) as revenue
+              COUNT(l.id) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3) as total_leads,
+              COUNT(l.id) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3) as won,
+              COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3), 0) as revenue
        FROM campaigns c
        LEFT JOIN leads l ON l.campaign_id = c.id
-         AND l.created_at >= $2 AND l.created_at < $3${staffJoin}
+         AND ((l.created_at >= $2 AND l.created_at < $3) OR (l.won_at >= $2 AND l.won_at < $3))${staffJoin}
        WHERE c.tenant_id = $1
        GROUP BY c.id
        ORDER BY revenue DESC`,
@@ -382,16 +383,35 @@ const getTimeline = async (req, res) => {
     const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
     const sc = isStaff ? ' AND assigned_to = $2' : '';
 
+    // Leads-created and revenue-won are bucketed separately (a lead created in one period can
+    // be won in a later one) and merged by period, rather than both grouped by created_at.
     const result = await query(
-      `SELECT DATE_TRUNC('${truncFormat}', created_at) as period,
-              COUNT(*) as total_leads,
-              COUNT(*) FILTER (WHERE stage = 'won') as won,
-              COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as revenue,
-              ROUND(AVG(response_time_seconds) FILTER (WHERE response_time_seconds IS NOT NULL)) as avg_response_seconds,
-              COUNT(*) FILTER (WHERE response_time_seconds IS NOT NULL) as responded_count
-       FROM leads
-       WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'${sc}
-       GROUP BY period ORDER BY period ASC`,
+      `WITH created_buckets AS (
+         SELECT DATE_TRUNC('${truncFormat}', created_at) as period,
+                COUNT(*) as total_leads,
+                ROUND(AVG(response_time_seconds) FILTER (WHERE response_time_seconds IS NOT NULL)) as avg_response_seconds,
+                COUNT(*) FILTER (WHERE response_time_seconds IS NOT NULL) as responded_count
+         FROM leads
+         WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'${sc}
+         GROUP BY period
+       ),
+       won_buckets AS (
+         SELECT DATE_TRUNC('${truncFormat}', won_at) as period,
+                COUNT(*) as won,
+                COALESCE(SUM(deal_value), 0) as revenue
+         FROM leads
+         WHERE tenant_id = $1 AND stage = 'won' AND won_at >= NOW() - INTERVAL '${parseInt(days)} days'${sc}
+         GROUP BY period
+       )
+       SELECT COALESCE(c.period, w.period) as period,
+              COALESCE(c.total_leads, 0) as total_leads,
+              COALESCE(w.won, 0) as won,
+              COALESCE(w.revenue, 0) as revenue,
+              c.avg_response_seconds,
+              COALESCE(c.responded_count, 0) as responded_count
+       FROM created_buckets c
+       FULL OUTER JOIN won_buckets w ON c.period = w.period
+       ORDER BY period ASC`,
       params
     );
 
@@ -522,18 +542,20 @@ const getDashboardSummary = async (req, res) => {
       query(`
         SELECT
           u.name,
-          COUNT(l.id) as total_leads,
+          COUNT(l.id) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3) as total_leads,
           COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
-            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won,
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
+            AND l.won_at >= $2 AND l.won_at < $3) as won,
           COALESCE(SUM(l.deal_value) FILTER (WHERE LOWER(l.stage) IN (
-            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)), 0) as revenue,
-          ROUND(AVG(l.response_time_seconds) FILTER (WHERE l.response_time_seconds IS NOT NULL)) as avg_response_seconds,
+            SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
+            AND l.won_at >= $2 AND l.won_at < $3), 0) as revenue,
+          ROUND(AVG(l.response_time_seconds) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3 AND l.response_time_seconds IS NOT NULL)) as avg_response_seconds,
           (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
             WHERE l2.tenant_id = $1 AND l2.assigned_to = u.id
               AND lf.is_completed = true AND lf.completed_at >= $2 AND lf.completed_at < $3) as completed_followups
         FROM users u
         LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
-          AND l.created_at >= $2 AND l.created_at < $3
+          AND ((l.created_at >= $2 AND l.created_at < $3) OR (l.won_at >= $2 AND l.won_at < $3))
         WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin', 'staff')
           AND ($4::uuid IS NULL OR u.id = $4)
         GROUP BY u.id, u.name ORDER BY won DESC, total_leads DESC LIMIT 8

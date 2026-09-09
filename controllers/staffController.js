@@ -287,8 +287,24 @@ const deleteStaff = async (req, res) => {
   } catch (error) { console.error('Delete staff error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// PUT /api/staff/:id/password - Admin sets a team member's password directly (no email flow)
+const setStaffPassword = async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password || password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    const result = await query(
+      'UPDATE users SET password_hash = $1 WHERE id = $2 AND tenant_id = $3 RETURNING id',
+      [passwordHash, req.params.id, req.tenantId]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Staff not found.' });
+    res.json({ message: 'Password updated.' });
+  } catch (error) { console.error('Set staff password error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
 module.exports = {
   getStaff, createStaff, updateStaff, deleteStaff, inviteStaff, getInvitations, resendInvitation, revokeInvitation,
-  getUserPermissions, updateUserPermissions,
+  getUserPermissions, updateUserPermissions, setStaffPassword,
   getMyWhatsAppNumber, updateMyWhatsAppNumber, getStaffWhatsAppNumber, updateStaffWhatsAppNumber,
 };
