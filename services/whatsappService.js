@@ -103,4 +103,20 @@ const verifyWhatsAppNumber = async (phoneNumberId, accessToken) => {
   }
 };
 
-module.exports = { sendTextMessage, sendTemplate, verifyWhatsAppNumber };
+/**
+ * List the tenant's Meta-approved message templates (for bulk broadcast).
+ * @param {string} wabaId - WhatsApp Business Account ID
+ * @param {string} accessToken
+ */
+const listMessageTemplates = async (wabaId, accessToken) => {
+  try {
+    const response = await axios.get(`${META_API_URL}/${wabaId}/message_templates`, {
+      params: { fields: 'name,language,category,status,components', limit: 100, access_token: accessToken },
+    });
+    return { success: true, templates: response.data.data || [] };
+  } catch (error) {
+    return { success: false, error: error.response?.data?.error?.message || error.message };
+  }
+};
+
+module.exports = { sendTextMessage, sendTemplate, verifyWhatsAppNumber, listMessageTemplates };
