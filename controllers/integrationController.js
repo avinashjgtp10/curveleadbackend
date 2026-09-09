@@ -75,6 +75,7 @@ const getSettings = async (req, res) => {
       // WhatsApp Business API (per-tenant)
       whatsapp_phone_number_id: settings.whatsapp_phone_number_id || '',
       whatsapp_access_token: settings.whatsapp_access_token ? '••••••••' : '',
+      whatsapp_business_account_id: settings.whatsapp_business_account_id || '',
       whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token) && !whatsappError,
       whatsapp_display_number: settings.whatsapp_display_number || '',
       whatsapp_verified_name: settings.whatsapp_verified_name || '',
@@ -100,6 +101,7 @@ const updateSettings = async (req, res) => {
   try {
     const {
       meta_page_id, meta_page_access_token, google_webhook_secret, whatsapp_phone_number_id, whatsapp_access_token,
+      whatsapp_business_account_id,
       meta_dataset_id, meta_capi_access_token, whatsapp_auto_responder_enabled, whatsapp_auto_responder_message,
       ai_qualification_enabled, business_description, meta_ad_account_id,
     } = req.body;
@@ -114,6 +116,7 @@ const updateSettings = async (req, res) => {
       || (whatsapp_access_token !== undefined && !whatsapp_access_token.startsWith('•'));
     if (whatsapp_phone_number_id !== undefined) updated.whatsapp_phone_number_id = whatsapp_phone_number_id;
     if (whatsapp_access_token !== undefined && !whatsapp_access_token.startsWith('•')) updated.whatsapp_access_token = whatsapp_access_token;
+    if (whatsapp_business_account_id !== undefined) updated.whatsapp_business_account_id = whatsapp_business_account_id;
 
     if (whatsappCredsChanged) {
       if (updated.whatsapp_phone_number_id && updated.whatsapp_access_token) {
