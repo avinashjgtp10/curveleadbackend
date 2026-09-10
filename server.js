@@ -1,5 +1,19 @@
 require('dotenv').config({ override: true });
 
+// Without these, one missed .catch() anywhere (a background job tick, a
+// fire-and-forget call) kills the entire pm2 process — every in-flight
+// request gets a Cloudflare 502 until pm2 restarts it. Log and keep running
+// for unhandled rejections (matches this codebase's existing fire-and-forget
+// style); a true uncaughtException still exits, but only after logging so the
+// cause is visible in pm2 logs instead of a silent restart.
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught exception:', err);
+  process.exit(1);
+});
+
 // Meta App ID is not secret (it's embedded in client-side Facebook SDK calls),
 // so it's safe to log in full. This makes prod/env drift on the Facebook
 // integration ("Invalid Client ID" from Graph API) visible in pm2 logs at boot.
