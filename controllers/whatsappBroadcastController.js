@@ -1,17 +1,21 @@
 const { query } = require('../config/db');
-const { sendTemplate, listMessageTemplates } = require('../services/whatsappService');
+const { sendTemplate, listMessageTemplates, createMessageTemplate } = require('../services/whatsappService');
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 
 const LEAD_FIELD_ALLOWLIST = ['name', 'phone', 'email', 'location', 'stage', 'assigned_to_name'];
+const TEMPLATE_CATEGORIES = ['MARKETING', 'UTILITY', 'AUTHENTICATION'];
 
-// GET /api/whatsapp/broadcast/templates — Meta-approved templates for this tenant's WABA
+const getWhatsappCreds = async (tenantId) => {
+  const result = await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]);
+  const settings = result.rows[0]?.settings || {};
+  return { wabaId: settings.whatsapp_business_account_id, accessToken: settings.whatsapp_access_token };
+};
+
+// GET /api/whatsapp/broadcast/templates — this tenant's WABA templates (any status;
+// the broadcast picker shows APPROVED as sendable, others as pending/rejected)
 const getBroadcastTemplates = async (req, res) => {
   try {
-    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
-    const settings = result.rows[0]?.settings || {};
-    const wabaId = settings.whatsapp_business_account_id;
-    const accessToken = settings.whatsapp_access_token;
-
+    const { wabaId, accessToken } = await getWhatsappCreds(req.tenantId);
     if (!wabaId || !accessToken) {
       return res.status(400).json({ error: 'Connect WhatsApp and add your WhatsApp Business Account ID in Integrations first.' });
     }
@@ -19,8 +23,40 @@ const getBroadcastTemplates = async (req, res) => {
     const listResult = await listMessageTemplates(wabaId, accessToken);
     if (!listResult.success) return res.status(502).json({ error: listResult.error });
 
-    const approved = listResult.templates.filter(t => t.status === 'APPROVED');
-    res.json({ templates: approved });
+    res.json({ templates: listResult.templates });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// POST /api/whatsapp/broadcast/templates — submit a new BODY-only template for Meta's approval
+const createBroadcastTemplate = async (req, res) => {
+  try {
+    const { name, category, language, body_text, examples } = req.body;
+
+    if (!name || !/^[a-z0-9_]+$/.test(name)) {
+      return res.status(400).json({ error: 'Template name must be lowercase letters, numbers, and underscores only.' });
+    }
+    if (!TEMPLATE_CATEGORIES.includes(category)) {
+      return res.status(400).json({ error: `Category must be one of: ${TEMPLATE_CATEGORIES.join(', ')}.` });
+    }
+    if (!body_text?.trim()) return res.status(400).json({ error: 'Body text is required.' });
+
+    const varCount = new Set([...body_text.matchAll(/\{\{(\d+)\}\}/g)].map(m => m[1])).size;
+    const exampleList = Array.isArray(examples) ? examples.filter(Boolean) : [];
+    if (varCount > 0 && exampleList.length !== varCount) {
+      return res.status(400).json({ error: `Provide an example value for each of the ${varCount} variable(s) in the body.` });
+    }
+
+    const { wabaId, accessToken } = await getWhatsappCreds(req.tenantId);
+    if (!wabaId || !accessToken) {
+      return res.status(400).json({ error: 'Connect WhatsApp and add your WhatsApp Business Account ID in Integrations first.' });
+    }
+
+    const createResult = await createMessageTemplate(wabaId, accessToken, {
+      name, category, language: language || 'en_US', bodyText: body_text, examples: exampleList,
+    });
+    if (!createResult.success) return res.status(502).json({ error: createResult.error });
+
+    res.status(201).json({ id: createResult.id, status: createResult.status });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
@@ -103,4 +139,4 @@ const sendBroadcast = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getBroadcastTemplates, sendBroadcast };
+module.exports = { getBroadcastTemplates, createBroadcastTemplate, sendBroadcast };
