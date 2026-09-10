@@ -119,4 +119,28 @@ const listMessageTemplates = async (wabaId, accessToken) => {
   }
 };
 
-module.exports = { sendTextMessage, sendTemplate, verifyWhatsAppNumber, listMessageTemplates };
+/**
+ * Submit a new message template to Meta for approval.
+ * v1 supports a BODY-only template (no header/footer/buttons) — matches what
+ * the broadcast sender is able to fill in.
+ * @param {string} wabaId
+ * @param {string} accessToken
+ * @param {{ name: string, category: string, language: string, bodyText: string, examples: string[] }} tmpl
+ */
+const createMessageTemplate = async (wabaId, accessToken, { name, category, language, bodyText, examples = [] }) => {
+  try {
+    const body = { type: 'BODY', text: bodyText };
+    if (examples.length) body.example = { body_text: [examples] };
+
+    const response = await axios.post(
+      `${META_API_URL}/${wabaId}/message_templates`,
+      { name, category, language, components: [body] },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
+    return { success: true, id: response.data.id, status: response.data.status || 'PENDING' };
+  } catch (error) {
+    return { success: false, error: error.response?.data?.error?.message || error.message };
+  }
+};
+
+module.exports = { sendTextMessage, sendTemplate, verifyWhatsAppNumber, listMessageTemplates, createMessageTemplate };
