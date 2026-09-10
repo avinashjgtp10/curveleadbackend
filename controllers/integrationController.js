@@ -76,6 +76,7 @@ const getSettings = async (req, res) => {
       whatsapp_phone_number_id: settings.whatsapp_phone_number_id || '',
       whatsapp_access_token: settings.whatsapp_access_token ? '••••••••' : '',
       whatsapp_business_account_id: settings.whatsapp_business_account_id || '',
+      whatsapp_app_id: settings.whatsapp_app_id || '',
       whatsapp_webhook_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/whatsapp/webhook`,
       whatsapp_webhook_verify_token: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
       whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token) && !whatsappError,
@@ -103,7 +104,7 @@ const updateSettings = async (req, res) => {
   try {
     const {
       meta_page_id, meta_page_access_token, google_webhook_secret, whatsapp_phone_number_id, whatsapp_access_token,
-      whatsapp_business_account_id,
+      whatsapp_business_account_id, whatsapp_app_id,
       meta_dataset_id, meta_capi_access_token, whatsapp_auto_responder_enabled, whatsapp_auto_responder_message,
       ai_qualification_enabled, business_description, meta_ad_account_id,
     } = req.body;
@@ -119,6 +120,7 @@ const updateSettings = async (req, res) => {
     if (whatsapp_phone_number_id !== undefined) updated.whatsapp_phone_number_id = whatsapp_phone_number_id;
     if (whatsapp_access_token !== undefined && !whatsapp_access_token.startsWith('•')) updated.whatsapp_access_token = whatsapp_access_token;
     if (whatsapp_business_account_id !== undefined) updated.whatsapp_business_account_id = whatsapp_business_account_id;
+    if (whatsapp_app_id !== undefined) updated.whatsapp_app_id = whatsapp_app_id;
 
     if (whatsappCredsChanged) {
       if (updated.whatsapp_phone_number_id && updated.whatsapp_access_token) {
