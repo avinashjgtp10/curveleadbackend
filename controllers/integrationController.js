@@ -76,6 +76,8 @@ const getSettings = async (req, res) => {
       whatsapp_phone_number_id: settings.whatsapp_phone_number_id || '',
       whatsapp_access_token: settings.whatsapp_access_token ? '••••••••' : '',
       whatsapp_business_account_id: settings.whatsapp_business_account_id || '',
+      whatsapp_webhook_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/whatsapp/webhook`,
+      whatsapp_webhook_verify_token: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
       whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token) && !whatsappError,
       whatsapp_display_number: settings.whatsapp_display_number || '',
       whatsapp_verified_name: settings.whatsapp_verified_name || '',
