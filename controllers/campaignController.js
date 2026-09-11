@@ -218,16 +218,16 @@ const getCampaignAds = async (req, res) => {
 // POST /api/campaigns
 const createCampaign = async (req, res) => {
   try {
-    const { name, source, description, budget, start_date, end_date, utm_source, utm_medium, utm_campaign } = req.body;
+    const { name, source, description, budget, start_date, end_date, utm_source, utm_medium, utm_campaign, is_priority } = req.body;
     if (!name || !source) return res.status(400).json({ error: 'Name and source required.' });
 
     const result = await query(
       `INSERT INTO campaigns (tenant_id, name, source, description, budget, start_date, end_date,
-                              utm_source, utm_medium, utm_campaign, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                              utm_source, utm_medium, utm_campaign, created_by, is_priority)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
       [req.tenantId, name, source, description, budget || 0, start_date, end_date,
-       utm_source, utm_medium, utm_campaign, req.user.id]
+       utm_source, utm_medium, utm_campaign, req.user.id, is_priority || false]
     );
 
     res.status(201).json({ campaign: result.rows[0] });
@@ -242,7 +242,7 @@ const updateCampaign = async (req, res) => {
   try {
     const allowedFields = [
       'name', 'source', 'description', 'budget', 'actual_spend',
-      'start_date', 'end_date', 'status', 'utm_source', 'utm_medium', 'utm_campaign',
+      'start_date', 'end_date', 'status', 'utm_source', 'utm_medium', 'utm_campaign', 'is_priority',
     ];
 
     const updates = [];

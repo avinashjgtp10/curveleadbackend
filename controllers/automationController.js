@@ -9,7 +9,8 @@ const getSequences = async (req, res) => {
               COALESCE(json_agg(
                 json_build_object(
                   'id', st.id, 'step_order', st.step_order, 'delay_minutes', st.delay_minutes,
-                  'channel', st.channel, 'message', st.message, 'email_subject', st.email_subject
+                  'channel', st.channel, 'message', st.message, 'email_subject', st.email_subject,
+                  'approved_template_name', st.approved_template_name
                 ) ORDER BY st.step_order
               ) FILTER (WHERE st.id IS NOT NULL), '[]') AS steps
        FROM automation_sequences s
@@ -29,9 +30,9 @@ const saveSteps = async (client, tenantId, sequenceId, steps) => {
     const s = steps[i];
     if (!s.message?.trim()) continue;
     await client.query(
-      `INSERT INTO automation_sequence_steps (tenant_id, sequence_id, step_order, delay_minutes, channel, message, email_subject)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [tenantId, sequenceId, i, s.delay_minutes || 0, s.channel || 'whatsapp', s.message.trim(), s.email_subject || null]
+      `INSERT INTO automation_sequence_steps (tenant_id, sequence_id, step_order, delay_minutes, channel, message, email_subject, approved_template_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [tenantId, sequenceId, i, s.delay_minutes || 0, s.channel || 'whatsapp', s.message.trim(), s.email_subject || null, s.approved_template_name || null]
     );
   }
 };
@@ -104,23 +105,33 @@ const getRules = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
+const TRIGGER_TYPES = ['new_lead', 'stage_change', 'campaign'];
+
 const createRule = async (req, res) => {
   try {
-    const { name, trigger_type, stage_name, sequence_id } = req.body;
+    const { name, trigger_type, stage_name, campaign_id, sequence_id } = req.body;
     if (!name?.trim() || !trigger_type || !sequence_id) {
       return res.status(400).json({ error: 'Name, trigger type and sequence are required.' });
     }
-    if (!['new_lead', 'stage_change'].includes(trigger_type)) {
+    if (!TRIGGER_TYPES.includes(trigger_type)) {
       return res.status(400).json({ error: 'Invalid trigger type.' });
     }
     if (trigger_type === 'stage_change' && !stage_name?.trim()) {
       return res.status(400).json({ error: 'Stage is required for a stage-change trigger.' });
     }
+    if (trigger_type === 'campaign' && !campaign_id) {
+      return res.status(400).json({ error: 'Campaign is required for a campaign trigger.' });
+    }
 
     const result = await query(
-      `INSERT INTO automation_rules (tenant_id, name, trigger_type, stage_name, sequence_id)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [req.tenantId, name.trim(), trigger_type, trigger_type === 'stage_change' ? stage_name.trim() : null, sequence_id]
+      `INSERT INTO automation_rules (tenant_id, name, trigger_type, stage_name, campaign_id, sequence_id)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [
+        req.tenantId, name.trim(), trigger_type,
+        trigger_type === 'stage_change' ? stage_name.trim() : null,
+        trigger_type === 'campaign' ? campaign_id : null,
+        sequence_id,
+      ]
     );
     res.status(201).json({ rule: result.rows[0] });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
@@ -128,18 +139,22 @@ const createRule = async (req, res) => {
 
 const updateRule = async (req, res) => {
   try {
-    const { name, trigger_type, stage_name, sequence_id, is_active } = req.body;
-    if (trigger_type && !['new_lead', 'stage_change'].includes(trigger_type)) {
+    const { name, trigger_type, stage_name, campaign_id, sequence_id, is_active } = req.body;
+    if (trigger_type && !TRIGGER_TYPES.includes(trigger_type)) {
       return res.status(400).json({ error: 'Invalid trigger type.' });
     }
 
     const result = await query(
       `UPDATE automation_rules
        SET name = COALESCE($1, name), trigger_type = COALESCE($2, trigger_type),
-           stage_name = CASE WHEN $2 = 'new_lead' THEN NULL ELSE COALESCE($3, stage_name) END,
-           sequence_id = COALESCE($4, sequence_id), is_active = COALESCE($5, is_active)
-       WHERE id = $6 AND tenant_id = $7 RETURNING *`,
-      [name ?? null, trigger_type ?? null, stage_name ?? null, sequence_id ?? null, is_active ?? null, req.params.id, req.tenantId]
+           stage_name = CASE WHEN $2 IN ('new_lead', 'campaign') THEN NULL ELSE COALESCE($3, stage_name) END,
+           campaign_id = CASE WHEN $2 IN ('new_lead', 'stage_change') THEN NULL ELSE COALESCE($4, campaign_id) END,
+           sequence_id = COALESCE($5, sequence_id), is_active = COALESCE($6, is_active)
+       WHERE id = $7 AND tenant_id = $8 RETURNING *`,
+      [
+        name ?? null, trigger_type ?? null, stage_name ?? null, campaign_id ?? null,
+        sequence_id ?? null, is_active ?? null, req.params.id, req.tenantId,
+      ]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Rule not found.' });
     res.json({ rule: result.rows[0] });

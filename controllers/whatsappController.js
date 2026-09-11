@@ -8,7 +8,9 @@ const { nextLeadNumber } = require('../utils/leadNumber');
 const { resolveCampaignFromAdId } = require('../utils/metaCampaignMatch');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
-const { checkNewLeadTriggers } = require('../utils/automationTriggers');
+const { checkNewLeadTriggers, cancelActiveEnrollments } = require('../utils/automationTriggers');
+const { createNotification } = require('./notificationController');
+const { isOptOutMessage } = require('../utils/optOut');
 
 // GET /api/whatsapp/inbox - Shared team inbox (all conversations)
 const getInbox = async (req, res) => {
@@ -197,11 +199,11 @@ const handleWebhook = async (req, res) => {
       // (shared tenant-level number, or a number we don't recognize).
       const leadResult = numberOwner
         ? await query(
-            'SELECT id, tenant_id, name, assigned_to, ai_paused FROM leads WHERE tenant_id = $1 AND (phone = $2 OR phone = $3) LIMIT 1',
+            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out FROM leads WHERE tenant_id = $1 AND (phone = $2 OR phone = $3) LIMIT 1',
             [numberOwner.tenant_id, fromPhone, fromPhone.replace(/^91/, '')]
           )
         : await query(
-            'SELECT id, tenant_id, name, assigned_to, ai_paused FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
+            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
             [fromPhone, fromPhone.replace(/^91/, '')]
           );
 
@@ -239,12 +241,28 @@ const handleWebhook = async (req, res) => {
         [lead.tenant_id, lead.id, messageText, waMessageId]
       );
 
+      // A reply from the lead means any drip sequence has done its job — stop it.
+      // If the reply is actually an opt-out request, stop everything permanently
+      // instead and record it, rather than treating it as a normal reply.
+      if (isOptOutMessage(messageText)) {
+        await query('UPDATE leads SET opted_out = true, opted_out_at = NOW() WHERE id = $1', [lead.id]);
+        lead.opted_out = true;
+        await cancelActiveEnrollments({ tenantId: lead.tenant_id, leadId: lead.id, reason: 'opted_out' });
+        await query(
+          `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title)
+           VALUES ($1, $2, 'opted_out', 'Lead opted out of automated messages')`,
+          [lead.tenant_id, lead.id]
+        ).catch(() => {});
+      } else {
+        await cancelActiveEnrollments({ tenantId: lead.tenant_id, leadId: lead.id, reason: 'replied' });
+      }
+
       // Get tenant settings to check if AI auto-reply is enabled
       const tenantResult = await query('SELECT settings, name FROM tenants WHERE id = $1', [lead.tenant_id]);
       const tenant = tenantResult.rows[0];
       const aiEnabled = tenant?.settings?.ai_qualification_enabled;
 
-      if (aiEnabled && !lead.ai_paused) {
+      if (aiEnabled && !lead.ai_paused && !lead.opted_out) {
         try {
           // Get recent messages for context
           const historyResult = await query(
@@ -267,6 +285,25 @@ const handleWebhook = async (req, res) => {
              VALUES ($1, $2, 'outbound', $3, 'text', $4, $5, true)`,
             [lead.tenant_id, lead.id, aiResponse.reply, sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed']
           );
+
+          // If the AI isn't confident it can handle this (unclear intent, complaint,
+          // urgent request), hand off to a human instead of continuing automation.
+          if (aiResponse.should_human_takeover) {
+            await query('UPDATE leads SET ai_paused = true WHERE id = $1', [lead.id]);
+            const title = `AI handoff needed — ${lead.name}`;
+            const body = messageText.substring(0, 100);
+            if (lead.assigned_to) {
+              await createNotification(lead.tenant_id, lead.assigned_to, title, body, 'ai_handoff', 'lead', lead.id);
+            } else {
+              const admins = await query(
+                `SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND is_active = true`,
+                [lead.tenant_id]
+              );
+              for (const admin of admins.rows) {
+                await createNotification(lead.tenant_id, admin.id, title, body, 'ai_handoff', 'lead', lead.id);
+              }
+            }
+          }
 
           // Update lead based on AI intent
           if (aiResponse.intent === 'not_interested') {

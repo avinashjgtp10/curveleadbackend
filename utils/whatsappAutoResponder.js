@@ -22,8 +22,8 @@ const sendWelcomeMessage = async ({ tenantId, lead }) => {
   });
 
   await query(
-    `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status)
-     VALUES ($1, $2, 'outbound', $3, 'text', $4, $5)`,
+    `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, is_automated)
+     VALUES ($1, $2, 'outbound', $3, 'text', $4, $5, true)`,
     [tenantId, lead.id, message, sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed']
   ).catch(() => {});
 };
