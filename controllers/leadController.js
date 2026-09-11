@@ -301,6 +301,14 @@ const updateLead = async (req, res) => {
       }
     }
 
+    // opted_out is set automatically when a lead sends a stop/unsubscribe
+    // message; it can only be cleared here, manually, by a human — and
+    // clearing it resets opted_out_at so the lead can be re-enrolled.
+    if (req.body.opted_out !== undefined) {
+      updates.push(`opted_out = $${i++}`, `opted_out_at = CASE WHEN $${i - 1} THEN NOW() ELSE NULL END`);
+      params.push(req.body.opted_out);
+    }
+
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
 
     // Auto-set won_at / lost_at based on stage's is_won / is_lost flag

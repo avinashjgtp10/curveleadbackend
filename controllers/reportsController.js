@@ -589,7 +589,19 @@ const getDashboardSummary = async (req, res) => {
           (SELECT COUNT(*) FROM whatsapp_messages WHERE tenant_id = $1 AND is_ai_generated = true
             AND sent_at >= NOW() - INTERVAL '7 days') as ai_replies_this_week,
           (SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND source = 'meta_ads'
-            AND created_at >= DATE_TRUNC('day', NOW())) as meta_leads_today
+            AND created_at >= DATE_TRUNC('day', NOW())) as meta_leads_today,
+          (SELECT COUNT(*) FROM whatsapp_messages WHERE tenant_id = $1 AND is_automated = true
+            AND sent_at >= NOW() - INTERVAL '7 days') as automated_sends_this_week,
+          (SELECT COUNT(*) FROM leads WHERE tenant_id = $1
+            AND opted_out_at >= NOW() - INTERVAL '7 days') as opt_outs_this_week,
+          (SELECT COUNT(*) FROM notifications WHERE tenant_id = $1 AND type IN ('lead_escalation', 'ai_handoff')
+            AND created_at >= NOW() - INTERVAL '7 days') as escalations_this_week,
+          (SELECT COUNT(*) FROM whatsapp_messages wm WHERE wm.tenant_id = $1 AND wm.direction = 'inbound'
+            AND wm.sent_at >= NOW() - INTERVAL '7 days'
+            AND EXISTS (
+              SELECT 1 FROM whatsapp_messages wm2 WHERE wm2.lead_id = wm.lead_id AND wm2.is_automated = true
+                AND wm2.sent_at < wm.sent_at AND wm2.sent_at >= NOW() - INTERVAL '7 days'
+            )) as automation_replies_this_week
       `, [tid]),
     ]);
 
@@ -635,6 +647,12 @@ const getDashboardSummary = async (req, res) => {
       completed_this_month:  parseInt(automation.rows[0].completed_this_month),
       ai_replies_this_week:  parseInt(automation.rows[0].ai_replies_this_week),
       meta_leads_today:      parseInt(automation.rows[0].meta_leads_today),
+      automated_sends_this_week:    parseInt(automation.rows[0].automated_sends_this_week),
+      opt_outs_this_week:           parseInt(automation.rows[0].opt_outs_this_week),
+      escalations_this_week:        parseInt(automation.rows[0].escalations_this_week),
+      automation_reply_rate_this_week: automation.rows[0].automated_sends_this_week > 0
+        ? Math.round((automation.rows[0].automation_replies_this_week / automation.rows[0].automated_sends_this_week) * 100)
+        : 0,
 
       pipeline:    pipeline.rows.map(p => ({ ...p, count: parseInt(p.count), pipeline_value: parseFloat(p.pipeline_value) })),
       sources:     sources.rows.map(s => ({ ...s, total: parseInt(s.total), won: parseInt(s.won), conversion_rate: s.total > 0 ? ((s.won / s.total) * 100).toFixed(1) : '0.0' })),

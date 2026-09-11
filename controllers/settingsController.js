@@ -7,6 +7,11 @@ const withExtras = (row) => ({
   daily_report_enabled: !!row?.settings?.daily_report_enabled,
   daily_report_time: row?.settings?.daily_report_time || '08:00',
   email_reply_to: row?.settings?.email_reply_to || '',
+  automation_business_hours_enabled: !!row?.settings?.automation_business_hours_enabled,
+  automation_business_hours_start: row?.settings?.automation_business_hours_start || '09:00',
+  automation_business_hours_end: row?.settings?.automation_business_hours_end || '20:00',
+  automation_daily_cap_enabled: !!row?.settings?.automation_daily_cap_enabled,
+  automation_daily_cap: row?.settings?.automation_daily_cap || 1,
 });
 
 // GET /api/settings
@@ -28,7 +33,9 @@ const getSettings = async (req, res) => {
 const updateSettings = async (req, res) => {
   try {
     const { name, email, phone, business_type, logo_url, address, city, state,
-            gst_number, pan_number, website, bank_details, daily_report_enabled, daily_report_time, email_reply_to } = req.body;
+            gst_number, pan_number, website, bank_details, daily_report_enabled, daily_report_time, email_reply_to,
+            automation_business_hours_enabled, automation_business_hours_start, automation_business_hours_end,
+            automation_daily_cap_enabled, automation_daily_cap } = req.body;
     const updates = [];
     const params = [req.tenantId];
     let i = 2;
@@ -41,16 +48,28 @@ const updateSettings = async (req, res) => {
       }
     }
 
-    if (daily_report_time !== undefined && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(daily_report_time)) {
+    const hhmmPattern = /^([01]?\d|2[0-3]):[0-5]\d$/;
+    if (daily_report_time !== undefined && !hhmmPattern.test(daily_report_time)) {
       return res.status(400).json({ error: 'daily_report_time must be in HH:MM 24-hour format.' });
     }
+    if (automation_business_hours_start !== undefined && !hhmmPattern.test(automation_business_hours_start)) {
+      return res.status(400).json({ error: 'automation_business_hours_start must be in HH:MM 24-hour format.' });
+    }
+    if (automation_business_hours_end !== undefined && !hhmmPattern.test(automation_business_hours_end)) {
+      return res.status(400).json({ error: 'automation_business_hours_end must be in HH:MM 24-hour format.' });
+    }
 
-    // Store bank_details / report / email preferences inside the settings JSONB column
+    // Store bank_details / report / email / automation preferences inside the settings JSONB column
     const settingsPatch = {};
     if (bank_details !== undefined) settingsPatch.bank_details = bank_details;
     if (daily_report_enabled !== undefined) settingsPatch.daily_report_enabled = daily_report_enabled;
     if (daily_report_time !== undefined) settingsPatch.daily_report_time = daily_report_time;
     if (email_reply_to !== undefined) settingsPatch.email_reply_to = email_reply_to;
+    if (automation_business_hours_enabled !== undefined) settingsPatch.automation_business_hours_enabled = automation_business_hours_enabled;
+    if (automation_business_hours_start !== undefined) settingsPatch.automation_business_hours_start = automation_business_hours_start;
+    if (automation_business_hours_end !== undefined) settingsPatch.automation_business_hours_end = automation_business_hours_end;
+    if (automation_daily_cap_enabled !== undefined) settingsPatch.automation_daily_cap_enabled = automation_daily_cap_enabled;
+    if (automation_daily_cap !== undefined) settingsPatch.automation_daily_cap = automation_daily_cap;
     if (Object.keys(settingsPatch).length) {
       updates.push(`settings = settings || $${i++}`);
       params.push(JSON.stringify(settingsPatch));

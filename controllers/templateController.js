@@ -20,13 +20,13 @@ const getAll = async (req, res) => {
 
 const create = async (req, res) => {
   try {
-    const { name, category = 'general', channel = 'whatsapp', message } = req.body;
+    const { name, category = 'general', channel = 'whatsapp', message, stage_name, campaign_id } = req.body;
     if (!name?.trim() || !message?.trim()) return res.status(400).json({ error: 'Name and message are required.' });
 
     const result = await query(
-      `INSERT INTO message_templates (tenant_id, name, category, channel, message, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [req.tenantId, name.trim(), category, channel, message.trim(), req.user.id]
+      `INSERT INTO message_templates (tenant_id, name, category, channel, message, created_by, stage_name, campaign_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [req.tenantId, name.trim(), category, channel, message.trim(), req.user.id, stage_name || null, campaign_id || null]
     );
     res.status(201).json({ template: result.rows[0] });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
@@ -34,13 +34,15 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   try {
-    const { name, category, channel, message } = req.body;
+    const { name, category, channel, message, stage_name, campaign_id } = req.body;
     const result = await query(
       `UPDATE message_templates
        SET name=COALESCE($1,name), category=COALESCE($2,category),
-           channel=COALESCE($3,channel), message=COALESCE($4,message), updated_at=NOW()
-       WHERE id=$5 AND tenant_id=$6 RETURNING *`,
-      [name ?? null, category ?? null, channel ?? null, message ?? null, req.params.id, req.tenantId]
+           channel=COALESCE($3,channel), message=COALESCE($4,message),
+           stage_name=COALESCE($5,stage_name), campaign_id=COALESCE($6,campaign_id), updated_at=NOW()
+       WHERE id=$7 AND tenant_id=$8 RETURNING *`,
+      [name ?? null, category ?? null, channel ?? null, message ?? null,
+        stage_name ?? null, campaign_id ?? null, req.params.id, req.tenantId]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Template not found.' });
     res.json({ template: result.rows[0] });
