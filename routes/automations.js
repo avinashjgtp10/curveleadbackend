@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/automationController');
 const assignCtrl = require('../controllers/assignmentRuleController');
+const enrollCtrl = require('../controllers/automationEnrollmentController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 const { requirePermission } = require('../utils/permissions');
@@ -17,6 +18,8 @@ router.get('/rules', ctrl.getRules);
 router.post('/rules', requirePermission('automations.manage'), ctrl.createRule);
 router.put('/rules/:id', requirePermission('automations.manage'), ctrl.updateRule);
 router.delete('/rules/:id', requirePermission('automations.manage'), ctrl.deleteRule);
+
+router.get('/enrollments', enrollCtrl.getEnrollments);
 
 router.get('/assignment-rules', assignCtrl.getAssignmentRules);
 router.post('/assignment-rules', requirePermission('automations.manage'), assignCtrl.createAssignmentRule);
