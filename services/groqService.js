@@ -90,6 +90,50 @@ Respond ONLY with valid JSON:
 };
 
 /**
+ * Compose one AI-personalized WhatsApp follow-up message for a scheduled
+ * automation step. Returns null (never throws) on empty/unusable output —
+ * caller treats null the same as a failure and skips sending rather than
+ * risk sending something broken.
+ */
+const generateFollowUpMessage = async ({
+  leadName, tenantName, businessDescription, instructions, conversationHistory,
+}) => {
+  if (!process.env.GROQ_API_KEY) return null;
+
+  const conversationContext = (conversationHistory || []).map(m =>
+    `${m.direction === 'inbound' ? leadName : 'You'}: ${m.message}`
+  ).join('\n');
+
+  const prompt = `You are writing a single WhatsApp follow-up message on behalf of ${tenantName || 'our business'}.
+
+Business context: ${businessDescription || 'We help businesses with their needs.'}
+
+Lead: ${leadName}
+
+${conversationContext ? `Recent conversation:\n${conversationContext}\n` : '(No previous conversation with this lead yet.)'}
+
+Instructions from the business owner for this follow-up: "${instructions || 'Write a friendly, natural check-in.'}"
+
+Write ONE short WhatsApp message (max 3 short lines, under ~40 words) that:
+- Follows the business owner's instructions above
+- Sounds like a real person, not a template — personalize it using the lead's name and the conversation above where relevant
+- Does not repeat anything already said earlier in the conversation
+- Uses at most one emoji, only if it fits naturally
+- Ends with a soft, low-pressure next step if appropriate
+
+Respond with ONLY the message text itself — no quotation marks, no labels like "Message:", no explanation, no markdown.`;
+
+  try {
+    const result = await callGroq([{ role: 'user', content: prompt }], { temperature: 0.6, maxTokens: 200 });
+    const text = (result.content || '').trim().replace(/^["']|["']$/g, '');
+    return text || null;
+  } catch (e) {
+    console.error('generateFollowUpMessage error:', e.message);
+    return null;
+  }
+};
+
+/**
  * Summarize lead conversation for sales rep
  */
 const summarizeLead = async (leadData, messages, activities) => {
@@ -313,4 +357,4 @@ Compare the two groups and identify what separates a won call from a lost one. R
   }
 };
 
-module.exports = { callGroq, qualifyLead, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };
+module.exports = { callGroq, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };
