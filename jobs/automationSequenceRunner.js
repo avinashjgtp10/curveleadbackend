@@ -3,6 +3,7 @@ const { sendTextMessage, sendTemplate } = require('../services/whatsappService')
 const { sendEmail } = require('../utils/email');
 const { substituteVars } = require('../utils/templateVars');
 const { isSessionOpen } = require('../utils/sessionWindow');
+const { generateFollowUpMessage } = require('../services/groqService');
 
 // v1 limitation: business hours are compared against server time, not a
 // per-tenant timezone — documented, not solved, until tenants can set a timezone.
@@ -75,7 +76,7 @@ const runAutomationSequences = async () => {
         }
 
         const lead = { name: row.name, phone: row.phone, email: row.email, location: row.location, source: row.source };
-        const message = substituteVars(step.message, lead);
+        let message = substituteVars(step.message, lead);
 
         if (step.channel === 'whatsapp' && row.phone) {
           const credentials = settings.whatsapp_phone_number_id && settings.whatsapp_access_token
@@ -83,17 +84,46 @@ const runAutomationSequences = async () => {
             : null;
 
           const sessionOpen = await isSessionOpen(row.lead_id);
-          if (sessionOpen) {
+
+          let aiGeneratedSend = false;
+          let aiFailed = false;
+          if (sessionOpen && step.ai_generated) {
+            const historyResult = await query(
+              `SELECT direction, message FROM whatsapp_messages WHERE lead_id = $1 ORDER BY sent_at DESC LIMIT 10`,
+              [row.lead_id]
+            );
+            const aiMessage = await generateFollowUpMessage({
+              leadName: row.name,
+              tenantName: row.tenant_name,
+              businessDescription: settings.business_description,
+              instructions: step.ai_instructions,
+              conversationHistory: historyResult.rows.reverse(),
+            });
+            if (aiMessage) { message = aiMessage; aiGeneratedSend = true; }
+            else aiFailed = true;
+          }
+
+          if (sessionOpen && aiFailed) {
+            // AI call failed or returned empty — ai_instructions is guidance
+            // text, not customer-facing, so never send it raw. Skip this tick
+            // and flag it, same pattern as the no-approved-template skip below.
+            await query(
+              `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+               VALUES ($1,$2,'automation_ai_failed','Automated message skipped',
+                       'AI follow-up generation failed or returned empty for this step; nothing was sent this cycle.')`,
+              [row.tenant_id, row.lead_id]
+            ).catch(() => {});
+          } else if (sessionOpen) {
             const sendResult = await sendTextMessage(row.phone, message, credentials);
             await query(
-              `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, is_automated)
-               VALUES ($1,$2,'outbound',$3,'text',$4,$5,true)`,
-              [row.tenant_id, row.lead_id, message, sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed']
+              `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, is_automated, is_ai_generated)
+               VALUES ($1,$2,'outbound',$3,'text',$4,$5,true,$6)`,
+              [row.tenant_id, row.lead_id, message, sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed', aiGeneratedSend]
             ).catch(() => {});
             await query(
               `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
-               VALUES ($1,$2,'automated_whatsapp','Automated message sent',$3)`,
-              [row.tenant_id, row.lead_id, message]
+               VALUES ($1,$2,'automated_whatsapp',$3,$4)`,
+              [row.tenant_id, row.lead_id, aiGeneratedSend ? 'Automated message sent (AI-personalized)' : 'Automated message sent', message]
             ).catch(() => {});
           } else if (step.approved_template_name) {
             const sendResult = await sendTemplate(row.phone, step.approved_template_name, 'en', [], credentials);

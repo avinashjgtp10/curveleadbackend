@@ -10,7 +10,8 @@ const getSequences = async (req, res) => {
                 json_build_object(
                   'id', st.id, 'step_order', st.step_order, 'delay_minutes', st.delay_minutes,
                   'channel', st.channel, 'message', st.message, 'email_subject', st.email_subject,
-                  'approved_template_name', st.approved_template_name
+                  'approved_template_name', st.approved_template_name,
+                  'ai_generated', st.ai_generated, 'ai_instructions', st.ai_instructions
                 ) ORDER BY st.step_order
               ) FILTER (WHERE st.id IS NOT NULL), '[]') AS steps
        FROM automation_sequences s
@@ -28,11 +29,15 @@ const saveSteps = async (client, tenantId, sequenceId, steps) => {
   await client.query('DELETE FROM automation_sequence_steps WHERE sequence_id = $1', [sequenceId]);
   for (let i = 0; i < (steps || []).length; i++) {
     const s = steps[i];
-    if (!s.message?.trim()) continue;
+    if (!s.ai_generated && !s.message?.trim()) continue;
     await client.query(
-      `INSERT INTO automation_sequence_steps (tenant_id, sequence_id, step_order, delay_minutes, channel, message, email_subject, approved_template_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [tenantId, sequenceId, i, s.delay_minutes || 0, s.channel || 'whatsapp', s.message.trim(), s.email_subject || null, s.approved_template_name || null]
+      `INSERT INTO automation_sequence_steps (tenant_id, sequence_id, step_order, delay_minutes, channel, message, email_subject, approved_template_name, ai_generated, ai_instructions)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        tenantId, sequenceId, i, s.delay_minutes || 0, s.channel || 'whatsapp', (s.message || '').trim(),
+        s.email_subject || null, s.approved_template_name || null,
+        s.ai_generated === true, s.ai_instructions?.trim() || null,
+      ]
     );
   }
 };
