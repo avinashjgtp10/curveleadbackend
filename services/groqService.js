@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const DEFAULT_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const DEFAULT_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
 
 /**
  * Call Groq API with a prompt
@@ -21,6 +21,10 @@ const callGroq = async (messages, options = {}) => {
         temperature: options.temperature ?? 0.3,
         max_tokens: options.maxTokens || 500,
         response_format: options.json ? { type: 'json_object' } : undefined,
+        // gpt-oss models reason before answering; without capping effort, that
+        // reasoning can consume the whole max_tokens budget and leave an empty
+        // response. 'low' keeps replies snappy for these short, simple prompts.
+        reasoning_effort: options.reasoningEffort || 'low',
       },
       {
         headers: {
