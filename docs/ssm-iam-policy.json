@@ -9,15 +9,15 @@
         "ssm:GetParameters",
         "ssm:GetParametersByPath"
       ],
-      "Resource": "arn:aws:ssm:ap-south-1:<AWS_ACCOUNT_ID>:parameter/curvelead/production/*"
+      "Resource": "arn:aws:ssm:us-east-1:<AWS_ACCOUNT_ID>:parameter/curvelead/production/*"
     },
     {
       "Sid": "CurveLeadSSMSecureStringDecrypt",
       "Effect": "Allow",
       "Action": "kms:Decrypt",
-      "Resource": "arn:aws:kms:ap-south-1:<AWS_ACCOUNT_ID>:key/*",
+      "Resource": "arn:aws:kms:us-east-1:<AWS_ACCOUNT_ID>:key/*",
       "Condition": {
-        "StringEquals": { "kms:ViaService": "ssm.ap-south-1.amazonaws.com" }
+        "StringEquals": { "kms:ViaService": "ssm.us-east-1.amazonaws.com" }
       }
     }
   ]

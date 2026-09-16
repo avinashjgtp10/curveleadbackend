@@ -34,12 +34,14 @@ async function loadFromParameterStore() {
 
   // The region needed to reach SSM can't itself come from SSM — this must
   // already be a real process-level env var (set in ecosystem.config.js) or
-  // fall back to this hardcoded default.
-  const region = process.env.AWS_REGION || 'ap-south-1';
+  // fall back to this hardcoded default. Matches the region the rest of the
+  // AWS infra (RDS, EC2) actually runs in.
+  const region = process.env.AWS_REGION || 'us-east-1';
   const ssm = new SSMClient({ region });
   const PARAM_PATH = '/curvelead/production/';
 
   let nextToken;
+  let count = 0;
   try {
     do {
       const result = await ssm.send(new GetParametersByPathCommand({
@@ -54,6 +56,7 @@ async function loadFromParameterStore() {
         // '/curvelead/production/DB_HOST' -> 'DB_HOST' — flat, one segment per var
         const name = param.Name.slice(PARAM_PATH.length);
         process.env[name] = param.Value;
+        count++;
       }
 
       nextToken = result.NextToken;
@@ -62,6 +65,11 @@ async function loadFromParameterStore() {
     console.error('❌ Failed to load parameters from AWS SSM Parameter Store:', err.message);
     process.exit(1);
   }
+
+  // Count only — never names or values — just enough to confirm in `pm2 logs`
+  // that this actually reached SSM and got something back, vs. silently
+  // proceeding with zero parameters (e.g. wrong region or empty path).
+  console.log(`✅ Loaded ${count} parameter(s) from AWS SSM Parameter Store (region: ${region})`);
 }
 
 (async () => {
