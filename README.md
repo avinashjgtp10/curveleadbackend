@@ -119,6 +119,57 @@ CI/CD via GitHub Actions. Push to `master` → auto-deploys to EC2.
 Required GitHub secrets:
 - `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`
 
+### Production Configuration (AWS SSM Parameter Store)
+
+In production (`NODE_ENV=production`), `bootstrap.js` — not `server.js` — is the
+process entry point. It loads all config from AWS Systems Manager Parameter
+Store under `/curvelead/production/` before the Express app, DB pool, or any
+other service is required, then hands off to `server.js`. Local development is
+unaffected — `.env` still works via `npm run dev`.
+
+- The EC2 instance needs an IAM role attached (instance profile) with the
+  policy in `docs/ssm-iam-policy.json` — scoped to `/curvelead/production/*`
+  only, plus `kms:Decrypt` for `SecureString` values. No AWS keys are ever
+  stored in code, `.env`, or on the instance.
+- `AWS_REGION` (default `ap-south-1`) and `NODE_ENV=production` are set
+  directly in `ecosystem.config.js`'s `env` block, not in Parameter Store —
+  SSM can't supply the region needed to reach SSM itself.
+- Redis is not used by this app; there is nothing to configure there.
+- If a required parameter is missing, the process logs the missing *names*
+  (never values) and exits non-zero rather than starting half-configured.
+
+Create a parameter:
+```bash
+aws ssm put-parameter --name "/curvelead/production/DB_PASSWORD" \
+  --value "..." --type "SecureString" --region ap-south-1
+```
+
+Required parameters (String unless noted):
+- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` (SecureString)
+- `JWT_SECRET` (SecureString)
+- `META_APP_ID`, `META_APP_SECRET` (SecureString), `META_WEBHOOK_VERIFY_TOKEN` (SecureString)
+- `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN` (SecureString), `WHATSAPP_WEBHOOK_VERIFY_TOKEN` (SecureString)
+- `EMAIL_FROM_ADDRESS`, `EMAIL_FROM_NAME`, `RESEND_API_KEY` (SecureString)
+- `S3_BUCKET_NAME`
+- `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` (SecureString)
+- `FRONTEND_URL`, `CORS_ALLOWED_ORIGINS`
+
+Optional (has a code-level default if unset): `JWT_EXPIRES_IN`, `GROQ_API_KEY`
+(SecureString), `GROQ_MODEL`, `API_URL`, `API_BASE_URL`, `PORT`.
+
+Never stored anywhere (IAM role only): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+
+Applying a config change to a running instance for the first time (or after
+changing `script`/`env` in `ecosystem.config.js`) needs one manual refresh,
+since `pm2 restart --update-env` doesn't re-read a changed script path:
+```bash
+pm2 delete curvelead-api
+pm2 start ecosystem.config.js
+pm2 save
+```
+After that, the existing `pm2 restart curvelead-api --update-env` (used by the
+GitHub Actions deploy) picks up parameter changes on every restart.
+
 ## License
 
 Proprietary — © 2026 CurveLead

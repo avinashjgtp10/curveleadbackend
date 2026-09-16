@@ -1,4 +1,9 @@
-require('dotenv').config({ override: true });
+// SSM already populated process.env in production (bootstrap.js runs before this
+// file is required); override:true here would let a stale on-box .env clobber
+// those values. Local dev still wants override:true so an edited .env always wins.
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config({ override: true });
+}
 
 // Without these, one missed .catch() anywhere (a background job tick, a
 // fire-and-forget call) kills the entire pm2 process — every in-flight
