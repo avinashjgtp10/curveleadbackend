@@ -12,7 +12,7 @@ module.exports = {
     // dev/prod split that `pm2 restart --update-env` was never activating anyway.
     env: {
       NODE_ENV: 'production',
-      AWS_REGION: 'ap-south-1',
+      AWS_REGION: 'us-east-1',
     },
     error_file: '/home/ubuntu/.pm2/logs/curvelead-api-error.log',
     out_file: '/home/ubuntu/.pm2/logs/curvelead-api-out.log',

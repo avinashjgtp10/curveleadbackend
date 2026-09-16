@@ -131,7 +131,7 @@ unaffected — `.env` still works via `npm run dev`.
   policy in `docs/ssm-iam-policy.json` — scoped to `/curvelead/production/*`
   only, plus `kms:Decrypt` for `SecureString` values. No AWS keys are ever
   stored in code, `.env`, or on the instance.
-- `AWS_REGION` (default `ap-south-1`) and `NODE_ENV=production` are set
+- `AWS_REGION` (default `us-east-1`, matching where RDS/EC2 already run) and `NODE_ENV=production` are set
   directly in `ecosystem.config.js`'s `env` block, not in Parameter Store —
   SSM can't supply the region needed to reach SSM itself.
 - Redis is not used by this app; there is nothing to configure there.
@@ -141,7 +141,7 @@ unaffected — `.env` still works via `npm run dev`.
 Create a parameter:
 ```bash
 aws ssm put-parameter --name "/curvelead/production/DB_PASSWORD" \
-  --value "..." --type "SecureString" --region ap-south-1
+  --value "..." --type "SecureString" --region us-east-1
 ```
 
 Required parameters (String unless noted):
