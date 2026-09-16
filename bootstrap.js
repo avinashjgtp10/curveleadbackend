@@ -24,12 +24,12 @@ function validateRequiredVars() {
   }
 }
 
-// Pulls every parameter under /curvelead/production/ into process.env before
+// Pulls every parameter under /curvelead/backend/<env>/ into process.env before
 // anything else (db.js's eager pool, cryptoSecrets.js's eager key derivation,
 // server.js's routes) gets a chance to require and read process.env while it's
 // still empty. GetParametersByPathCommand caps MaxResults at 10 regardless of
 // what's requested, so pagination via NextToken is mandatory here.
-async function loadFromParameterStore() {
+async function loadFromParameterStore(env) {
   const { SSMClient, GetParametersByPathCommand } = require('@aws-sdk/client-ssm');
 
   // The region needed to reach SSM can't itself come from SSM — this must
@@ -38,7 +38,7 @@ async function loadFromParameterStore() {
   // AWS infra (RDS, EC2) actually runs in.
   const region = process.env.AWS_REGION || 'us-east-1';
   const ssm = new SSMClient({ region });
-  const PARAM_PATH = '/curvelead/production/';
+  const PARAM_PATH = `/curvelead/backend/${env}/`;
 
   let nextToken;
   let count = 0;
@@ -53,7 +53,7 @@ async function loadFromParameterStore() {
       }));
 
       for (const param of result.Parameters || []) {
-        // '/curvelead/production/DB_HOST' -> 'DB_HOST' — flat, one segment per var
+        // '/curvelead/backend/production/DB_HOST' -> 'DB_HOST' — flat, one segment per var
         const name = param.Name.slice(PARAM_PATH.length);
         process.env[name] = param.Value;
         count++;
@@ -62,21 +62,27 @@ async function loadFromParameterStore() {
       nextToken = result.NextToken;
     } while (nextToken);
   } catch (err) {
-    console.error('❌ Failed to load parameters from AWS SSM Parameter Store:', err.message);
+    console.error(`❌ Failed to load parameters from AWS SSM Parameter Store (${PARAM_PATH}):`, err.message);
     process.exit(1);
   }
 
   // Count only — never names or values — just enough to confirm in `pm2 logs`
   // that this actually reached SSM and got something back, vs. silently
   // proceeding with zero parameters (e.g. wrong region or empty path).
-  console.log(`✅ Loaded ${count} parameter(s) from AWS SSM Parameter Store (region: ${region})`);
+  console.log(`✅ Loaded ${count} parameter(s) from AWS SSM Parameter Store (${PARAM_PATH}, region: ${region})`);
 }
 
 (async () => {
-  if (process.env.NODE_ENV === 'production') {
-    await loadFromParameterStore();
+  // NODE_ENV decides both whether to use SSM at all and which path to read —
+  // it can't itself come from SSM (same chicken-and-egg problem as AWS_REGION),
+  // so it must already be a real process-level env var. Unset/'development'
+  // means "plain local machine, no AWS" — anything else (dev, production, ...)
+  // is a real deployed environment and reads /curvelead/backend/<NODE_ENV>/.
+  const env = process.env.NODE_ENV;
+  if (env && env !== 'development') {
+    await loadFromParameterStore(env);
   } else {
-    // Local dev only — production never touches .env, only Parameter Store.
+    // Local dev only — deployed environments never touch .env, only Parameter Store.
     require('dotenv').config();
   }
 

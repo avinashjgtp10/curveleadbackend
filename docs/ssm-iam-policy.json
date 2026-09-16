@@ -9,7 +9,7 @@
         "ssm:GetParameters",
         "ssm:GetParametersByPath"
       ],
-      "Resource": "arn:aws:ssm:us-east-1:<AWS_ACCOUNT_ID>:parameter/curvelead/production/*"
+      "Resource": "arn:aws:ssm:us-east-1:<AWS_ACCOUNT_ID>:parameter/curvelead/backend/<ENV>/*"
     },
     {
       "Sid": "CurveLeadSSMSecureStringDecrypt",

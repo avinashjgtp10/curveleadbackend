@@ -1,7 +1,8 @@
-// SSM already populated process.env in production (bootstrap.js runs before this
-// file is required); override:true here would let a stale on-box .env clobber
-// those values. Local dev still wants override:true so an edited .env always wins.
-if (process.env.NODE_ENV !== 'production') {
+// SSM already populated process.env for any deployed environment (bootstrap.js
+// runs before this file is required); override:true here would let a stale
+// on-box .env clobber those values. Plain local dev (unset/'development')
+// still wants override:true so an edited .env always wins.
+if (!process.env.NODE_ENV || process.env.NODE_ENV === 'development') {
   require('dotenv').config({ override: true });
 }
 
