@@ -119,28 +119,36 @@ CI/CD via GitHub Actions. Push to `master` → auto-deploys to EC2.
 Required GitHub secrets:
 - `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`
 
-### Production Configuration (AWS SSM Parameter Store)
+### Deployed-Environment Configuration (AWS SSM Parameter Store)
 
-In production (`NODE_ENV=production`), `bootstrap.js` — not `server.js` — is the
-process entry point. It loads all config from AWS Systems Manager Parameter
-Store under `/curvelead/production/` before the Express app, DB pool, or any
-other service is required, then hands off to `server.js`. Local development is
-unaffected — `.env` still works via `npm run dev`.
+`bootstrap.js` — not `server.js` — is the process entry point. `NODE_ENV`
+decides where config comes from:
 
-- The EC2 instance needs an IAM role attached (instance profile) with the
-  policy in `docs/ssm-iam-policy.json` — scoped to `/curvelead/production/*`
-  only, plus `kms:Decrypt` for `SecureString` values. No AWS keys are ever
-  stored in code, `.env`, or on the instance.
-- `AWS_REGION` (default `us-east-1`, matching where RDS/EC2 already run) and `NODE_ENV=production` are set
-  directly in `ecosystem.config.js`'s `env` block, not in Parameter Store —
-  SSM can't supply the region needed to reach SSM itself.
+- **Unset, or `development`**: plain local machine, no AWS involved — falls
+  back to `.env` exactly like before (`npm run dev` never touches SSM).
+- **Any other value** (`dev`, `production`, `staging`, ...): treated as a real
+  deployed environment. `bootstrap.js` loads every parameter under
+  `/curvelead/backend/<NODE_ENV>/` from AWS SSM Parameter Store into
+  `process.env` — before the Express app, DB pool, or any other service is
+  required — then hands off to `server.js`.
+
+- Each deployed environment's EC2 instance needs its own IAM role (instance
+  profile) using `docs/ssm-iam-policy.json` with `<ENV>` replaced by that
+  environment's name — e.g. a `dev` box's role is scoped to only
+  `/curvelead/backend/dev/*`, a `production` box's role only to
+  `/curvelead/backend/production/*`. No AWS keys are ever stored in code,
+  `.env`, or on any instance.
+- `AWS_REGION` (default `us-east-1`, matching where RDS/EC2 already run) and
+  `NODE_ENV` are set directly in that environment's PM2 `env` block, never in
+  Parameter Store — SSM can't supply the region or environment name needed to
+  reach SSM in the first place (same chicken-and-egg problem for both).
 - Redis is not used by this app; there is nothing to configure there.
 - If a required parameter is missing, the process logs the missing *names*
   (never values) and exits non-zero rather than starting half-configured.
 
-Create a parameter:
+Create a parameter (example: the `dev` environment):
 ```bash
-aws ssm put-parameter --name "/curvelead/production/DB_PASSWORD" \
+aws ssm put-parameter --name "/curvelead/backend/dev/DB_PASSWORD" \
   --value "..." --type "SecureString" --region us-east-1
 ```
 
