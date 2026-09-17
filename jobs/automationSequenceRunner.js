@@ -126,7 +126,19 @@ const runAutomationSequences = async () => {
               [row.tenant_id, row.lead_id, aiGeneratedSend ? 'Automated message sent (AI-personalized)' : 'Automated message sent', message]
             ).catch(() => {});
           } else if (step.approved_template_name) {
-            const sendResult = await sendTemplate(row.phone, step.approved_template_name, 'en', [], credentials);
+            // A template can have a video/image/document header registered via the
+            // Broadcast feature (whatsapp_template_media, keyed by template name) —
+            // look it up so automation sends carry the same media a manual broadcast
+            // send would, instead of silently dropping it.
+            const media = await query(
+              `SELECT media_type, media_url FROM whatsapp_template_media
+               WHERE tenant_id = $1 AND template_name = $2 AND language = 'en'`,
+              [row.tenant_id, step.approved_template_name]
+            );
+            const headerMedia = media.rows[0]
+              ? { type: media.rows[0].media_type.toLowerCase(), link: media.rows[0].media_url }
+              : null;
+            const sendResult = await sendTemplate(row.phone, step.approved_template_name, 'en', [], credentials, headerMedia);
             await query(
               `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, template_name, wa_message_id, status, is_automated)
                VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,true)`,
