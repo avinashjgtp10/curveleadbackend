@@ -1,5 +1,5 @@
 const { query } = require('../config/db');
-const { sendTextMessage, sendTemplate } = require('../services/whatsappService');
+const { sendTextMessage, sendTemplate, listMessageTemplates } = require('../services/whatsappService');
 const { sendEmail } = require('../utils/email');
 const { substituteVars } = require('../utils/templateVars');
 const { isSessionOpen } = require('../utils/sessionWindow');
@@ -126,19 +126,46 @@ const runAutomationSequences = async () => {
               [row.tenant_id, row.lead_id, aiGeneratedSend ? 'Automated message sent (AI-personalized)' : 'Automated message sent', message]
             ).catch(() => {});
           } else if (step.approved_template_name) {
+            // Templates aren't always registered under 'en' — Meta's own template
+            // creator commonly defaults to 'en_US', and this WABA has a mix of both.
+            // Sending with the wrong language code fails outright (Meta error 132001,
+            // "template name does not exist in <lang>"), so resolve the template's
+            // actual language before sending rather than assuming. Falls back to 'en'
+            // if the lookup fails (network issue) or the template isn't found there —
+            // same as the previous hardcoded behavior, not a regression.
+            let language = 'en';
+            const templateList = await listMessageTemplates(
+              settings.whatsapp_business_account_id, credentials?.access_token || settings.whatsapp_access_token
+            ).catch(() => null);
+            const matchedTemplate = templateList?.success
+              ? templateList.templates.find(t => t.name === step.approved_template_name)
+              : null;
+            if (matchedTemplate) language = matchedTemplate.language;
+
+            // Templates with a body variable (e.g. "Hi {{1}}") reject a send with
+            // zero parameters outright (Meta error 132000). Fill every {{n}} slot
+            // with the lead's name — covers the near-universal single-variable
+            // "Hi {{1}}" greeting case; templates with multiple distinct variables
+            // would need per-step parameter mapping, which isn't built yet.
+            const bodyComponent = matchedTemplate?.components?.find(c => c.type === 'BODY');
+            const varCount = bodyComponent ? (bodyComponent.text.match(/\{\{\d+\}\}/g) || []).length : 0;
+            const parameters = varCount > 0
+              ? Array(varCount).fill({ type: 'text', text: row.name || 'there' })
+              : [];
+
             // A template can have a video/image/document header registered via the
             // Broadcast feature (whatsapp_template_media, keyed by template name) —
             // look it up so automation sends carry the same media a manual broadcast
             // send would, instead of silently dropping it.
             const media = await query(
               `SELECT media_type, media_url FROM whatsapp_template_media
-               WHERE tenant_id = $1 AND template_name = $2 AND language = 'en'`,
-              [row.tenant_id, step.approved_template_name]
+               WHERE tenant_id = $1 AND template_name = $2 AND language = $3`,
+              [row.tenant_id, step.approved_template_name, language]
             );
             const headerMedia = media.rows[0]
               ? { type: media.rows[0].media_type.toLowerCase(), link: media.rows[0].media_url }
               : null;
-            const sendResult = await sendTemplate(row.phone, step.approved_template_name, 'en', [], credentials, headerMedia);
+            const sendResult = await sendTemplate(row.phone, step.approved_template_name, language, parameters, credentials, headerMedia);
             await query(
               `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, template_name, wa_message_id, status, is_automated)
                VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,true)`,

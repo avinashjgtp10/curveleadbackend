@@ -673,8 +673,74 @@ const getDashboardSummary = async (req, res) => {
   }
 };
 
+// GET /api/reports/messages - Filterable, paginated WhatsApp message log
+// (status/delivery visibility across all leads — separate from the aggregate
+// reports above, which is why it follows leadController.getLeads's pagination
+// convention instead of the summary-style handlers in this file.)
+const getMessagesReport = async (req, res) => {
+  try {
+    const { status, direction, is_automated, search, date_from, date_to, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    let whereClause = 'WHERE wm.tenant_id = $1';
+    const params = [req.tenantId];
+    let i = 2;
+
+    if (req.user.role === 'staff') {
+      whereClause += ` AND l.assigned_to = $${i++}`;
+      params.push(req.user.id);
+    }
+    if (status) { whereClause += ` AND wm.status = $${i++}`; params.push(status); }
+    if (direction) { whereClause += ` AND wm.direction = $${i++}`; params.push(direction); }
+    if (is_automated === 'true' || is_automated === 'false') {
+      whereClause += ` AND wm.is_automated = $${i++}`;
+      params.push(is_automated === 'true');
+    }
+    if (search) {
+      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i})`;
+      params.push(`%${search}%`);
+      i++;
+    }
+    if (date_from) { whereClause += ` AND wm.sent_at >= $${i++}`; params.push(date_from); }
+    if (date_to) { whereClause += ` AND wm.sent_at < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
+
+    const limitParam = i++;
+    const offsetParam = i;
+    params.push(limit, offset);
+
+    const fromClause = `FROM whatsapp_messages wm JOIN leads l ON l.id = wm.lead_id ${whereClause}`;
+
+    const [result, countResult] = await Promise.all([
+      query(
+        `SELECT wm.id, wm.lead_id, l.name as lead_name, l.phone as lead_phone,
+                wm.direction, wm.message, wm.message_type, wm.template_name, wm.status,
+                wm.is_automated, wm.is_ai_generated, wm.sent_at, wm.delivered_at, wm.read_at
+         ${fromClause}
+         ORDER BY wm.sent_at DESC
+         LIMIT $${limitParam} OFFSET $${offsetParam}`,
+        params
+      ),
+      query(`SELECT COUNT(*) ${fromClause}`, params.slice(0, -2)),
+    ]);
+
+    res.json({
+      messages: result.rows,
+      pagination: {
+        total: parseInt(countResult.rows[0].count),
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(countResult.rows[0].count / limit),
+      },
+    });
+  } catch (error) {
+    console.error('Messages report error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
 module.exports = {
   getConversionReport, getReportBySource, getReportByStaff,
   getReportByCampaign, getTimeline, getDashboardSummary,
   getFunnelReport, getTimeInStageReport, getFollowupTrend,
+  getMessagesReport,
 };
