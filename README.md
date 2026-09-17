@@ -160,10 +160,11 @@ Required parameters (String unless noted):
 - `EMAIL_FROM_ADDRESS`, `EMAIL_FROM_NAME`, `RESEND_API_KEY` (SecureString)
 - `S3_BUCKET_NAME`
 - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` (SecureString)
-- `FRONTEND_URL`, `CORS_ALLOWED_ORIGINS`
+- `FRONTEND_URL`
 
 Optional (has a code-level default if unset): `JWT_EXPIRES_IN`, `GROQ_API_KEY`
-(SecureString), `GROQ_MODEL`, `API_URL`, `API_BASE_URL`, `PORT`.
+(SecureString), `GROQ_MODEL`, `API_URL`, `API_BASE_URL`, `PORT`,
+`CORS_ALLOWED_ORIGINS` (defaults to localhost + curvelead.com).
 
 Never stored anywhere (IAM role only): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
 
