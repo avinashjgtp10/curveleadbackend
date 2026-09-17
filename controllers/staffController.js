@@ -6,7 +6,7 @@ const { PERMISSIONS, ROLE_DEFAULTS } = require('../utils/permissions');
 
 const INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-const sendInvite = async ({ tenantId, tenantName, inviterName, invitedBy, email, name, role, teamId }) => {
+const sendInvite = async ({ tenantId, tenantName, inviterName, invitedBy, email, name, phone, role, teamId }) => {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + INVITE_EXPIRY_MS);
 
@@ -14,9 +14,9 @@ const sendInvite = async ({ tenantId, tenantName, inviterName, invitedBy, email,
   await sendInviteEmail(email, inviteUrl, tenantName, inviterName).catch(e => console.error('Invite email failed:', e.message));
 
   return query(
-    `INSERT INTO invitations (tenant_id, email, name, role, team_id, token, invited_by, expires_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [tenantId, email, name || null, role || 'staff', teamId || null, token, invitedBy || null, expiresAt]
+    `INSERT INTO invitations (tenant_id, email, name, phone, role, team_id, token, invited_by, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [tenantId, email, name || null, phone || null, role || 'staff', teamId || null, token, invitedBy || null, expiresAt]
   );
 };
 
@@ -86,7 +86,7 @@ const updateStaff = async (req, res) => {
 // POST /api/staff/invite - Real invite: email a link, account created on accept
 const inviteStaff = async (req, res) => {
   try {
-    const { name, email, role, team_id } = req.body;
+    const { name, email, phone, role, team_id } = req.body;
     if (!email) return res.status(400).json({ error: 'Email is required.' });
 
     const existingUser = await query('SELECT id FROM users WHERE email = $1', [email]);
@@ -103,7 +103,7 @@ const inviteStaff = async (req, res) => {
     const result = await sendInvite({
       tenantId: req.tenantId, tenantName: tenantRes.rows[0]?.name || 'CurveLead',
       inviterName: req.user.name, invitedBy: req.user.id,
-      email, name, role, teamId: team_id,
+      email, name, phone, role, teamId: team_id,
     });
 
     res.status(201).json({ invitation: result.rows[0] });
@@ -137,7 +137,7 @@ const resendInvitation = async (req, res) => {
     const result = await sendInvite({
       tenantId: req.tenantId, tenantName: tenantRes.rows[0]?.name || 'CurveLead',
       inviterName: req.user.name, invitedBy: req.user.id,
-      email: inv.email, name: inv.name, role: inv.role, teamId: inv.team_id,
+      email: inv.email, name: inv.name, phone: inv.phone, role: inv.role, teamId: inv.team_id,
     });
 
     res.json({ invitation: result.rows[0] });

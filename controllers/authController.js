@@ -325,10 +325,10 @@ const acceptInvite = async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
     const userResult = await query(
-      `INSERT INTO users (tenant_id, name, email, password_hash, role, team_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, name, email, role, tenant_id, team_id`,
-      [invite.tenant_id, name, invite.email, passwordHash, invite.role, invite.team_id]
+      `INSERT INTO users (tenant_id, name, email, phone, password_hash, role, team_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, name, email, phone, role, tenant_id, team_id`,
+      [invite.tenant_id, name, invite.email, invite.phone, passwordHash, invite.role, invite.team_id]
     );
     await query('UPDATE invitations SET accepted_at = NOW() WHERE id = $1', [invite.id]);
 
