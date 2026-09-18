@@ -5,7 +5,7 @@ const { recordFirstResponse } = require('../utils/leadResponse');
 const { nextLeadNumber, reserveLeadNumbers } = require('../utils/leadNumber');
 const { tombstoneMetaLead } = require('../utils/deletedLeads');
 const { createNotification, notifyNewLeadToAdmins } = require('./notificationController');
-const { checkNewLeadTriggers, checkStageChangeTriggers } = require('../utils/automationTriggers');
+const { checkNewLeadTriggers, checkStageChangeTriggers, checkLeadStatusTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { sendLeadConversionEvent } = require('../utils/metaCapi');
@@ -381,6 +381,9 @@ const updateLead = async (req, res) => {
          VALUES ($1, $2, 'status_change', $3, $4)`,
         [req.tenantId, req.params.id, `Status changed to ${req.body.lead_status}`, req.user.id]
       ).catch(() => {});
+      checkLeadStatusTriggers({
+        tenantId: req.tenantId, leadId: req.params.id, newStatus: req.body.lead_status,
+      }).catch(() => {});
     }
 
     // Log source change
