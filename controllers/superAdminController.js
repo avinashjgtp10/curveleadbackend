@@ -1,4 +1,6 @@
 const { query } = require('../config/db');
+const { sendTextMessage } = require('../services/whatsappService');
+const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 
 // Records a row in activity_logs for the Super Admin activity feed. Never
 // throws — a logging failure should not break the action that triggered it.
@@ -355,6 +357,142 @@ const getAutomations = async (req, res) => {
   } catch (error) { console.error('Get automations error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// ============================================
+// Campaigns (cross-tenant)
+// ============================================
+
+// GET /api/super-admin/campaigns
+const getCrossTenantCampaigns = async (req, res) => {
+  try {
+    const { search, tenant_id, status, source, page = 1, limit = 20 } = req.query;
+    const conditions = [];
+    const params = [];
+    let i = 1;
+
+    if (search) { conditions.push(`c.name ILIKE $${i}`); params.push(`%${search}%`); i++; }
+    if (tenant_id) { conditions.push(`c.tenant_id = $${i}`); params.push(tenant_id); i++; }
+    if (status) { conditions.push(`c.status = $${i}`); params.push(status); i++; }
+    if (source) { conditions.push(`c.source = $${i}`); params.push(source); i++; }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const offset = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(limit, 10);
+
+    const result = await query(
+      `SELECT c.id, c.name, c.status, c.source, c.budget, c.actual_spend, c.impressions, c.clicks,
+              c.meta_campaign_id, c.start_date, c.end_date, c.created_at,
+              t.id as tenant_id, t.name as tenant_name,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
+                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as won_leads,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
+                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_lost = true)) as lost_leads
+       FROM campaigns c
+       LEFT JOIN tenants t ON c.tenant_id = t.id
+       ${where}
+       ORDER BY c.created_at DESC
+       LIMIT $${i} OFFSET $${i + 1}`,
+      [...params, limit, offset]
+    );
+    const countResult = await query(`SELECT COUNT(*) FROM campaigns c ${where}`, params);
+
+    const campaigns = result.rows.map(c => {
+      const totalLeads = parseInt(c.total_leads, 10) || 0;
+      const wonLeads = parseInt(c.won_leads, 10) || 0;
+      const lostLeads = parseInt(c.lost_leads, 10) || 0;
+      const spend = parseFloat(c.actual_spend) || 0;
+      return {
+        ...c,
+        total_leads: totalLeads,
+        won_leads: wonLeads,
+        lost_leads: lostLeads,
+        cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0,
+        conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
+      };
+    });
+
+    res.json({ campaigns, total: parseInt(countResult.rows[0].count, 10) });
+  } catch (error) { console.error('Get cross-tenant campaigns error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// ============================================
+// WhatsApp (cross-tenant, read + reply)
+// ============================================
+
+// GET /api/super-admin/whatsapp/conversations — latest message per lead, across every tenant
+const getCrossTenantWhatsAppConversations = async (req, res) => {
+  try {
+    const { search, tenant_id } = req.query;
+    const conditions = [];
+    const params = [];
+    let i = 1;
+
+    if (tenant_id) { conditions.push(`wm.tenant_id = $${i}`); params.push(tenant_id); i++; }
+    if (search) {
+      conditions.push(`(l.name ILIKE $${i} OR l.phone ILIKE $${i} OR t.name ILIKE $${i})`);
+      params.push(`%${search}%`); i++;
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const result = await query(
+      `SELECT DISTINCT ON (wm.lead_id)
+              wm.lead_id as id, wm.lead_id, wm.message as last_message, wm.sent_at as last_message_at,
+              l.name as lead_name, l.phone as lead_phone,
+              t.id as tenant_id, t.name as tenant_name
+       FROM whatsapp_messages wm
+       JOIN leads l ON wm.lead_id = l.id
+       LEFT JOIN tenants t ON wm.tenant_id = t.id
+       ${where}
+       ORDER BY wm.lead_id, wm.sent_at DESC`,
+      params
+    );
+
+    const conversations = result.rows.sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at)).slice(0, 200);
+    res.json({ conversations });
+  } catch (error) { console.error('Get cross-tenant WhatsApp conversations error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// GET /api/super-admin/whatsapp/conversations/:id/messages — :id is the lead_id
+const getCrossTenantWhatsAppMessages = async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT wm.id, wm.direction, wm.message as text, wm.sent_at as created_at, wm.status, u.name as sent_by_name
+       FROM whatsapp_messages wm
+       LEFT JOIN users u ON wm.sent_by = u.id
+       WHERE wm.lead_id = $1
+       ORDER BY wm.sent_at ASC`,
+      [req.params.id]
+    );
+    res.json({ messages: result.rows });
+  } catch (error) { console.error('Get cross-tenant WhatsApp messages error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// POST /api/super-admin/whatsapp/conversations/:id/send — :id is the lead_id
+const sendCrossTenantWhatsAppMessage = async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || !text.trim()) return res.status(400).json({ error: 'text is required.' });
+
+    const leadResult = await query('SELECT id, tenant_id, phone, name, assigned_to FROM leads WHERE id = $1', [req.params.id]);
+    if (leadResult.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
+    const lead = leadResult.rows[0];
+
+    const credentials = await resolveWhatsAppCredentials(lead.tenant_id, lead.assigned_to);
+    const result = await sendTextMessage(lead.phone, text, credentials);
+
+    const saved = await query(
+      `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, sent_by)
+       VALUES ($1, $2, 'outbound', $3, 'text', $4, $5, $6)
+       RETURNING id, direction, message as text, sent_at as created_at, status`,
+      [lead.tenant_id, lead.id, text, result.wa_message_id, result.success ? 'sent' : 'failed', req.user.id]
+    );
+
+    await query('UPDATE leads SET last_contacted_at = NOW(), ai_paused = true WHERE id = $1', [lead.id]);
+    await logActivity({ tenantId: lead.tenant_id, actorName: req.user.name, action: `WhatsApp message sent to ${lead.name}`, module: 'WhatsApp' });
+
+    res.status(201).json({ message: saved.rows[0], delivery: result });
+  } catch (error) { console.error('Send cross-tenant WhatsApp message error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
 module.exports = {
   getPlatformStats, getTenants, updateTenant, extendTrial,
   getPlans, createPlan, updatePlan,
@@ -364,4 +502,6 @@ module.exports = {
   getActivityLogs,
   getWorkspaceGrowthTrend, getLeadsTrendData, getRevenueTrendData,
   getAutomations,
+  getCrossTenantCampaigns,
+  getCrossTenantWhatsAppConversations, getCrossTenantWhatsAppMessages, sendCrossTenantWhatsAppMessage,
 };

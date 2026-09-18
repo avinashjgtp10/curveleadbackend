@@ -9,6 +9,8 @@ const {
   getActivityLogs,
   getWorkspaceGrowthTrend, getLeadsTrendData, getRevenueTrendData,
   getAutomations,
+  getCrossTenantCampaigns,
+  getCrossTenantWhatsAppConversations, getCrossTenantWhatsAppMessages, sendCrossTenantWhatsAppMessage,
 } = require('../controllers/superAdminController');
 const { authenticate, superAdminOnly } = require('../middleware/auth');
 
@@ -41,5 +43,11 @@ router.get('/trends/leads', getLeadsTrendData);
 router.get('/trends/revenue', getRevenueTrendData);
 
 router.get('/automations', getAutomations);
+
+router.get('/campaigns', getCrossTenantCampaigns);
+
+router.get('/whatsapp/conversations', getCrossTenantWhatsAppConversations);
+router.get('/whatsapp/conversations/:id/messages', getCrossTenantWhatsAppMessages);
+router.post('/whatsapp/conversations/:id/send', sendCrossTenantWhatsAppMessage);
 
 module.exports = router;
