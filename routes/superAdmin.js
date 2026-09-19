@@ -10,7 +10,10 @@ const {
   getWorkspaceGrowthTrend, getLeadsTrendData, getRevenueTrendData,
   getAutomations,
   getCrossTenantCampaigns,
+  getCrossTenantBookings,
   getCrossTenantWhatsAppConversations, getCrossTenantWhatsAppMessages, sendCrossTenantWhatsAppMessage,
+  getPlatformSettings, updatePlatformSettings,
+  getSupportTickets, updateSupportTicket,
 } = require('../controllers/superAdminController');
 const { authenticate, superAdminOnly } = require('../middleware/auth');
 
@@ -45,6 +48,14 @@ router.get('/trends/revenue', getRevenueTrendData);
 router.get('/automations', getAutomations);
 
 router.get('/campaigns', getCrossTenantCampaigns);
+
+router.get('/bookings', getCrossTenantBookings);
+
+router.get('/settings', getPlatformSettings);
+router.put('/settings', updatePlatformSettings);
+
+router.get('/support/tickets', getSupportTickets);
+router.put('/support/tickets/:id', updateSupportTicket);
 
 router.get('/whatsapp/conversations', getCrossTenantWhatsAppConversations);
 router.get('/whatsapp/conversations/:id/messages', getCrossTenantWhatsAppMessages);

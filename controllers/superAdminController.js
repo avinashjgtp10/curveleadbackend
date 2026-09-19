@@ -415,6 +415,58 @@ const getCrossTenantCampaigns = async (req, res) => {
 };
 
 // ============================================
+// Bookings (cross-tenant) — "bookings" in this app are lead_followups:
+// scheduled calls/WhatsApp/visits/demos against a lead, same data the
+// tenant-side "Schedule Follow-up" panel and Appointments page write to.
+// ============================================
+
+// GET /api/super-admin/bookings
+const getCrossTenantBookings = async (req, res) => {
+  try {
+    const { search, tenant_id, type, status, page = 1, limit = 20 } = req.query;
+    const conditions = [];
+    const params = [];
+    let i = 1;
+
+    if (search) { conditions.push(`(l.name ILIKE $${i} OR l.phone ILIKE $${i})`); params.push(`%${search}%`); i++; }
+    if (tenant_id) { conditions.push(`f.tenant_id = $${i}`); params.push(tenant_id); i++; }
+    if (type) { conditions.push(`f.followup_type = $${i}`); params.push(type); i++; }
+    if (status === 'Completed') conditions.push(`f.is_completed = true`);
+    else if (status === 'Canceled') conditions.push(`f.is_completed = false AND f.outcome = 'Cancelled'`);
+    else if (status === 'Pending') conditions.push(`f.is_completed = false AND (f.outcome IS NULL OR f.outcome != 'Cancelled')`);
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const offset = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(limit, 10);
+
+    const result = await query(
+      `SELECT f.id, f.followup_type as type, f.next_followup_at as scheduled_at, f.is_completed, f.outcome,
+              l.name as lead_name, l.phone as lead_phone,
+              u.name as assigned_to_name,
+              t.id as tenant_id, t.name as tenant_name
+       FROM lead_followups f
+       JOIN leads l ON f.lead_id = l.id
+       LEFT JOIN users u ON l.assigned_to = u.id
+       LEFT JOIN tenants t ON f.tenant_id = t.id
+       ${where}
+       ORDER BY f.next_followup_at DESC
+       LIMIT $${i} OFFSET $${i + 1}`,
+      [...params, limit, offset]
+    );
+    const countResult = await query(
+      `SELECT COUNT(*) FROM lead_followups f JOIN leads l ON f.lead_id = l.id ${where}`,
+      params
+    );
+
+    const bookings = result.rows.map(b => ({
+      ...b,
+      status: b.is_completed ? 'Completed' : b.outcome === 'Cancelled' ? 'Canceled' : 'Pending',
+    }));
+
+    res.json({ bookings, total: parseInt(countResult.rows[0].count, 10) });
+  } catch (error) { console.error('Get cross-tenant bookings error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// ============================================
 // WhatsApp (cross-tenant, read + reply)
 // ============================================
 
@@ -493,6 +545,76 @@ const sendCrossTenantWhatsAppMessage = async (req, res) => {
   } catch (error) { console.error('Send cross-tenant WhatsApp message error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// ============================================
+// Platform Settings (singleton row)
+// ============================================
+
+// GET /api/super-admin/settings
+const getPlatformSettings = async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM platform_settings WHERE id = 1');
+    res.json({ settings: result.rows[0] || null });
+  } catch (error) { console.error('Get platform settings error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// PUT /api/super-admin/settings
+const updatePlatformSettings = async (req, res) => {
+  try {
+    const { platform_name, support_email, default_trial_days, signup_enabled, maintenance_mode, maintenance_message } = req.body;
+    const result = await query(
+      `UPDATE platform_settings SET
+         platform_name = COALESCE($1, platform_name),
+         support_email = COALESCE($2, support_email),
+         default_trial_days = COALESCE($3, default_trial_days),
+         signup_enabled = COALESCE($4, signup_enabled),
+         maintenance_mode = COALESCE($5, maintenance_mode),
+         maintenance_message = COALESCE($6, maintenance_message),
+         updated_at = NOW()
+       WHERE id = 1 RETURNING *`,
+      [
+        platform_name ?? null, support_email ?? null, default_trial_days ?? null,
+        signup_enabled ?? null, maintenance_mode ?? null, maintenance_message ?? null,
+      ]
+    );
+    await logActivity({ actorName: req.user.name, action: 'Platform settings updated', module: 'Settings' });
+    res.json({ settings: result.rows[0] });
+  } catch (error) { console.error('Update platform settings error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// ============================================
+// Support Tickets
+// ============================================
+
+// GET /api/super-admin/support/tickets
+const getSupportTickets = async (req, res) => {
+  try {
+    const { status, search } = req.query;
+    const conditions = [];
+    const params = [];
+    let i = 1;
+
+    if (status) { conditions.push(`status = $${i}`); params.push(status); i++; }
+    if (search) { conditions.push(`(name ILIKE $${i} OR email ILIKE $${i} OR message ILIKE $${i})`); params.push(`%${search}%`); i++; }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const result = await query(`SELECT * FROM support_tickets ${where} ORDER BY created_at DESC`, params);
+    res.json({ tickets: result.rows });
+  } catch (error) { console.error('Get support tickets error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// PUT /api/super-admin/support/tickets/:id
+const updateSupportTicket = async (req, res) => {
+  try {
+    const { status } = req.body;
+    const result = await query(
+      `UPDATE support_tickets SET status = COALESCE($1, status), updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [status ?? null, req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Ticket not found.' });
+    res.json({ ticket: result.rows[0] });
+  } catch (error) { console.error('Update support ticket error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
 module.exports = {
   getPlatformStats, getTenants, updateTenant, extendTrial,
   getPlans, createPlan, updatePlan,
@@ -503,5 +625,8 @@ module.exports = {
   getWorkspaceGrowthTrend, getLeadsTrendData, getRevenueTrendData,
   getAutomations,
   getCrossTenantCampaigns,
+  getCrossTenantBookings,
   getCrossTenantWhatsAppConversations, getCrossTenantWhatsAppMessages, sendCrossTenantWhatsAppMessage,
+  getPlatformSettings, updatePlatformSettings,
+  getSupportTickets, updateSupportTicket,
 };
