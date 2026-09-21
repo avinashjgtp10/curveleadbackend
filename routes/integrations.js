@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/integrationController');
 const googleAdsCtrl = require('../controllers/googleAdsIntegrationController');
+const googleBusinessCtrl = require('../controllers/googleBusinessController');
 const { authenticate } = require('../middleware/auth');
 const { requirePermission } = require('../utils/permissions');
 const { tenantContext } = require('../middleware/tenant');
@@ -9,6 +10,10 @@ const { tenantContext } = require('../middleware/tenant');
 // Public routes — auth handled inside the controller, not via middleware
 router.post('/ingest', ctrl.ingestLead);
 router.post('/google-ads/leads/:integrationId', googleAdsCtrl.receiveGoogleAdsLead);
+// Google redirects the browser here directly after consent — no Authorization
+// header on that request, so this can't sit behind the authenticate middleware.
+// Tenant identity travels in the signed `state` param instead.
+router.get('/google-business/callback', googleBusinessCtrl.oauthCallback);
 
 // Protected routes
 router.use(authenticate, tenantContext, requirePermission('settings.manage'));
@@ -37,5 +42,11 @@ router.get('/facebook/subscription-status', ctrl.facebookSubscriptionStatus);
 router.get('/facebook/ad-accounts', ctrl.getAdAccounts);
 router.post('/facebook/sync-ad-insights', ctrl.syncAdInsightsNow);
 router.get('/meta/capi-stats', ctrl.getCapiStats);
+
+// Google Business Profile OAuth flow
+router.get('/google-business/auth', googleBusinessCtrl.getAuthUrl);
+router.post('/google-business/sync', googleBusinessCtrl.syncLocationsAndReviews);
+router.get('/google-business/status', googleBusinessCtrl.getStatus);
+router.delete('/google-business', googleBusinessCtrl.disconnect);
 
 module.exports = router;
