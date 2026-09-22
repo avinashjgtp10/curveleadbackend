@@ -20,6 +20,7 @@ router.put('/rules/:id', requirePermission('automations.manage'), ctrl.updateRul
 router.delete('/rules/:id', requirePermission('automations.manage'), ctrl.deleteRule);
 
 router.get('/enrollments', enrollCtrl.getEnrollments);
+router.post('/enroll-bulk', requirePermission('leads.bulk_edit'), enrollCtrl.enrollBulk);
 
 router.get('/assignment-rules', assignCtrl.getAssignmentRules);
 router.post('/assignment-rules', requirePermission('automations.manage'), assignCtrl.createAssignmentRule);

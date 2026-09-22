@@ -195,6 +195,31 @@ const getProfile = async (req, res) => {
   });
 };
 
+// GET /api/auth/preferences — per-user app preferences (e.g. hidden pipeline stages),
+// synced across web and mobile so both clients show the same view.
+const getPreferences = async (req, res) => {
+  try {
+    const result = await query('SELECT settings FROM users WHERE id = $1', [req.user.id]);
+    res.json({ preferences: result.rows[0]?.settings || {} });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load preferences.' });
+  }
+};
+
+// PUT /api/auth/preferences — shallow-merges the given keys into the user's stored settings.
+const updatePreferences = async (req, res) => {
+  try {
+    const patch = req.body && typeof req.body === 'object' ? req.body : {};
+    const result = await query(
+      `UPDATE users SET settings = COALESCE(settings, '{}'::jsonb) || $2::jsonb WHERE id = $1 RETURNING settings`,
+      [req.user.id, JSON.stringify(patch)]
+    );
+    res.json({ preferences: result.rows[0]?.settings || {} });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save preferences.' });
+  }
+};
+
 // POST /api/auth/forgot-password
 const forgotPassword = async (req, res) => {
   try {
@@ -359,4 +384,4 @@ const acceptInvite = async (req, res) => {
   }
 };
 
-module.exports = { signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite };
+module.exports = { signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite, getPreferences, updatePreferences };

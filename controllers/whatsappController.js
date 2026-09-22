@@ -18,6 +18,7 @@ const getInbox = async (req, res) => {
     const { search, unread_only } = req.query;
     let where = 'WHERE wm.tenant_id = $1';
     const params = [req.tenantId];
+    if (req.user.role === 'staff') { where += ' AND l.assigned_to = $2'; params.push(req.user.id); }
 
     // Group by lead, get latest message per lead
     const result = await query(
@@ -47,6 +48,10 @@ const getInbox = async (req, res) => {
 // GET /api/whatsapp/conversation/:leadId - Get message thread for a lead
 const getConversation = async (req, res) => {
   try {
+    if (req.user.role === 'staff') {
+      const owned = await query('SELECT 1 FROM leads WHERE id = $1 AND tenant_id = $2 AND assigned_to = $3', [req.params.leadId, req.tenantId, req.user.id]);
+      if (!owned.rows.length) return res.status(404).json({ error: 'Lead not found.' });
+    }
     const result = await query(
       `SELECT wm.*, u.name as sent_by_name
        FROM whatsapp_messages wm
@@ -82,6 +87,7 @@ const sendMessage = async (req, res) => {
     if (leadResult.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
 
     const lead = leadResult.rows[0];
+    if (req.user.role === 'staff' && lead.assigned_to !== req.user.id) return res.status(404).json({ error: 'Lead not found.' });
     const credentials = await resolveWhatsAppCredentials(req.tenantId, lead.assigned_to);
     const result = template_name
       ? await sendTemplate(lead.phone, template_name, 'en', [], credentials)

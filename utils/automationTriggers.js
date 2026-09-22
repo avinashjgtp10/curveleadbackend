@@ -24,7 +24,7 @@ const enrollLead = async ({ tenantId, leadId, sequenceId, ruleId = null }) => {
     'SELECT opted_out, automation_unresponsive FROM leads WHERE id = $1',
     [leadId]
   );
-  if (leadState.rows[0]?.opted_out || leadState.rows[0]?.automation_unresponsive) return;
+  if (leadState.rows[0]?.opted_out || leadState.rows[0]?.automation_unresponsive) return false;
 
   const stepsResult = await query(
     'SELECT delay_minutes FROM automation_sequence_steps WHERE sequence_id = $1 ORDER BY step_order ASC',
