@@ -10,20 +10,22 @@ const enrollLead = async ({ tenantId, leadId, sequenceId, ruleId = null }) => {
     'SELECT opted_out, automation_unresponsive FROM leads WHERE id = $1',
     [leadId]
   );
-  if (leadState.rows[0]?.opted_out || leadState.rows[0]?.automation_unresponsive) return;
+  if (leadState.rows[0]?.opted_out || leadState.rows[0]?.automation_unresponsive) return false;
 
   const firstStep = await query(
     'SELECT delay_minutes FROM automation_sequence_steps WHERE sequence_id = $1 ORDER BY step_order ASC LIMIT 1',
     [sequenceId]
   );
-  if (!firstStep.rows.length) return;
+  if (!firstStep.rows.length) return false;
 
-  await query(
+  const inserted = await query(
     `INSERT INTO automation_enrollments (tenant_id, lead_id, sequence_id, rule_id, current_step, status, next_send_at)
      VALUES ($1, $2, $3, $4, 0, 'active', NOW() + ($5 || ' minutes')::INTERVAL)
-     ON CONFLICT (tenant_id, lead_id, sequence_id) DO NOTHING`,
+     ON CONFLICT (tenant_id, lead_id, sequence_id) DO NOTHING
+     RETURNING id`,
     [tenantId, leadId, sequenceId, ruleId, firstStep.rows[0].delay_minutes]
   );
+  return inserted.rows.length > 0;
 };
 
 // Cancels every active enrollment for a lead, across all sequences. Shared by
