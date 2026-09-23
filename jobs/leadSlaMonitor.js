@@ -55,8 +55,10 @@ async function escalateToAdmins() {
     WHERE l.first_response_at IS NULL
       AND l.created_at <= NOW() - INTERVAL '${ESCALATION_AFTER_MINUTES} minutes'
       AND NOT EXISTS (
-        SELECT 1 FROM notifications n
-        WHERE n.tenant_id = l.tenant_id AND n.type = 'sla_escalated' AND n.reference_id = l.id
+        -- Dedup on our own lead_activities write, not on a notification having gone out —
+        -- a tenant with zero active admins gets zero notifications ever, which left this
+        -- guard permanently open and re-fired every tick.
+        SELECT 1 FROM lead_activities a WHERE a.tenant_id = l.tenant_id AND a.lead_id = l.id AND a.activity_type = 'sla_escalated'
       )
   `);
   let sent = 0;
@@ -86,8 +88,7 @@ async function flagMissedLeads() {
     WHERE l.first_response_at IS NULL
       AND l.created_at <= NOW() - INTERVAL '${MISSED_AFTER_MINUTES} minutes'
       AND NOT EXISTS (
-        SELECT 1 FROM notifications n
-        WHERE n.tenant_id = l.tenant_id AND n.type = 'sla_missed' AND n.reference_id = l.id
+        SELECT 1 FROM lead_activities a WHERE a.tenant_id = l.tenant_id AND a.lead_id = l.id AND a.activity_type = 'sla_missed'
       )
   `);
   let sent = 0;
