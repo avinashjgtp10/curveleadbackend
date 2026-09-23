@@ -38,6 +38,11 @@ async function notifyAssigneeAtRisk() {
       l.tenant_id, l.assigned_to, `SLA at risk — ${l.name}`,
       'Still uncontacted 5+ minutes after creation', 'sla_risk', 'lead', l.id
     );
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+       VALUES ($1, $2, 'sla_risk', 'Contact SLA at risk', 'Still uncontacted 5+ minutes after creation.')`,
+      [l.tenant_id, l.id]
+    ).catch(() => {});
   }
   if (result.rows.length > 0) console.log(`[LeadSlaMonitor] Sent ${result.rows.length} sla_risk notification(s)`);
 }
@@ -64,6 +69,11 @@ async function escalateToAdmins() {
       );
       sent++;
     }
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+       VALUES ($1, $2, 'sla_escalated', 'Contact SLA escalated', 'Still uncontacted 15+ minutes after creation — escalated to admins.')`,
+      [l.tenant_id, l.id]
+    ).catch(() => {});
   }
   if (sent > 0) console.log(`[LeadSlaMonitor] Sent ${sent} sla_escalated notification(s)`);
 }
@@ -90,6 +100,11 @@ async function flagMissedLeads() {
       );
       sent++;
     }
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+       VALUES ($1, $2, 'sla_missed', 'Contact SLA missed', '24+ hours with no response.')`,
+      [l.tenant_id, l.id]
+    ).catch(() => {});
   }
   if (sent > 0) console.log(`[LeadSlaMonitor] Sent ${sent} sla_missed notification(s)`);
 }
