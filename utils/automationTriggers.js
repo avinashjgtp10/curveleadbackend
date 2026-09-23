@@ -30,7 +30,7 @@ const enrollLead = async ({ tenantId, leadId, sequenceId, ruleId = null }) => {
     'SELECT delay_minutes FROM automation_sequence_steps WHERE sequence_id = $1 ORDER BY step_order ASC',
     [sequenceId]
   );
-  if (!stepsResult.rows.length) return;
+  if (!stepsResult.rows.length) return false;
 
   const inserted = await query(
     `INSERT INTO automation_enrollments (tenant_id, lead_id, sequence_id, rule_id, current_step, status, next_send_at)
@@ -39,7 +39,7 @@ const enrollLead = async ({ tenantId, leadId, sequenceId, ruleId = null }) => {
      RETURNING id`,
     [tenantId, leadId, sequenceId, ruleId, stepsResult.rows[0].delay_minutes]
   );
-  if (!inserted.rows.length) return; // already enrolled — no new activity
+  if (!inserted.rows.length) return false; // already enrolled — no new activity
 
   const sequenceResult = await query('SELECT name FROM automation_sequences WHERE id = $1', [sequenceId]);
   const sequenceName = sequenceResult.rows[0]?.name || 'Automation';
@@ -70,6 +70,8 @@ const enrollLead = async ({ tenantId, leadId, sequenceId, ruleId = null }) => {
      VALUES ($1, $2, 'sequence_started', $3, $4)`,
     [tenantId, leadId, sequenceName, `Step 1 of ${totalSteps}`]
   ).catch(() => {});
+
+  return true;
 };
 
 // Cancels every active enrollment for a lead, across all sequences. Shared by
