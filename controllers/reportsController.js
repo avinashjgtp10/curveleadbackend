@@ -114,6 +114,20 @@ const getReportByStaff = async (req, res) => {
                 WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = false) as pending_followups,
               (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
                 WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = true) as completed_followups,
+              -- Stalled — live snapshot, not period-filtered, same definition as the Leads page
+              -- "Stalled" filter: still open, untouched for CRITICAL_AFTER_HOURS, no upcoming follow-up.
+              (SELECT COUNT(*) FROM leads l4
+                LEFT JOIN lead_stages ls4 ON LOWER(ls4.name) = LOWER(l4.stage) AND ls4.tenant_id = l4.tenant_id
+                LEFT JOIN LATERAL (
+                  SELECT next_followup_at FROM lead_followups
+                  WHERE lead_id = l4.id AND is_completed = false
+                  ORDER BY next_followup_at ASC LIMIT 1
+                ) pf4 ON true
+                WHERE l4.tenant_id = u.tenant_id AND l4.assigned_to = u.id
+                  AND COALESCE(ls4.is_won, false) = false AND COALESCE(ls4.is_lost, false) = false
+                  AND (pf4.next_followup_at IS NULL OR pf4.next_followup_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours')
+                  AND l4.updated_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours'
+              ) as stalled_leads,
               -- AI messages don't record sent_by, so attribute them to the lead's assigned staff instead
               (SELECT COUNT(*) FROM whatsapp_messages wm JOIN leads l3 ON l3.id = wm.lead_id
                 WHERE l3.tenant_id = u.tenant_id AND l3.assigned_to = u.id AND wm.direction = 'outbound'
@@ -138,6 +152,7 @@ const getReportByStaff = async (req, res) => {
       avg_response_seconds: s.avg_response_seconds !== null ? parseInt(s.avg_response_seconds) : null,
       pending_followups: parseInt(s.pending_followups),
       completed_followups: parseInt(s.completed_followups),
+      stalled_leads: parseInt(s.stalled_leads),
       ai_sent: parseInt(s.ai_sent),
       manual_sent: parseInt(s.manual_sent),
       conversion_rate: s.total_leads > 0 ? ((s.won / s.total_leads) * 100).toFixed(1) : 0,
