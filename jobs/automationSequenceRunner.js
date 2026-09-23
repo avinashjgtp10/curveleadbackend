@@ -203,12 +203,21 @@ const runAutomationSequences = async () => {
 
         const nextStep = steps.rows[row.current_step + 1];
         if (nextStep) {
-          await query(
+          const nextSendAt = await query(
             `UPDATE automation_enrollments
              SET current_step = current_step + 1, next_send_at = NOW() + ($1 || ' minutes')::INTERVAL
-             WHERE id = $2`,
+             WHERE id = $2 RETURNING next_send_at`,
             [nextStep.delay_minutes, row.enrollment_id]
           );
+          const nextActionLabel = nextStep.channel === 'email' ? 'Email' : 'WhatsApp Message';
+          await query(
+            `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, metadata)
+             VALUES ($1,$2,'automation_next_scheduled','Follow-up Scheduled',$3,$4)`,
+            [
+              row.tenant_id, row.lead_id, `Next Action: ${nextActionLabel}`,
+              JSON.stringify({ next_action_at: nextSendAt.rows[0].next_send_at }),
+            ]
+          ).catch(() => {});
         } else {
           // Sequence finished — if the lead never replied throughout it, mark them
           // unresponsive so no further automation (any sequence) is attempted.
@@ -220,6 +229,12 @@ const runAutomationSequences = async () => {
             await query('UPDATE leads SET automation_unresponsive = true WHERE id = $1', [row.lead_id]);
           }
           await query(`UPDATE automation_enrollments SET status = 'completed', completed_at = NOW() WHERE id = $1`, [row.enrollment_id]);
+          const sequenceResult = await query('SELECT name FROM automation_sequences WHERE id = $1', [row.sequence_id]);
+          await query(
+            `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+             VALUES ($1,$2,'sequence_completed',$3,$4)`,
+            [row.tenant_id, row.lead_id, sequenceResult.rows[0]?.name || 'Automation', `Completed ${steps.rows.length} of ${steps.rows.length} steps`]
+          ).catch(() => {});
         }
       } catch (stepError) {
         console.error('[AutomationRunner] step error:', stepError.message);
