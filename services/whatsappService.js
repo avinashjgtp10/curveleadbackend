@@ -118,7 +118,7 @@ const verifyWhatsAppNumber = async (phoneNumberId, accessToken) => {
 const listMessageTemplates = async (wabaId, accessToken) => {
   try {
     const response = await axios.get(`${META_API_URL}/${wabaId}/message_templates`, {
-      params: { fields: 'name,language,category,status,components', limit: 100, access_token: accessToken },
+      params: { fields: 'name,language,category,status,components,rejected_reason', limit: 100, access_token: accessToken },
     });
     return { success: true, templates: response.data.data || [] };
   } catch (error) {
@@ -135,7 +135,7 @@ const listMessageTemplates = async (wabaId, accessToken) => {
  * @param {string} accessToken
  * @param {{ name: string, category: string, language: string, bodyText: string, examples: string[], header?: { type: 'IMAGE'|'VIDEO'|'DOCUMENT', handle: string } }} tmpl
  */
-const createMessageTemplate = async (wabaId, accessToken, { name, category, language, bodyText, examples = [], header = null }) => {
+const createMessageTemplate = async (wabaId, accessToken, { name, category, language, bodyText, examples = [], header = null, footerText = '', buttons = [] }) => {
   try {
     const components = [];
     if (header) components.push({ type: 'HEADER', format: header.type, example: { header_handle: [header.handle] } });
@@ -143,6 +143,15 @@ const createMessageTemplate = async (wabaId, accessToken, { name, category, lang
     const body = { type: 'BODY', text: bodyText };
     if (examples.length) body.example = { body_text: [examples] };
     components.push(body);
+    if (footerText) components.push({ type: 'FOOTER', text: footerText });
+    if (buttons.length) {
+      components.push({
+        type: 'BUTTONS',
+        buttons: buttons.map(b => b.type === 'URL'
+          ? { type: 'URL', text: b.text, url: b.url }
+          : { type: 'QUICK_REPLY', text: b.text }),
+      });
+    }
 
     const response = await axios.post(
       `${META_API_URL}/${wabaId}/message_templates`,

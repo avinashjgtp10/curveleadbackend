@@ -3,6 +3,7 @@ const { query } = require('../config/db');
 const { sendTemplate, listMessageTemplates, createMessageTemplate, uploadTemplateMedia } = require('../services/whatsappService');
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 const { uploadToS3 } = require('../config/s3');
+const { generateTemplateDraft } = require('../services/groqService');
 
 const LEAD_FIELD_ALLOWLIST = ['name', 'phone', 'email', 'location', 'stage', 'assigned_to_name'];
 const TEMPLATE_CATEGORIES = ['MARKETING', 'UTILITY', 'AUTHENTICATION'];
@@ -74,7 +75,7 @@ const uploadBroadcastMedia = async (req, res) => {
 // POST /api/whatsapp/broadcast/templates — submit a new BODY-only template for Meta's approval
 const createBroadcastTemplate = async (req, res) => {
   try {
-    const { name, category, language, body_text, examples, header_type, header_handle, header_media_url } = req.body;
+    const { name, category, language, body_text, examples, header_type, header_handle, header_media_url, footer_text, buttons } = req.body;
 
     if (!name || !/^[a-z0-9_]+$/.test(name)) {
       return res.status(400).json({ error: 'Template name must be lowercase letters, numbers, and underscores only.' });
@@ -90,6 +91,16 @@ const createBroadcastTemplate = async (req, res) => {
       return res.status(400).json({ error: `Provide an example value for each of the ${varCount} variable(s) in the body.` });
     }
 
+    const footer = (footer_text || '').trim();
+    if (footer.length > 60) return res.status(400).json({ error: 'Footer must be 60 characters or fewer.' });
+    const buttonList = Array.isArray(buttons) ? buttons : [];
+    if (buttonList.length > 3) return res.status(400).json({ error: 'At most 3 buttons are supported.' });
+    for (const b of buttonList) {
+      if (!b.text?.trim() || b.text.length > 25) return res.status(400).json({ error: 'Each button needs text of 25 characters or fewer.' });
+      if (b.type === 'URL' && !/^https:\/\//.test(b.url || '')) return res.status(400).json({ error: 'URL buttons need a full https:// link.' });
+      if (!['URL', 'QUICK_REPLY'].includes(b.type)) return res.status(400).json({ error: 'Button type must be URL or QUICK_REPLY.' });
+    }
+
     const { wabaId, accessToken } = await getWhatsappCreds(req.tenantId);
     if (!wabaId || !accessToken) {
       return res.status(400).json({ error: 'Connect WhatsApp and add your WhatsApp Business Account ID in Integrations first.' });
@@ -103,6 +114,7 @@ const createBroadcastTemplate = async (req, res) => {
     const createResult = await createMessageTemplate(wabaId, accessToken, {
       name, category, language: language || 'en_US', bodyText: body_text, examples: exampleList,
       header: hasHeader ? { type: header_type, handle: header_handle } : null,
+      footerText: footer, buttons: buttonList,
     });
     if (!createResult.success) return res.status(502).json({ error: createResult.error });
 
@@ -117,6 +129,26 @@ const createBroadcastTemplate = async (req, res) => {
 
     res.status(201).json({ id: createResult.id, status: createResult.status });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// POST /api/whatsapp/broadcast/templates/ai-draft — AI drafts a whole template from a short brief.
+// Nothing is submitted to Meta here; the user reviews and edits the draft first.
+const aiDraftTemplate = async (req, res) => {
+  try {
+    const { brief, category = 'MARKETING', language = 'en_US' } = req.body;
+    if (!brief?.trim() || brief.trim().length < 10) return res.status(400).json({ error: 'Describe what the template is for (at least a sentence).' });
+    if (!TEMPLATE_CATEGORIES.includes(category)) return res.status(400).json({ error: `Category must be one of: ${TEMPLATE_CATEGORIES.join(', ')}.` });
+
+    const tenant = (await query('SELECT name, settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0];
+    const draft = await generateTemplateDraft({
+      brief: brief.trim().slice(0, 600), category, language,
+      businessName: tenant?.name, businessDescription: tenant?.settings?.business_description,
+    });
+    res.json({ draft });
+  } catch (e) {
+    console.error('aiDraftTemplate:', e.message);
+    res.status(502).json({ error: e.message || 'Failed to draft template.' });
+  }
 };
 
 // POST /api/whatsapp/broadcast/send — send a Meta-approved template to many leads at once
@@ -139,8 +171,11 @@ const sendBroadcast = async (req, res) => {
     if (mapping.length && !sequential) return res.status(400).json({ error: 'variable_mapping positions must be sequential starting at 1.' });
 
     const needsAssignedName = mapping.some(m => m.source === 'field' && m.value === 'assigned_to_name');
+    // Opt-in enforcement is per tenant (Opt-ins tab); the opt-in column is only read when it's on.
+    const requireOptIn = !!(await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]))
+      .rows[0]?.settings?.whatsapp_require_opt_in;
     const leadsResult = await query(
-      `SELECT l.id, l.name, l.phone, l.email, l.location, l.stage, l.assigned_to${needsAssignedName ? ', u.name as assigned_to_name' : ''}
+      `SELECT l.id, l.name, l.phone, l.email, l.location, l.stage, l.assigned_to, l.opted_out${requireOptIn ? ', l.whatsapp_opt_in_at' : ''}${needsAssignedName ? ', u.name as assigned_to_name' : ''}
        FROM leads l
        ${needsAssignedName ? 'LEFT JOIN users u ON l.assigned_to = u.id' : ''}
        WHERE l.tenant_id = $1 AND l.id = ANY($2::uuid[])`,
@@ -160,6 +195,8 @@ const sendBroadcast = async (req, res) => {
     for (const lead of leadsResult.rows) {
       try {
         if (!lead.phone) throw new Error('Lead has no phone number.');
+        if (lead.opted_out) throw new Error('Lead has opted out of WhatsApp messages.');
+        if (requireOptIn && !lead.whatsapp_opt_in_at) throw new Error('No WhatsApp opt-in on record for this lead.');
 
         const parameters = mapping.map(m => ({
           type: 'text',
@@ -204,4 +241,4 @@ const sendBroadcast = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getBroadcastTemplates, createBroadcastTemplate, sendBroadcast, uploadBroadcastMedia };
+module.exports = { getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };

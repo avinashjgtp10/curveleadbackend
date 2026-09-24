@@ -11,6 +11,8 @@ const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { checkNewLeadTriggers, cancelActiveEnrollments } = require('../utils/automationTriggers');
 const { createNotification } = require('./notificationController');
 const { isOptOutMessage } = require('../utils/optOut');
+const { substituteVars } = require('../utils/templateVars');
+const { isWithinBusinessHours } = require('../utils/businessHours');
 
 // GET /api/whatsapp/inbox - Shared team inbox (all conversations)
 const getInbox = async (req, res) => {
@@ -205,11 +207,11 @@ const handleWebhook = async (req, res) => {
       // (shared tenant-level number, or a number we don't recognize).
       const leadResult = numberOwner
         ? await query(
-            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out FROM leads WHERE tenant_id = $1 AND (phone = $2 OR phone = $3) LIMIT 1',
+            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out, source, source_detail FROM leads WHERE tenant_id = $1 AND (phone = $2 OR phone = $3) LIMIT 1',
             [numberOwner.tenant_id, fromPhone, fromPhone.replace(/^91/, '')]
           )
         : await query(
-            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
+            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out, source, source_detail FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
             [fromPhone, fromPhone.replace(/^91/, '')]
           );
 
@@ -268,7 +270,31 @@ const handleWebhook = async (req, res) => {
       const tenant = tenantResult.rows[0];
       const aiEnabled = tenant?.settings?.ai_qualification_enabled;
 
-      if (aiEnabled && !lead.ai_paused && !lead.opted_out) {
+      // Away message: outside business hours, at most once per 12h per lead. If sent, the AI skips this turn.
+      let awaySent = false;
+      if (tenant?.settings?.whatsapp_away_enabled && tenant.settings.whatsapp_away_message && !lead.opted_out
+          && !isWithinBusinessHours(tenant.settings.whatsapp_business_hours)) {
+        try {
+          const recent = await query(
+            `SELECT 1 FROM whatsapp_messages WHERE lead_id = $1 AND direction = 'outbound' AND is_automated = true
+               AND message = $2 AND sent_at > NOW() - INTERVAL '12 hours' LIMIT 1`,
+            [lead.id, substituteVars(tenant.settings.whatsapp_away_message, lead)]
+          );
+          if (!recent.rows.length) {
+            const awayText = substituteVars(tenant.settings.whatsapp_away_message, lead);
+            const awayCreds = await resolveWhatsAppCredentials(lead.tenant_id, lead.assigned_to);
+            const awayResult = await sendTextMessage(fromPhone, awayText, awayCreds);
+            await query(
+              `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, is_automated)
+               VALUES ($1, $2, 'outbound', $3, 'text', $4, $5, true)`,
+              [lead.tenant_id, lead.id, awayText, awayResult.wa_message_id, awayResult.success ? 'sent' : 'failed']
+            );
+            awaySent = awayResult.success;
+          }
+        } catch (e) { console.error('Away message failed:', e.message); }
+      }
+
+      if (aiEnabled && !awaySent && !lead.ai_paused && !lead.opted_out) {
         try {
           // Get recent messages for context
           const historyResult = await query(
@@ -280,7 +306,11 @@ const handleWebhook = async (req, res) => {
             lead.name,
             historyResult.rows.reverse(),
             messageText,
-            { business_name: tenant.name, description: tenant.settings?.business_description }
+            {
+              business_name: tenant.name, description: tenant.settings?.business_description,
+              knowledge: tenant.settings?.ai_knowledge,
+              lead_source: [lead.source, lead.source_detail].filter(Boolean).join(' — ') || null,
+            }
           );
 
           // Send AI reply — from the assigned rep's own number if they have one
