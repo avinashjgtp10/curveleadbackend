@@ -26,7 +26,7 @@ const getInbox = async (req, res) => {
     const result = await query(
       `SELECT DISTINCT ON (wm.lead_id)
               wm.lead_id, wm.message, wm.direction, wm.sent_at, wm.status,
-              l.name as lead_name, l.phone as lead_phone, l.lead_score, l.stage,
+              l.name as lead_name, l.phone as lead_phone, l.lead_score, l.stage, COALESCE(l.tags, '{}') as tags,
               u.name as assigned_to_name,
               (SELECT COUNT(*) FROM whatsapp_messages WHERE lead_id = wm.lead_id AND direction = 'inbound' AND read_at IS NULL) as unread_count
        FROM whatsapp_messages wm
@@ -43,6 +43,34 @@ const getInbox = async (req, res) => {
     res.json({ conversations });
   } catch (error) {
     console.error('Get inbox error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// POST /api/whatsapp/labels { lead_id, add?: string[], remove?: string[] }
+// Chat labels are the lead's tags, so they persist and are shared with the whole team.
+const clean = (arr, max) => [...new Set((Array.isArray(arr) ? arr : []).map(x => String(x).trim().slice(0, 30)).filter(Boolean))].slice(0, max);
+const updateChatLabels = async (req, res) => {
+  try {
+    const { lead_id } = req.body;
+    const add = clean(req.body.add, 10);
+    const remove = clean(req.body.remove, 20);
+    if (!lead_id) return res.status(400).json({ error: 'lead_id required.' });
+    if (!add.length && !remove.length) return res.status(400).json({ error: 'Nothing to change.' });
+
+    const params = [lead_id, req.tenantId, add, remove];
+    let scope = '';
+    if (req.user.role === 'staff') { scope = ' AND assigned_to = $5'; params.push(req.user.id); }
+    const result = await query(
+      `UPDATE leads SET tags = ARRAY(
+         SELECT DISTINCT x FROM unnest(COALESCE(tags, '{}') || $3::text[]) x WHERE x <> ALL($4::text[]) ORDER BY x)
+       WHERE id = $1 AND tenant_id = $2${scope} RETURNING tags`,
+      params
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Lead not found.' });
+    res.json({ tags: result.rows[0].tags || [] });
+  } catch (error) {
+    console.error('Update labels error:', error);
     res.status(500).json({ error: 'Failed.' });
   }
 };
@@ -376,4 +404,4 @@ const handleWebhook = async (req, res) => {
   }
 };
 
-module.exports = { getInbox, getConversation, sendMessage, handleWebhook };
+module.exports = { getInbox, getConversation, sendMessage, handleWebhook, updateChatLabels };

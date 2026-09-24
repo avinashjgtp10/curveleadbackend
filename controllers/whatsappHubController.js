@@ -381,7 +381,38 @@ const getAiReplies = async (req, res) => {
   } catch (e) { console.error('getAiReplies:', e.message); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// ── Scheduled broadcasts ────────────────────────────────────────────────────
+const getScheduledBroadcasts = async (req, res) => {
+  try {
+    const r = await query(
+      `SELECT b.id, b.template_name, b.scheduled_at, b.status, b.sent_count, b.failed_count, b.error,
+              cardinality(b.lead_ids) AS lead_count, u.name AS created_by_name
+       FROM whatsapp_scheduled_broadcasts b LEFT JOIN users u ON u.id = b.created_by
+       WHERE b.tenant_id = $1 AND (b.status IN ('pending','sending') OR b.completed_at > NOW() - INTERVAL '14 days' OR b.status = 'cancelled')
+       ORDER BY CASE WHEN b.status IN ('pending','sending') THEN 0 ELSE 1 END, b.scheduled_at DESC LIMIT 50`,
+      [req.tenantId]
+    );
+    res.json({ scheduled: r.rows.map(x => ({ ...x, lead_count: parseInt(x.lead_count) })) });
+  } catch (e) {
+    if (isMissingSchema(e)) return res.json({ scheduled: [], needs_migration: true });
+    console.error('getScheduledBroadcasts:', e.message); res.status(500).json({ error: 'Failed to load scheduled broadcasts.' });
+  }
+};
+
+const cancelScheduledBroadcast = async (req, res) => {
+  try {
+    const r = await query(
+      `UPDATE whatsapp_scheduled_broadcasts SET status = 'cancelled', completed_at = NOW()
+       WHERE id = $1 AND tenant_id = $2 AND status = 'pending' RETURNING id`,
+      [req.params.id, req.tenantId]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Only broadcasts that have not started can be cancelled.' });
+    res.json({ cancelled: true });
+  } catch (e) { console.error('cancelScheduledBroadcast:', e.message); res.status(500).json({ error: 'Failed to cancel.' }); }
+};
+
 module.exports = {
+  getScheduledBroadcasts, cancelScheduledBroadcast,
   getAnalytics, getBroadcastHistory, getOptIns, updateOptIns, updateOptInSettings, getNumbers,
   getClickToWhatsApp, getAutoMessages, updateAutoMessages, getAiKnowledge, updateAiKnowledge, getAiReplies,
 };

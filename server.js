@@ -193,6 +193,11 @@ app.listen(PORT, () => {
   setTimeout(runAutomationSequences, 30 * 1000);
   setInterval(runAutomationSequences, 5 * 60 * 1000);
 
+  // Scheduled WhatsApp broadcasts — sends any that have come due, checks every minute
+  const { runScheduledBroadcasts } = require('./jobs/scheduledBroadcasts');
+  setTimeout(runScheduledBroadcasts, 35 * 1000);
+  setInterval(runScheduledBroadcasts, 60 * 1000);
+
   // Meta ad spend/performance sync — runs every 6 hours
   const { runMetaAdInsightsSync } = require('./jobs/metaAdInsightsSync');
   setTimeout(runMetaAdInsightsSync, 45 * 1000);

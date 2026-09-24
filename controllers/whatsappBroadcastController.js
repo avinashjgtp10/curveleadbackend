@@ -151,6 +151,78 @@ const aiDraftTemplate = async (req, res) => {
   }
 };
 
+// Sends a template to a set of leads, one by one. Shared by the immediate send and the scheduled-send job.
+const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, language_code, body_text, mapping }) => {
+  const needsAssignedName = mapping.some(m => m.source === 'field' && m.value === 'assigned_to_name');
+  // Opt-in enforcement is per tenant (Opt-ins tab); the opt-in column is only read when it's on.
+  const requireOptIn = !!(await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]))
+    .rows[0]?.settings?.whatsapp_require_opt_in;
+  const leadsResult = await query(
+    `SELECT l.id, l.name, l.phone, l.email, l.location, l.stage, l.assigned_to, l.opted_out${requireOptIn ? ', l.whatsapp_opt_in_at' : ''}${needsAssignedName ? ', u.name as assigned_to_name' : ''}
+     FROM leads l
+     ${needsAssignedName ? 'LEFT JOIN users u ON l.assigned_to = u.id' : ''}
+     WHERE l.tenant_id = $1 AND l.id = ANY($2::uuid[])`,
+    [tenantId, lead_ids]
+  );
+
+  const mediaRow = (await query(
+    'SELECT media_type, media_url FROM whatsapp_template_media WHERE tenant_id = $1 AND template_name = $2 AND language = $3',
+    [tenantId, template_name, language_code || 'en_US']
+  )).rows[0];
+  const headerMedia = mediaRow ? { type: mediaRow.media_type.toLowerCase(), link: mediaRow.media_url } : null;
+
+  const credCache = new Map();
+  const results = [];
+  let sent = 0, failed = 0;
+
+  for (const lead of leadsResult.rows) {
+    try {
+      if (!lead.phone) throw new Error('Lead has no phone number.');
+      if (lead.opted_out) throw new Error('Lead has opted out of WhatsApp messages.');
+      if (requireOptIn && !lead.whatsapp_opt_in_at) throw new Error('No WhatsApp opt-in on record for this lead.');
+
+      const parameters = mapping.map(m => ({
+        type: 'text',
+        text: String(m.source === 'fixed' ? (m.value || '') : (lead[m.value] || '')),
+      }));
+
+      const credKey = lead.assigned_to || 'tenant';
+      if (!credCache.has(credKey)) {
+        credCache.set(credKey, await resolveWhatsAppCredentials(tenantId, lead.assigned_to));
+      }
+      const credentials = credCache.get(credKey);
+
+      const sendResult = await sendTemplate(lead.phone, template_name, language_code || 'en_US', parameters, credentials, headerMedia);
+
+      let renderedMessage = body_text || `[Template: ${template_name}]`;
+      parameters.forEach((p, i) => {
+        renderedMessage = renderedMessage.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), p.text);
+      });
+
+      await query(
+        `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, template_name, wa_message_id, status, sent_by)
+         VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,$7,$8)`,
+        [tenantId, lead.id, renderedMessage, headerMedia?.link || null, template_name, sendResult.wa_message_id || null, sendResult.success ? 'sent' : 'failed', userId]
+      );
+
+      if (sendResult.success) {
+        await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [lead.id]);
+        sent++;
+        results.push({ lead_id: lead.id, success: true });
+      } else {
+        failed++;
+        results.push({ lead_id: lead.id, success: false, error: sendResult.error });
+      }
+    } catch (e) {
+      failed++;
+      results.push({ lead_id: lead.id, success: false, error: e.message });
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  return { sent, failed, results };
+};
+
 // POST /api/whatsapp/broadcast/send — send a Meta-approved template to many leads at once
 const sendBroadcast = async (req, res) => {
   try {
@@ -170,75 +242,29 @@ const sendBroadcast = async (req, res) => {
     const sequential = mapping.every((m, i) => m.position === i + 1);
     if (mapping.length && !sequential) return res.status(400).json({ error: 'variable_mapping positions must be sequential starting at 1.' });
 
-    const needsAssignedName = mapping.some(m => m.source === 'field' && m.value === 'assigned_to_name');
-    // Opt-in enforcement is per tenant (Opt-ins tab); the opt-in column is only read when it's on.
-    const requireOptIn = !!(await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]))
-      .rows[0]?.settings?.whatsapp_require_opt_in;
-    const leadsResult = await query(
-      `SELECT l.id, l.name, l.phone, l.email, l.location, l.stage, l.assigned_to, l.opted_out${requireOptIn ? ', l.whatsapp_opt_in_at' : ''}${needsAssignedName ? ', u.name as assigned_to_name' : ''}
-       FROM leads l
-       ${needsAssignedName ? 'LEFT JOIN users u ON l.assigned_to = u.id' : ''}
-       WHERE l.tenant_id = $1 AND l.id = ANY($2::uuid[])`,
-      [req.tenantId, lead_ids]
-    );
-
-    const mediaRow = (await query(
-      'SELECT media_type, media_url FROM whatsapp_template_media WHERE tenant_id = $1 AND template_name = $2 AND language = $3',
-      [req.tenantId, template_name, language_code || 'en_US']
-    )).rows[0];
-    const headerMedia = mediaRow ? { type: mediaRow.media_type.toLowerCase(), link: mediaRow.media_url } : null;
-
-    const credCache = new Map();
-    const results = [];
-    let sent = 0, failed = 0;
-
-    for (const lead of leadsResult.rows) {
+    const scheduledAt = req.body.scheduled_at ? new Date(req.body.scheduled_at) : null;
+    if (scheduledAt) {
+      const inMs = scheduledAt.getTime() - Date.now();
+      if (isNaN(inMs) || inMs < 60 * 1000) return res.status(400).json({ error: 'Pick a time at least a minute from now.' });
+      if (inMs > 30 * 24 * 3600 * 1000) return res.status(400).json({ error: 'Schedule at most 30 days ahead.' });
       try {
-        if (!lead.phone) throw new Error('Lead has no phone number.');
-        if (lead.opted_out) throw new Error('Lead has opted out of WhatsApp messages.');
-        if (requireOptIn && !lead.whatsapp_opt_in_at) throw new Error('No WhatsApp opt-in on record for this lead.');
-
-        const parameters = mapping.map(m => ({
-          type: 'text',
-          text: String(m.source === 'fixed' ? (m.value || '') : (lead[m.value] || '')),
-        }));
-
-        const credKey = lead.assigned_to || 'tenant';
-        if (!credCache.has(credKey)) {
-          credCache.set(credKey, await resolveWhatsAppCredentials(req.tenantId, lead.assigned_to));
-        }
-        const credentials = credCache.get(credKey);
-
-        const sendResult = await sendTemplate(lead.phone, template_name, language_code || 'en_US', parameters, credentials, headerMedia);
-
-        let renderedMessage = body_text || `[Template: ${template_name}]`;
-        parameters.forEach((p, i) => {
-          renderedMessage = renderedMessage.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), p.text);
-        });
-
-        await query(
-          `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, template_name, wa_message_id, status, sent_by)
-           VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,$7,$8)`,
-          [req.tenantId, lead.id, renderedMessage, headerMedia?.link || null, template_name, sendResult.wa_message_id || null, sendResult.success ? 'sent' : 'failed', req.user.id]
+        const saved = await query(
+          `INSERT INTO whatsapp_scheduled_broadcasts (tenant_id, created_by, template_name, language_code, body_text, variable_mapping, lead_ids, scheduled_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, scheduled_at`,
+          [req.tenantId, req.user.id, template_name, language_code || 'en_US', body_text || null, JSON.stringify(mapping), lead_ids, scheduledAt]
         );
-
-        if (sendResult.success) {
-          await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [lead.id]);
-          sent++;
-          results.push({ lead_id: lead.id, success: true });
-        } else {
-          failed++;
-          results.push({ lead_id: lead.id, success: false, error: sendResult.error });
-        }
+        return res.status(201).json({ scheduled: true, id: saved.rows[0].id, scheduled_at: saved.rows[0].scheduled_at, count: lead_ids.length });
       } catch (e) {
-        failed++;
-        results.push({ lead_id: lead.id, success: false, error: e.message });
+        if (e.code === '42P01') return res.status(409).json({ error: 'Scheduling needs the database migration (migration_scheduled_broadcasts.sql) first.' });
+        throw e;
       }
-      await new Promise(r => setTimeout(r, 300));
     }
 
+    const { sent, failed, results } = await executeBroadcast({
+      tenantId: req.tenantId, userId: req.user.id, lead_ids, template_name, language_code, body_text, mapping,
+    });
     res.json({ sent, failed, results });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };
+module.exports = { executeBroadcast, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };
