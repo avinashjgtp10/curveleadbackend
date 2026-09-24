@@ -113,9 +113,13 @@ const runFollowupReminder = async () => {
         AND l.updated_at < NOW() - INTERVAL '${NO_FOLLOWUP_AFTER_HOURS} hours'
         AND NOT EXISTS (SELECT 1 FROM lead_followups f WHERE f.lead_id = l.id AND f.is_completed = false)
         AND NOT EXISTS (
-          SELECT 1 FROM notifications n
-          WHERE n.tenant_id = l.tenant_id AND n.type = 'no_followup_scheduled'
-            AND n.reference_id = l.id AND n.created_at > NOW() - INTERVAL '24 hours'
+          -- Dedup on our OWN write (lead_activities), not on whether a notification
+          -- recipient existed — a lead with no assignee in a tenant with no active
+          -- admin gets zero notifications ever, which made this guard never trip
+          -- and re-flagged the lead on every 15-min tick forever.
+          SELECT 1 FROM lead_activities a
+          WHERE a.tenant_id = l.tenant_id AND a.lead_id = l.id AND a.activity_type = 'no_followup_scheduled'
+            AND a.created_at > NOW() - INTERVAL '24 hours'
         )
     `);
 
