@@ -198,6 +198,12 @@ app.listen(PORT, () => {
   setTimeout(runMetaAdInsightsSync, 45 * 1000);
   setInterval(runMetaAdInsightsSync, 6 * 60 * 60 * 1000);
 
+  // Meta lead sync — safety net for the real-time webhook, runs every 5 minutes so
+  // leads are captured and assigned without anyone opening the app
+  const { runMetaLeadSync } = require('./jobs/metaLeadSync');
+  setTimeout(runMetaLeadSync, 50 * 1000);
+  setInterval(runMetaLeadSync, 5 * 60 * 1000);
+
   // Daily report email — polls every 15 min, only actually sends once per
   // tenant per day (inside the target UTC hour, guarded by last-sent date)
   const { runDailyReportEmail } = require('./jobs/dailyReportEmail');

@@ -10,7 +10,7 @@ const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { notifyNewLeadToAdmins } = require('./notificationController');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { syncTenantAdInsights } = require('../utils/metaAdInsights');
-const { isMetaLeadDeleted } = require('../utils/deletedLeads');
+const { syncFacebookLeadsForTenant } = require('../utils/metaLeadSync');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -414,63 +414,10 @@ const facebookSubscriptionStatus = async (req, res) => {
 // ── POST /api/integrations/facebook/sync-leads ────────────────────────────
 const facebookSyncLeads = async (req, res) => {
   try {
-    const result = await query('SELECT name, settings FROM tenants WHERE id = $1', [req.tenantId]);
-    const tenantName = result.rows[0]?.name;
-    const settings = result.rows[0]?.settings || {};
-    const { meta_page_id, meta_page_access_token } = settings;
-    if (!meta_page_id || !meta_page_access_token) return res.status(400).json({ error: 'Connect a Facebook page first.' });
-
-    const formsData = await fbGet(
-      `/${meta_page_id}/leadgen_forms?access_token=${encodeURIComponent(meta_page_access_token)}&limit=20&fields=id,name`
-    );
-
-    let created = 0, skipped = 0;
-
-    for (const form of formsData.data || []) {
-      const leadsData = await fbGet(
-        `/${form.id}/leads?access_token=${encodeURIComponent(meta_page_access_token)}&limit=100`
-        + `&fields=id,created_time,field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,platform`
-      );
-
-      for (const lead of leadsData.data || []) {
-        const dup = await query('SELECT id FROM leads WHERE tenant_id = $1 AND meta_lead_id = $2', [req.tenantId, lead.id]);
-        if (dup.rows.length) { skipped++; continue; }
-        if (await isMetaLeadDeleted(req.tenantId, lead.id)) { skipped++; continue; }
-
-        const fields = {};
-        for (const f of lead.field_data || []) fields[f.name] = f.values?.[0] || '';
-
-        const name = fields['full_name'] || fields['name'] || 'Unknown';
-        const phone = fields['phone_number'] || fields['phone'] || null;
-        const email = fields['email'] || null;
-        const notes = formatFieldDataNotes(lead.field_data, {
-          platform: lead.platform, tenantName,
-          campaignName: lead.campaign_name, adsetName: lead.adset_name, adName: lead.ad_name,
-        });
-
-        const campaignId = await findOrCreateMetaCampaign({
-          tenantId: req.tenantId, campaignId: lead.campaign_id, campaignName: lead.campaign_name, adsetId: lead.adset_id,
-        });
-
-        const leadNumber = await nextLeadNumber(req.tenantId);
-        const insertResult = await query(
-          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, meta_ad_id, meta_adset_id, stage, created_at, notes)
-           VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,$8,$9,$10,'new',$11,$12) ON CONFLICT DO NOTHING RETURNING *`,
-          [req.tenantId, leadNumber, name, phone, email, lead.ad_name || form.name || 'Facebook Lead Ad',
-           campaignId || null, lead.id, lead.ad_id || null, lead.adset_id || null, new Date(lead.created_time), notes]
-        );
-        if (insertResult.rows[0]) {
-          applyAssignmentRules({ tenantId: req.tenantId, lead: insertResult.rows[0] })
-            .then(() => notifyNewLead({ tenantId: req.tenantId, lead: insertResult.rows[0] }))
-            .catch(() => {});
-          notifyNewLeadToAdmins(req.tenantId, insertResult.rows[0]).catch(() => {});
-        }
-        created++;
-      }
-    }
-
+    const { created, skipped } = await syncFacebookLeadsForTenant(req.tenantId);
     res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped });
   } catch (e) {
+    if (e.code === 'NO_PAGE') return res.status(400).json({ error: e.message });
     console.error('facebookSyncLeads:', e.message);
     res.status(500).json({ error: e.message || 'Failed to sync leads.' });
   }
