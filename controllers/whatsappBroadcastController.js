@@ -4,6 +4,7 @@ const { sendTemplate, listMessageTemplates, createMessageTemplate, uploadTemplat
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 const { uploadToS3 } = require('../config/s3');
 const { generateTemplateDraft } = require('../services/groqService');
+const imageService = require('../services/imageService');
 
 const LEAD_FIELD_ALLOWLIST = ['name', 'phone', 'email', 'location', 'stage', 'assigned_to_name'];
 const TEMPLATE_CATEGORIES = ['MARKETING', 'UTILITY', 'AUTHENTICATION'];
@@ -223,6 +224,35 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
   return { sent, failed, results };
 };
 
+// POST /api/whatsapp/broadcast/templates/image-prompt — a ready-to-use image prompt for the template's
+// header, plus whether direct generation is switched on (an image API key exists on the server).
+const getImagePrompt = async (req, res) => {
+  try {
+    const { idea, headline, subline, cta } = req.body;
+    const tenant = (await query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0];
+    res.json({
+      prompt: imageService.buildImagePrompt({ businessName: tenant?.name, idea, headline, subline, cta }),
+      generation_enabled: imageService.isConfigured(),
+    });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// POST /api/whatsapp/broadcast/templates/ai-image { prompt, count } — generate header image options.
+const generateHeaderImages = async (req, res) => {
+  try {
+    if (!imageService.isConfigured()) {
+      return res.status(501).json({ error: 'Direct image generation is not switched on yet.', not_configured: true });
+    }
+    const prompt = String(req.body.prompt || '').trim().slice(0, 1500);
+    if (prompt.length < 15) return res.status(400).json({ error: 'Describe the image (at least a sentence).' });
+    const images = await imageService.generateImages({ prompt, count: parseInt(req.body.count) || 2 });
+    res.json({ images });
+  } catch (e) {
+    console.error('generateHeaderImages:', e.message);
+    res.status(502).json({ error: e.message });
+  }
+};
+
 // POST /api/whatsapp/broadcast/send — send a Meta-approved template to many leads at once
 const sendBroadcast = async (req, res) => {
   try {
@@ -267,4 +297,4 @@ const sendBroadcast = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { executeBroadcast, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };
+module.exports = { getImagePrompt, generateHeaderImages, executeBroadcast, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };

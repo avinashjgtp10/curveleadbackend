@@ -397,10 +397,11 @@ Rules:
 - footer_text: optional, max 60 characters (for example "Reply STOP to opt out" for marketing).
 - buttons: optional, at most 3. QUICK_REPLY buttons have text (max 25 characters). A URL button has text (max 25 characters) and a full https url. Only include a URL button if the brief gives a link.
 - No misleading claims, no ALL CAPS shouting, no prohibited content.
-- image_idea: one sentence describing a fitting header image (or empty string).
+- image_idea: one sentence describing a fitting header image scene (or empty string).
+- image_headline: 2-4 words for the banner headline (or empty). image_subline: up to 6 words, e.g. the offer (or empty). image_cta: 2 words such as "Book Now" (or empty).
 
 Respond ONLY with valid JSON:
-{"name":"","category":"${category}","header_text":"","body_text":"","examples":[],"footer_text":"","buttons":[{"type":"QUICK_REPLY","text":""}],"image_idea":""}`;
+{"name":"","category":"${category}","header_text":"","body_text":"","examples":[],"footer_text":"","buttons":[{"type":"QUICK_REPLY","text":""}],"image_idea":"","image_headline":"","image_subline":"","image_cta":""}`;
 
   const result = await callGroq([{ role: 'user', content: prompt }], { json: true, temperature: 0.6, maxTokens: 900 });
   let draft;
@@ -427,6 +428,9 @@ Respond ONLY with valid JSON:
     footer_text: String(draft.footer_text || '').trim().slice(0, 60),
     buttons,
     image_idea: String(draft.image_idea || '').trim(),
+    image_headline: String(draft.image_headline || '').trim().slice(0, 40),
+    image_subline: String(draft.image_subline || '').trim().slice(0, 60),
+    image_cta: String(draft.image_cta || '').trim().slice(0, 25),
   };
 };
 
