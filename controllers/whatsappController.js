@@ -1,5 +1,7 @@
+const axios = require('axios');
 const { query } = require('../config/db');
-const { sendTextMessage, sendTemplate } = require('../services/whatsappService');
+const { uploadToS3 } = require('../config/s3');
+const { sendTextMessage, sendTemplate, sendMediaMessage } = require('../services/whatsappService');
 const { qualifyLead } = require('../services/groqService');
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { changeLeadStage } = require('../utils/leadStage');
@@ -13,6 +15,51 @@ const { createNotification } = require('./notificationController');
 const { isOptOutMessage } = require('../utils/optOut');
 const { substituteVars } = require('../utils/templateVars');
 const { isWithinBusinessHours } = require('../utils/businessHours');
+
+const INBOUND_MEDIA_TYPES = { image: 'image', document: 'document', audio: 'audio', video: 'video', sticker: 'image' };
+
+// Meta's media URLs need the WABA access token as a Bearer header and expire
+// quickly, so inbound media is fetched once here and re-hosted on our own S3 —
+// same approach as outbound attachments — rather than storing Meta's URL directly.
+const downloadWhatsAppMedia = async (mediaId, accessToken) => {
+  const meta = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const file = await axios.get(meta.data.url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    responseType: 'arraybuffer',
+  });
+  return { buffer: Buffer.from(file.data), mimeType: meta.data.mime_type };
+};
+
+// Resolves an inbound webhook message into what we actually store/show: a
+// readable text (button/list taps get their real label, not "[button]"), and
+// for media messages, our own re-hosted URL plus the WhatsApp message_type.
+const resolveInboundContent = async ({ msg, tenantId, assignedTo }) => {
+  if (msg.text?.body) return { text: msg.text.body, mediaUrl: null, messageType: 'text' };
+  if (msg.button?.text) return { text: msg.button.text, mediaUrl: null, messageType: 'text' };
+  if (msg.interactive?.button_reply?.title) return { text: msg.interactive.button_reply.title, mediaUrl: null, messageType: 'text' };
+  if (msg.interactive?.list_reply?.title) return { text: msg.interactive.list_reply.title, mediaUrl: null, messageType: 'text' };
+
+  const waType = INBOUND_MEDIA_TYPES[msg.type];
+  if (waType && msg[msg.type]?.id) {
+    const media = msg[msg.type];
+    try {
+      const credentials = await resolveWhatsAppCredentials(tenantId, assignedTo);
+      if (!credentials?.access_token) throw new Error('No WhatsApp access token configured for this tenant.');
+      const { buffer, mimeType } = await downloadWhatsAppMedia(media.id, credentials.access_token);
+      const ext = (mimeType || '').split('/')[1]?.split(';')[0] || 'bin';
+      const key = `whatsapp-inbound/${tenantId}/${Date.now()}-${media.id}.${ext}`;
+      const mediaUrl = await uploadToS3(buffer, key, mimeType || 'application/octet-stream');
+      return { text: media.caption || media.filename || `[${waType}]`, mediaUrl, messageType: waType };
+    } catch (e) {
+      console.error('Failed to fetch inbound WhatsApp media:', e.message);
+      return { text: media.caption || `[${waType} — could not be downloaded]`, mediaUrl: null, messageType: waType };
+    }
+  }
+
+  return { text: `[${msg.type}]`, mediaUrl: null, messageType: 'text' };
+};
 
 // GET /api/whatsapp/inbox - Shared team inbox (all conversations)
 const getInbox = async (req, res) => {
@@ -102,6 +149,52 @@ const getConversation = async (req, res) => {
   } catch (error) {
     console.error('Get conversation error:', error);
     res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+const ATTACHMENT_TYPE_TO_MESSAGE_TYPE = { image: 'image', pdf: 'document', doc: 'document', audio: 'audio', video: 'video', other: 'document' };
+
+// POST /api/whatsapp/send-attachment - Send an already-uploaded lead attachment as a
+// real WhatsApp media message (image/document/audio/video), instead of a wa.me link.
+const sendAttachment = async (req, res) => {
+  try {
+    const { lead_id, attachment_id } = req.body;
+    if (!lead_id || !attachment_id) return res.status(400).json({ error: 'lead_id and attachment_id required.' });
+
+    const leadResult = await query('SELECT phone, name, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2', [lead_id, req.tenantId]);
+    if (leadResult.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
+    const lead = leadResult.rows[0];
+    if (req.user.role === 'staff' && lead.assigned_to !== req.user.id) return res.status(404).json({ error: 'Lead not found.' });
+    if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number.' });
+
+    const attResult = await query('SELECT file_name, file_url, file_type FROM lead_attachments WHERE id = $1 AND lead_id = $2 AND tenant_id = $3', [attachment_id, lead_id, req.tenantId]);
+    if (attResult.rows.length === 0) return res.status(404).json({ error: 'Attachment not found.' });
+    const att = attResult.rows[0];
+
+    const credentials = await resolveWhatsAppCredentials(req.tenantId, lead.assigned_to);
+    const result = await sendMediaMessage(lead.phone, att.file_type, att.file_url, att.file_name, credentials);
+
+    const saved = await query(
+      `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, wa_message_id, status, sent_by)
+       VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        req.tenantId, lead_id, att.file_name,
+        ATTACHMENT_TYPE_TO_MESSAGE_TYPE[att.file_type] || 'document', att.file_url,
+        result.wa_message_id, result.success ? 'sent' : 'failed', req.user.id,
+      ]
+    );
+
+    if (result.success) {
+      await query('UPDATE leads SET last_contacted_at = NOW(), ai_paused = true WHERE id = $1', [lead_id]);
+      recordFirstResponse(req.tenantId, lead_id, { by: req.user.id, type: 'whatsapp' }).catch(() => {});
+    }
+
+    if (!result.success) return res.status(502).json({ error: result.error || 'Failed to send file on WhatsApp.', message: saved.rows[0] });
+    res.status(201).json({ message: saved.rows[0], delivery: result });
+  } catch (error) {
+    console.error('Send attachment error:', error);
+    res.status(500).json({ error: 'Failed to send file.' });
   }
 };
 
@@ -227,7 +320,6 @@ const handleWebhook = async (req, res) => {
 
     for (const msg of messages) {
       const fromPhone = msg.from; // e.g. "919876543210"
-      const messageText = msg.text?.body || `[${msg.type}]`;
       const waMessageId = msg.id;
 
       // If the message arrived on a rep's own number, scope the lookup to their
@@ -270,11 +362,15 @@ const handleWebhook = async (req, res) => {
         lead.assigned_to = numberOwner.id;
       }
 
+      // Resolve what to actually store: button/list taps get their real label
+      // instead of "[button]", and media gets downloaded and re-hosted on our S3.
+      const { text: messageText, mediaUrl, messageType } = await resolveInboundContent({ msg, tenantId: lead.tenant_id, assignedTo: lead.assigned_to });
+
       // Save inbound message
       await query(
-        `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, wa_message_id, status, sent_at)
-         VALUES ($1, $2, 'inbound', $3, $4, 'delivered', NOW())`,
-        [lead.tenant_id, lead.id, messageText, waMessageId]
+        `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, wa_message_id, status, sent_at)
+         VALUES ($1, $2, 'inbound', $3, $4, $5, $6, 'delivered', NOW())`,
+        [lead.tenant_id, lead.id, messageText, messageType, mediaUrl, waMessageId]
       );
 
       // A reply from the lead means any drip sequence has done its job — stop it.
@@ -350,6 +446,58 @@ const handleWebhook = async (req, res) => {
             [lead.tenant_id, lead.id, aiResponse.reply, sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed']
           );
 
+          // The AI decided this lead should see a demo or pricing — send the file the
+          // tenant configured for that action (WhatsApp Hub > AI Auto-reply), right
+          // after the text reply. No-ops silently if nothing's configured for it.
+          const shareFile = tenant.settings?.ai_share_files?.[aiResponse.suggested_action];
+          if (shareFile?.url) {
+            const mediaResult = await sendMediaMessage(fromPhone, shareFile.file_type, shareFile.url, shareFile.name, credentials);
+            await query(
+              `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, wa_message_id, status, is_automated, is_ai_generated)
+               VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, true, true)`,
+              [
+                lead.tenant_id, lead.id, shareFile.name, ATTACHMENT_TYPE_TO_MESSAGE_TYPE[shareFile.file_type] || 'document',
+                shareFile.url, mediaResult.wa_message_id, mediaResult.success ? 'sent' : 'failed',
+              ]
+            );
+          }
+
+          // The lead just gave a specific date/time for a call/demo/visit — book it
+          // automatically instead of leaving it sitting in the chat transcript, and
+          // let the team know it's confirmed. Sanity-checked against a plausible
+          // window so a hallucinated date/time can't create garbage appointments.
+          const bookingAt = aiResponse.booking?.ready && aiResponse.booking?.date_time_iso ? new Date(aiResponse.booking.date_time_iso) : null;
+          const bookingIsPlausible = bookingAt && !isNaN(bookingAt.getTime())
+            && bookingAt.getTime() > Date.now() - 60 * 60 * 1000
+            && bookingAt.getTime() < Date.now() + 365 * 24 * 60 * 60 * 1000;
+          if (bookingIsPlausible) {
+            await query(
+              `UPDATE lead_followups SET is_completed = true, completed_at = NOW() WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
+              [lead.id, lead.tenant_id]
+            );
+            await query(
+              `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at)
+               VALUES ($1, $2, $3, 'demo', $4)`,
+              [lead.tenant_id, lead.id, aiResponse.booking.summary || 'Booked automatically by AI Auto-reply.', aiResponse.booking.date_time_iso]
+            );
+            const demoTime = bookingAt.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+            await query(
+              `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+               VALUES ($1, $2, 'demo_scheduled', 'Demo Scheduled', $3)`,
+              [lead.tenant_id, lead.id, `Booked by AI for ${demoTime}.${aiResponse.booking.summary ? ' ' + aiResponse.booking.summary : ''}`]
+            ).catch(() => {});
+            const notifyTitle = `Demo confirmed — ${lead.name}`;
+            const notifyBody = `Booked for ${demoTime} via AI Auto-reply.`;
+            if (lead.assigned_to) {
+              await createNotification(lead.tenant_id, lead.assigned_to, notifyTitle, notifyBody, 'demo_due', 'lead', lead.id).catch(() => {});
+            } else {
+              const admins = await query(`SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND is_active = true`, [lead.tenant_id]);
+              for (const admin of admins.rows) {
+                await createNotification(lead.tenant_id, admin.id, notifyTitle, notifyBody, 'demo_due', 'lead', lead.id).catch(() => {});
+              }
+            }
+          }
+
           // If the AI isn't confident it can handle this (unclear intent, complaint,
           // urgent request), hand off to a human instead of continuing automation.
           if (aiResponse.should_human_takeover) {
@@ -404,4 +552,4 @@ const handleWebhook = async (req, res) => {
   }
 };
 
-module.exports = { getInbox, getConversation, sendMessage, handleWebhook, updateChatLabels };
+module.exports = { getInbox, getConversation, sendMessage, sendAttachment, handleWebhook, updateChatLabels };

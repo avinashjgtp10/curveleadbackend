@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const { createNotification } = require('../controllers/notificationController');
+const { sendReviewRequest } = require('./googleReviewRequest');
 
 const TRIGGER_LABELS = {
   new_lead: 'New Lead Created',
@@ -190,12 +191,16 @@ const checkLeadStatusTriggers = async ({ tenantId, leadId, newStatus }) => {
 // Called from every stage-change path (human-driven updateLead, AI-driven changeLeadStage).
 // A lead moving into a lost stage has any active enrollments cancelled rather than
 // enrolled further — no point nurturing a dead lead.
-const checkStageChangeTriggers = async ({ tenantId, leadId, newStage, isLost = false }) => {
+const checkStageChangeTriggers = async ({ tenantId, leadId, newStage, isLost = false, isWon = false }) => {
   if (!leadId || !newStage) return;
 
   if (isLost) {
     await cancelActiveEnrollments({ tenantId, leadId, reason: 'stage_lost' });
     return;
+  }
+
+  if (isWon) {
+    sendReviewRequest({ tenantId, leadId }).catch(() => {});
   }
 
   const rules = await query(

@@ -52,7 +52,7 @@ const changeLeadStage = async ({ tenantId, leadId, newStageName, lostReason = nu
   }
 
   checkStageChangeTriggers({
-    tenantId, leadId, newStage: newStageName, isLost: !!info.is_lost,
+    tenantId, leadId, newStage: newStageName, isLost: !!info.is_lost, isWon: !!info.is_won,
   }).catch(() => {});
 };
 

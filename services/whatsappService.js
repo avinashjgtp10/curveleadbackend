@@ -189,7 +189,46 @@ const uploadTemplateMedia = async (appId, accessToken, buffer, mimeType) => {
   }
 };
 
+const MEDIA_TYPE_MAP = { image: 'image', pdf: 'document', doc: 'document', audio: 'audio', video: 'video', other: 'document' };
+
+/**
+ * Send a WhatsApp media message (image/document/audio/video) outside of a
+ * template — used for sending an attachment inline in an open conversation.
+ * Only works within the 24h session window; outside it Meta requires a
+ * pre-approved template instead, same restriction as free-text messages.
+ * @param {string} to
+ * @param {string} fileType - the app's own file_type label ('image'|'pdf'|'doc'|'audio'|'video'|'other')
+ * @param {string} mediaUrl - a publicly reachable URL (S3) Meta can fetch the file from
+ * @param {string} [caption]
+ * @param {object} [credentials]
+ */
+const sendMediaMessage = async (to, fileType, mediaUrl, caption = '', credentials = null) => {
+  const { phoneNumberId, accessToken } = resolveCredentials(credentials);
+  const waType = MEDIA_TYPE_MAP[fileType] || 'document';
+
+  if (!phoneNumberId || !accessToken) {
+    console.log(`📱 WhatsApp (dev) → ${to}: [${waType}] ${mediaUrl}`);
+    return { success: true, dev: true, wa_message_id: `dev_${Date.now()}` };
+  }
+
+  const mediaPayload = { link: mediaUrl };
+  if (caption && waType !== 'audio') mediaPayload.caption = caption;
+  if (waType === 'document') mediaPayload.filename = caption || undefined;
+
+  try {
+    const response = await axios.post(
+      `${META_API_URL}/${phoneNumberId}/messages`,
+      { messaging_product: 'whatsapp', to: normalizePhone(to), type: waType, [waType]: mediaPayload },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
+    return { success: true, wa_message_id: response.data.messages?.[0]?.id };
+  } catch (error) {
+    console.error('WhatsApp media send error:', error.response?.data || error.message);
+    return { success: false, error: error.response?.data?.error?.message || error.message };
+  }
+};
+
 module.exports = {
-  sendTextMessage, sendTemplate, verifyWhatsAppNumber, listMessageTemplates,
+  sendTextMessage, sendTemplate, sendMediaMessage, verifyWhatsAppNumber, listMessageTemplates,
   createMessageTemplate, uploadTemplateMedia,
 };

@@ -64,11 +64,16 @@ const qualifyLead = async (leadName, messageHistory, latestMessage, businessCont
     businessContext.lead_source ? `\nHow this lead found us: ${businessContext.lead_source}\n` : '',
   ].join('');
 
+  const nowIst = new Date().toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+
   const prompt = `You are a friendly sales assistant for ${businessContext.business_name || 'our business'}.
 
 Business context: ${businessContext.description || 'We help businesses with their needs.'}
 ${knowledgeBlock}
 You are chatting with a potential customer named ${leadName} via WhatsApp.
+Right now it is: ${nowIst} (India time) — resolve anything the lead says like "tomorrow" or "Monday" against this.
 
 Previous conversation:
 ${conversationContext || '(no previous messages)'}
@@ -78,16 +83,19 @@ Latest message from ${leadName}: "${latestMessage}"
 Your task:
 1. Reply naturally and warmly (max 2-3 sentences)
 2. Try to qualify the lead by understanding: their need, timeline, budget
-3. If they seem interested, suggest a call or demo
+3. If they seem interested, suggest a call or demo, and ask for a specific date/time if not yet given
 4. If they say "not interested", politely close the conversation
 5. Keep tone professional but friendly, use light emojis sparingly
+6. If the lead has now given a specific date AND time for a call/demo/visit (even a partial answer like just a time, once a date is implied by earlier context), do NOT ask further onboarding questions (name/city/etc.) before booking — treat the date/time as enough to confirm. Set booking.ready = true, fill date_time_iso, and write your reply to clearly CONFIRM the booking (e.g. "You're all set for tomorrow, 26 Sept at 10:30 AM! Our team will be ready."), not ask another question.
+7. If no specific date/time has been given yet, booking.ready must be false and date_time_iso null.
 
 Respond ONLY with valid JSON:
 {
   "reply": "your message to send",
   "intent": "interested|not_interested|needs_info|ready_to_buy|unclear",
   "should_human_takeover": true|false,
-  "suggested_action": "schedule_call|send_pricing|send_demo|close_conversation|continue"
+  "suggested_action": "schedule_call|send_pricing|send_demo|close_conversation|continue",
+  "booking": {"ready": true|false, "date_time_iso": "YYYY-MM-DDTHH:mm:00 in India time, or null", "summary": "one line of what was booked and any details the lead gave, or null"}
 }`;
 
   const result = await callGroq(
@@ -96,13 +104,16 @@ Respond ONLY with valid JSON:
   );
 
   try {
-    return JSON.parse(result.content);
+    const parsed = JSON.parse(result.content);
+    if (!parsed.booking || typeof parsed.booking !== 'object') parsed.booking = { ready: false, date_time_iso: null, summary: null };
+    return parsed;
   } catch (e) {
     return {
       reply: `Hi ${leadName}! Thanks for your message. A team member will get back to you shortly.`,
       intent: 'unclear',
       should_human_takeover: true,
       suggested_action: 'continue',
+      booking: { ready: false, date_time_iso: null, summary: null },
     };
   }
 };
@@ -434,4 +445,77 @@ Respond ONLY with valid JSON:
   };
 };
 
-module.exports = { callGroq, generateTemplateDraft, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };
+// Drafts the AI Auto-Reply knowledge base (the same fields WhatsApp Hub's
+// AI Auto-Reply tab saves) from a business's website content plus a few setup
+// answers — so a tenant can get a working AI agent without typing everything
+// in by hand. The draft is returned for review, never saved directly.
+const generateAiAgentKnowledge = async ({ businessName, businessType, groundRules, businessContext, agentName, greeting, websiteText }) => {
+  const prompt = `You set up a WhatsApp AI sales assistant for a business by drafting its training data from the business's own website.
+
+Business name: ${businessName || 'the business'}
+Business type: ${businessType || 'not specified'}
+Extra context from the owner: ${businessContext || 'none given'}
+Rules the owner wants the AI to follow: ${groundRules || 'none given'}
+Agent's name (sign-off): ${agentName || 'not specified'}
+Preferred opening greeting: ${greeting || 'not specified'}
+
+Website content (may be messy/incomplete — use only what's real, never invent prices or facts not present here or in the context above):
+"""
+${websiteText.slice(0, 6000)}
+"""
+
+Draft the following fields for the AI's knowledge base. Every fact (prices, services, hours) must come from the website content or the owner's context above — if something isn't there, leave it out rather than guessing.
+- about: 2-4 sentences on what the business does, where, for whom.
+- services_prices: one per line, "Service — price" where a price is actually stated; otherwise just list the service.
+- faqs: 4-8 Q&A pairs a customer would realistically ask, answerable from the given content.
+- tone: how the AI should sound (warm/professional/casual), and mention it should sign off as "${agentName || 'the assistant'}" if a name was given, and open new chats with something close to the given greeting if one was given.
+- goal: the single main outcome the AI should push toward (e.g. book a visit, get contact details, close a sale).
+- never_say: things the AI must never claim or promise — always include "never quote a price not listed above" and anything from the owner's rules.
+- handoff_rules: situations where the AI should stop and hand off to a human (e.g. complaints, price negotiation, ready to pay).
+
+Respond ONLY with valid JSON:
+{"about":"","services_prices":"","faqs":"","tone":"","goal":"","never_say":"","handoff_rules":""}`;
+
+  const result = await callGroq([{ role: 'user', content: prompt }], { json: true, temperature: 0.4, maxTokens: 1400, reasoningEffort: 'medium' });
+  let draft;
+  try { draft = JSON.parse(result.content); } catch { throw new Error('AI returned an unusable draft. Please try again.'); }
+
+  const fields = ['about', 'services_prices', 'faqs', 'tone', 'goal', 'never_say', 'handoff_rules'];
+  const cleaned = {};
+  for (const f of fields) cleaned[f] = String(draft[f] || '').trim().slice(0, 4000);
+  if (!cleaned.about) throw new Error('AI could not draft anything usable from that website. Try adding more detail in the business context field.');
+  return cleaned;
+};
+
+// Drafts a short WhatsApp message asking a just-won customer for a Google review,
+// in the business's own tone if AI Auto-reply has been trained, generic otherwise.
+// Must keep the literal {{name}} and {{review_link}} placeholders — the caller
+// substitutes those before sending.
+const generateReviewRequestMessage = async ({ businessName, knowledge }) => {
+  const tone = knowledge?.tone?.trim();
+  const about = knowledge?.about?.trim();
+  const prompt = `Write a short, warm WhatsApp message asking a customer who just did business with "${businessName || 'us'}" to leave a Google review.
+
+${about ? `About the business: ${about}` : ''}
+${tone ? `Tone to use: ${tone}` : 'Tone: warm, genuine, brief.'}
+
+Rules:
+- Max 2 short sentences before the link.
+- Must include the literal placeholders {{name}} (the customer's first name) and {{review_link}} (the review link) exactly as written — do not replace them with real values.
+- Light emoji use is fine, don't overdo it.
+- Do not sound like a corporate survey request.
+
+Respond ONLY with valid JSON: {"message": "..."}`;
+
+  const result = await callGroq([{ role: 'user', content: prompt }], { json: true, temperature: 0.6, maxTokens: 300 });
+  let draft;
+  try { draft = JSON.parse(result.content); } catch { throw new Error('AI returned an unusable draft. Please try again.'); }
+
+  let message = String(draft.message || '').trim();
+  if (!message) throw new Error('AI returned an empty draft. Please try again.');
+  if (!/\{\{name\}\}/i.test(message)) message = `Hi {{name}}! ${message}`;
+  if (!/\{\{review_link\}\}/i.test(message)) message += ' {{review_link}}';
+  return message.slice(0, 1000);
+};
+
+module.exports = { callGroq, generateTemplateDraft, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook, generateAiAgentKnowledge, generateReviewRequestMessage };

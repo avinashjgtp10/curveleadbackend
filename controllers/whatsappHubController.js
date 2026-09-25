@@ -1,5 +1,9 @@
+const path = require('path');
 const axios = require('axios');
 const { query } = require('../config/db');
+const { uploadToS3 } = require('../config/s3');
+const { fetchWebsiteText } = require('../utils/websiteFetcher');
+const { generateAiAgentKnowledge } = require('../services/groqService');
 
 const META_API_URL = 'https://graph.facebook.com/v25.0';
 
@@ -346,8 +350,53 @@ const KNOWLEDGE_FIELDS = ['about', 'services_prices', 'faqs', 'tone', 'goal', 'n
 const getAiKnowledge = async (req, res) => {
   try {
     const s = await getSettings(req.tenantId);
-    res.json({ enabled: !!s.ai_qualification_enabled, knowledge: s.ai_knowledge || {} });
+    res.json({ enabled: !!s.ai_qualification_enabled, knowledge: s.ai_knowledge || {}, share_files: s.ai_share_files || {} });
   } catch (e) { console.error('getAiKnowledge:', e.message); res.status(500).json({ error: 'Failed.' }); }
+};
+
+const AI_SHARE_ACTIONS = ['send_demo', 'send_pricing'];
+const shareFileType = (mime) => {
+  if (mime?.startsWith('image/')) return 'image';
+  if (mime === 'application/pdf') return 'pdf';
+  if (mime?.startsWith('video/')) return 'video';
+  if (mime?.startsWith('audio/')) return 'audio';
+  return 'other';
+};
+
+// POST /hub/ai-agent/share-file { action: 'send_demo'|'send_pricing' } + file — the file
+// the AI attaches when it decides mid-conversation a lead should see a demo or pricing.
+// One file per action, per tenant — replacing an existing one for that action.
+const uploadAiShareFile = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+    const action = req.body.action;
+    if (!AI_SHARE_ACTIONS.includes(action)) return res.status(400).json({ error: `action must be one of: ${AI_SHARE_ACTIONS.join(', ')}.` });
+
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const key = `ai-share-files/${req.tenantId}/${action}-${Date.now()}${ext}`;
+    const url = await uploadToS3(req.file.buffer, key, req.file.mimetype);
+
+    const settings = await getSettings(req.tenantId);
+    const shareFiles = { ...(settings.ai_share_files || {}) };
+    shareFiles[action] = { url, name: req.file.originalname, file_type: shareFileType(req.file.mimetype) };
+    await saveSettings(req.tenantId, { ai_share_files: shareFiles });
+
+    res.json({ share_files: shareFiles });
+  } catch (e) { console.error('uploadAiShareFile:', e.message); res.status(500).json({ error: 'Failed to upload file.' }); }
+};
+
+// DELETE /hub/ai-agent/share-file/:action — remove the file for one action, so the AI
+// stops attaching anything for it (its suggested_action is simply ignored again).
+const removeAiShareFile = async (req, res) => {
+  try {
+    const { action } = req.params;
+    if (!AI_SHARE_ACTIONS.includes(action)) return res.status(400).json({ error: `action must be one of: ${AI_SHARE_ACTIONS.join(', ')}.` });
+    const settings = await getSettings(req.tenantId);
+    const shareFiles = { ...(settings.ai_share_files || {}) };
+    delete shareFiles[action];
+    await saveSettings(req.tenantId, { ai_share_files: shareFiles });
+    res.json({ share_files: shareFiles });
+  } catch (e) { console.error('removeAiShareFile:', e.message); res.status(500).json({ error: 'Failed to remove file.' }); }
 };
 
 const updateAiKnowledge = async (req, res) => {
@@ -362,6 +411,32 @@ const updateAiKnowledge = async (req, res) => {
     await saveSettings(req.tenantId, patch);
     res.json({ ok: true });
   } catch (e) { console.error('updateAiKnowledge:', e.message); res.status(500).json({ error: 'Failed to save.' }); }
+};
+
+// POST /hub/ai-agent/draft — the "AI Agent" setup wizard: reads the given website
+// and drafts AI Auto-Reply's knowledge fields from it. Returns the draft for
+// review only; the caller saves it via PUT /hub/ai-knowledge same as a manual edit.
+const draftAiAgent = async (req, res) => {
+  try {
+    const { website, businessType, groundRules, businessContext, agentName, greeting } = req.body;
+    if (!website?.trim()) return res.status(400).json({ error: 'Website is required.' });
+
+    let websiteText;
+    try {
+      websiteText = await fetchWebsiteText(website.trim());
+    } catch (e) {
+      return res.status(400).json({ error: `Could not read that website: ${e.message}` });
+    }
+
+    const tenant = (await query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0];
+    const knowledge = await generateAiAgentKnowledge({
+      businessName: tenant?.name, businessType, groundRules, businessContext, agentName, greeting, websiteText,
+    });
+    res.json({ knowledge });
+  } catch (e) {
+    console.error('draftAiAgent:', e.message);
+    res.status(502).json({ error: e.message || 'Failed to draft the AI agent.' });
+  }
 };
 
 // Recent AI replies for review (helps the owner spot bad answers and add examples)
@@ -414,5 +489,6 @@ const cancelScheduledBroadcast = async (req, res) => {
 module.exports = {
   getScheduledBroadcasts, cancelScheduledBroadcast,
   getAnalytics, getBroadcastHistory, getOptIns, updateOptIns, updateOptInSettings, getNumbers,
-  getClickToWhatsApp, getAutoMessages, updateAutoMessages, getAiKnowledge, updateAiKnowledge, getAiReplies,
+  getClickToWhatsApp, getAutoMessages, updateAutoMessages, getAiKnowledge, updateAiKnowledge, getAiReplies, draftAiAgent,
+  uploadAiShareFile, removeAiShareFile,
 };

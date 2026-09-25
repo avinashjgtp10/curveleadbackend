@@ -314,6 +314,7 @@ const updateLead = async (req, res) => {
     // Auto-set won_at / lost_at based on stage's is_won / is_lost flag
     let stageMetaEvent = null;
     let stageIsLost = false;
+    let stageIsWon = false;
     if (req.body.stage) {
       const stageInfo = await query(
         'SELECT is_won, is_lost, meta_event_name FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
@@ -321,6 +322,7 @@ const updateLead = async (req, res) => {
       );
       stageMetaEvent = stageInfo.rows[0]?.meta_event_name || null;
       stageIsLost = !!stageInfo.rows[0]?.is_lost;
+      stageIsWon = !!stageInfo.rows[0]?.is_won;
       if (stageInfo.rows[0]?.is_won) updates.push('won_at = NOW()');
       if (stageInfo.rows[0]?.is_lost) {
         updates.push('lost_at = NOW()');
@@ -370,7 +372,7 @@ const updateLead = async (req, res) => {
         sendLeadConversionEvent({ tenantId: req.tenantId, lead: result.rows[0], eventName: stageMetaEvent }).catch(() => {});
       }
       checkStageChangeTriggers({
-        tenantId: req.tenantId, leadId: req.params.id, newStage: req.body.stage, isLost: stageIsLost,
+        tenantId: req.tenantId, leadId: req.params.id, newStage: req.body.stage, isLost: stageIsLost, isWon: stageIsWon,
       }).catch(() => {});
     }
 
