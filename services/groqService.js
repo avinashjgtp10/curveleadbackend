@@ -434,4 +434,46 @@ Respond ONLY with valid JSON:
   };
 };
 
-module.exports = { callGroq, generateTemplateDraft, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };
+// Drafts the AI Auto-Reply knowledge base (the same fields WhatsApp Hub's
+// AI Auto-Reply tab saves) from a business's website content plus a few setup
+// answers — so a tenant can get a working AI agent without typing everything
+// in by hand. The draft is returned for review, never saved directly.
+const generateAiAgentKnowledge = async ({ businessName, businessType, groundRules, businessContext, agentName, greeting, websiteText }) => {
+  const prompt = `You set up a WhatsApp AI sales assistant for a business by drafting its training data from the business's own website.
+
+Business name: ${businessName || 'the business'}
+Business type: ${businessType || 'not specified'}
+Extra context from the owner: ${businessContext || 'none given'}
+Rules the owner wants the AI to follow: ${groundRules || 'none given'}
+Agent's name (sign-off): ${agentName || 'not specified'}
+Preferred opening greeting: ${greeting || 'not specified'}
+
+Website content (may be messy/incomplete — use only what's real, never invent prices or facts not present here or in the context above):
+"""
+${websiteText.slice(0, 6000)}
+"""
+
+Draft the following fields for the AI's knowledge base. Every fact (prices, services, hours) must come from the website content or the owner's context above — if something isn't there, leave it out rather than guessing.
+- about: 2-4 sentences on what the business does, where, for whom.
+- services_prices: one per line, "Service — price" where a price is actually stated; otherwise just list the service.
+- faqs: 4-8 Q&A pairs a customer would realistically ask, answerable from the given content.
+- tone: how the AI should sound (warm/professional/casual), and mention it should sign off as "${agentName || 'the assistant'}" if a name was given, and open new chats with something close to the given greeting if one was given.
+- goal: the single main outcome the AI should push toward (e.g. book a visit, get contact details, close a sale).
+- never_say: things the AI must never claim or promise — always include "never quote a price not listed above" and anything from the owner's rules.
+- handoff_rules: situations where the AI should stop and hand off to a human (e.g. complaints, price negotiation, ready to pay).
+
+Respond ONLY with valid JSON:
+{"about":"","services_prices":"","faqs":"","tone":"","goal":"","never_say":"","handoff_rules":""}`;
+
+  const result = await callGroq([{ role: 'user', content: prompt }], { json: true, temperature: 0.4, maxTokens: 1400, reasoningEffort: 'medium' });
+  let draft;
+  try { draft = JSON.parse(result.content); } catch { throw new Error('AI returned an unusable draft. Please try again.'); }
+
+  const fields = ['about', 'services_prices', 'faqs', 'tone', 'goal', 'never_say', 'handoff_rules'];
+  const cleaned = {};
+  for (const f of fields) cleaned[f] = String(draft[f] || '').trim().slice(0, 4000);
+  if (!cleaned.about) throw new Error('AI could not draft anything usable from that website. Try adding more detail in the business context field.');
+  return cleaned;
+};
+
+module.exports = { callGroq, generateTemplateDraft, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook, generateAiAgentKnowledge };

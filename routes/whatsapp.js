@@ -50,6 +50,7 @@ router.put('/hub/auto-messages', admin, hub.updateAutoMessages);
 router.get('/hub/ai-knowledge', admin, hub.getAiKnowledge);
 router.put('/hub/ai-knowledge', admin, hub.updateAiKnowledge);
 router.get('/hub/ai-replies', admin, hub.getAiReplies);
+router.post('/hub/ai-agent/draft', admin, hub.draftAiAgent);
 router.post('/broadcast/send', requirePermission('leads.bulk_edit'), sendBroadcast);
 
 module.exports = router;

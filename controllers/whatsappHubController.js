@@ -1,5 +1,7 @@
 const axios = require('axios');
 const { query } = require('../config/db');
+const { fetchWebsiteText } = require('../utils/websiteFetcher');
+const { generateAiAgentKnowledge } = require('../services/groqService');
 
 const META_API_URL = 'https://graph.facebook.com/v25.0';
 
@@ -364,6 +366,32 @@ const updateAiKnowledge = async (req, res) => {
   } catch (e) { console.error('updateAiKnowledge:', e.message); res.status(500).json({ error: 'Failed to save.' }); }
 };
 
+// POST /hub/ai-agent/draft — the "AI Agent" setup wizard: reads the given website
+// and drafts AI Auto-Reply's knowledge fields from it. Returns the draft for
+// review only; the caller saves it via PUT /hub/ai-knowledge same as a manual edit.
+const draftAiAgent = async (req, res) => {
+  try {
+    const { website, businessType, groundRules, businessContext, agentName, greeting } = req.body;
+    if (!website?.trim()) return res.status(400).json({ error: 'Website is required.' });
+
+    let websiteText;
+    try {
+      websiteText = await fetchWebsiteText(website.trim());
+    } catch (e) {
+      return res.status(400).json({ error: `Could not read that website: ${e.message}` });
+    }
+
+    const tenant = (await query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0];
+    const knowledge = await generateAiAgentKnowledge({
+      businessName: tenant?.name, businessType, groundRules, businessContext, agentName, greeting, websiteText,
+    });
+    res.json({ knowledge });
+  } catch (e) {
+    console.error('draftAiAgent:', e.message);
+    res.status(502).json({ error: e.message || 'Failed to draft the AI agent.' });
+  }
+};
+
 // Recent AI replies for review (helps the owner spot bad answers and add examples)
 const getAiReplies = async (req, res) => {
   try {
@@ -414,5 +442,5 @@ const cancelScheduledBroadcast = async (req, res) => {
 module.exports = {
   getScheduledBroadcasts, cancelScheduledBroadcast,
   getAnalytics, getBroadcastHistory, getOptIns, updateOptIns, updateOptInSettings, getNumbers,
-  getClickToWhatsApp, getAutoMessages, updateAutoMessages, getAiKnowledge, updateAiKnowledge, getAiReplies,
+  getClickToWhatsApp, getAutoMessages, updateAutoMessages, getAiKnowledge, updateAiKnowledge, getAiReplies, draftAiAgent,
 };
