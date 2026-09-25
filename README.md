@@ -164,7 +164,8 @@ Required parameters (String unless noted):
 
 Optional (has a code-level default if unset): `JWT_EXPIRES_IN`, `GROQ_API_KEY`
 (SecureString), `GROQ_MODEL`, `API_URL`, `API_BASE_URL`, `PORT`,
-`CORS_ALLOWED_ORIGINS` (defaults to localhost + curvelead.com).
+`CORS_ALLOWED_ORIGINS` (defaults to localhost + curvelead.com), `IDEOGRAM_API_KEY`
+(SecureString — AI template header image generation stays off until this is set).
 
 Never stored anywhere (IAM role only): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
 

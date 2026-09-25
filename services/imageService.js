@@ -37,9 +37,13 @@ const generateImages = async ({ prompt, count = 2 }) => {
   try {
     response = await axios.post(IDEOGRAM_URL, form, {
       headers: { ...form.getHeaders(), 'Api-Key': process.env.IDEOGRAM_API_KEY },
-      timeout: 90000,
+      // Shorter than a typical reverse-proxy read timeout (Nginx defaults to 60s) so this
+      // server returns a clean JSON error before the proxy kills the connection and hands
+      // the browser an HTML gateway-timeout page instead (which broke error reporting).
+      timeout: 45000,
     });
   } catch (e) {
+    if (e.code === 'ECONNABORTED') throw new Error('Ideogram is taking too long to respond. Try again, or copy the prompt above and use it directly on ideogram.ai.');
     const detail = e.response?.data?.error || e.response?.data?.message || e.message;
     throw new Error(`Image generation failed: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
   }
