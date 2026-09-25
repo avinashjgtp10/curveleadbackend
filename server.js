@@ -148,6 +148,7 @@ app.use('/api/ai-calling', apiLimiter, require('./routes/aiCalling'));
 app.use('/api/playbook', apiLimiter, require('./routes/playbook'));
 app.use('/api/automations', apiLimiter, require('./routes/automations'));
 app.use('/api/teams', apiLimiter, require('./routes/teams'));
+app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
 
 // ============================================
 // 404 handler

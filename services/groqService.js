@@ -487,4 +487,35 @@ Respond ONLY with valid JSON:
   return cleaned;
 };
 
-module.exports = { callGroq, generateTemplateDraft, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook, generateAiAgentKnowledge };
+// Drafts a short WhatsApp message asking a just-won customer for a Google review,
+// in the business's own tone if AI Auto-reply has been trained, generic otherwise.
+// Must keep the literal {{name}} and {{review_link}} placeholders — the caller
+// substitutes those before sending.
+const generateReviewRequestMessage = async ({ businessName, knowledge }) => {
+  const tone = knowledge?.tone?.trim();
+  const about = knowledge?.about?.trim();
+  const prompt = `Write a short, warm WhatsApp message asking a customer who just did business with "${businessName || 'us'}" to leave a Google review.
+
+${about ? `About the business: ${about}` : ''}
+${tone ? `Tone to use: ${tone}` : 'Tone: warm, genuine, brief.'}
+
+Rules:
+- Max 2 short sentences before the link.
+- Must include the literal placeholders {{name}} (the customer's first name) and {{review_link}} (the review link) exactly as written — do not replace them with real values.
+- Light emoji use is fine, don't overdo it.
+- Do not sound like a corporate survey request.
+
+Respond ONLY with valid JSON: {"message": "..."}`;
+
+  const result = await callGroq([{ role: 'user', content: prompt }], { json: true, temperature: 0.6, maxTokens: 300 });
+  let draft;
+  try { draft = JSON.parse(result.content); } catch { throw new Error('AI returned an unusable draft. Please try again.'); }
+
+  let message = String(draft.message || '').trim();
+  if (!message) throw new Error('AI returned an empty draft. Please try again.');
+  if (!/\{\{name\}\}/i.test(message)) message = `Hi {{name}}! ${message}`;
+  if (!/\{\{review_link\}\}/i.test(message)) message += ' {{review_link}}';
+  return message.slice(0, 1000);
+};
+
+module.exports = { callGroq, generateTemplateDraft, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook, generateAiAgentKnowledge, generateReviewRequestMessage };
