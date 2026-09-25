@@ -64,11 +64,16 @@ const qualifyLead = async (leadName, messageHistory, latestMessage, businessCont
     businessContext.lead_source ? `\nHow this lead found us: ${businessContext.lead_source}\n` : '',
   ].join('');
 
+  const nowIst = new Date().toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+
   const prompt = `You are a friendly sales assistant for ${businessContext.business_name || 'our business'}.
 
 Business context: ${businessContext.description || 'We help businesses with their needs.'}
 ${knowledgeBlock}
 You are chatting with a potential customer named ${leadName} via WhatsApp.
+Right now it is: ${nowIst} (India time) — resolve anything the lead says like "tomorrow" or "Monday" against this.
 
 Previous conversation:
 ${conversationContext || '(no previous messages)'}
@@ -78,16 +83,19 @@ Latest message from ${leadName}: "${latestMessage}"
 Your task:
 1. Reply naturally and warmly (max 2-3 sentences)
 2. Try to qualify the lead by understanding: their need, timeline, budget
-3. If they seem interested, suggest a call or demo
+3. If they seem interested, suggest a call or demo, and ask for a specific date/time if not yet given
 4. If they say "not interested", politely close the conversation
 5. Keep tone professional but friendly, use light emojis sparingly
+6. If the lead has now given a specific date AND time for a call/demo/visit (even a partial answer like just a time, once a date is implied by earlier context), do NOT ask further onboarding questions (name/city/etc.) before booking — treat the date/time as enough to confirm. Set booking.ready = true, fill date_time_iso, and write your reply to clearly CONFIRM the booking (e.g. "You're all set for tomorrow, 26 Sept at 10:30 AM! Our team will be ready."), not ask another question.
+7. If no specific date/time has been given yet, booking.ready must be false and date_time_iso null.
 
 Respond ONLY with valid JSON:
 {
   "reply": "your message to send",
   "intent": "interested|not_interested|needs_info|ready_to_buy|unclear",
   "should_human_takeover": true|false,
-  "suggested_action": "schedule_call|send_pricing|send_demo|close_conversation|continue"
+  "suggested_action": "schedule_call|send_pricing|send_demo|close_conversation|continue",
+  "booking": {"ready": true|false, "date_time_iso": "YYYY-MM-DDTHH:mm:00 in India time, or null", "summary": "one line of what was booked and any details the lead gave, or null"}
 }`;
 
   const result = await callGroq(
@@ -96,13 +104,16 @@ Respond ONLY with valid JSON:
   );
 
   try {
-    return JSON.parse(result.content);
+    const parsed = JSON.parse(result.content);
+    if (!parsed.booking || typeof parsed.booking !== 'object') parsed.booking = { ready: false, date_time_iso: null, summary: null };
+    return parsed;
   } catch (e) {
     return {
       reply: `Hi ${leadName}! Thanks for your message. A team member will get back to you shortly.`,
       intent: 'unclear',
       should_human_takeover: true,
       suggested_action: 'continue',
+      booking: { ready: false, date_time_iso: null, summary: null },
     };
   }
 };

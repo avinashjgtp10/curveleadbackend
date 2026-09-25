@@ -446,6 +446,58 @@ const handleWebhook = async (req, res) => {
             [lead.tenant_id, lead.id, aiResponse.reply, sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed']
           );
 
+          // The AI decided this lead should see a demo or pricing — send the file the
+          // tenant configured for that action (WhatsApp Hub > AI Auto-reply), right
+          // after the text reply. No-ops silently if nothing's configured for it.
+          const shareFile = tenant.settings?.ai_share_files?.[aiResponse.suggested_action];
+          if (shareFile?.url) {
+            const mediaResult = await sendMediaMessage(fromPhone, shareFile.file_type, shareFile.url, shareFile.name, credentials);
+            await query(
+              `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, wa_message_id, status, is_automated, is_ai_generated)
+               VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, true, true)`,
+              [
+                lead.tenant_id, lead.id, shareFile.name, ATTACHMENT_TYPE_TO_MESSAGE_TYPE[shareFile.file_type] || 'document',
+                shareFile.url, mediaResult.wa_message_id, mediaResult.success ? 'sent' : 'failed',
+              ]
+            );
+          }
+
+          // The lead just gave a specific date/time for a call/demo/visit — book it
+          // automatically instead of leaving it sitting in the chat transcript, and
+          // let the team know it's confirmed. Sanity-checked against a plausible
+          // window so a hallucinated date/time can't create garbage appointments.
+          const bookingAt = aiResponse.booking?.ready && aiResponse.booking?.date_time_iso ? new Date(aiResponse.booking.date_time_iso) : null;
+          const bookingIsPlausible = bookingAt && !isNaN(bookingAt.getTime())
+            && bookingAt.getTime() > Date.now() - 60 * 60 * 1000
+            && bookingAt.getTime() < Date.now() + 365 * 24 * 60 * 60 * 1000;
+          if (bookingIsPlausible) {
+            await query(
+              `UPDATE lead_followups SET is_completed = true, completed_at = NOW() WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
+              [lead.id, lead.tenant_id]
+            );
+            await query(
+              `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at)
+               VALUES ($1, $2, $3, 'demo', $4)`,
+              [lead.tenant_id, lead.id, aiResponse.booking.summary || 'Booked automatically by AI Auto-reply.', aiResponse.booking.date_time_iso]
+            );
+            const demoTime = bookingAt.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+            await query(
+              `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+               VALUES ($1, $2, 'demo_scheduled', 'Demo Scheduled', $3)`,
+              [lead.tenant_id, lead.id, `Booked by AI for ${demoTime}.${aiResponse.booking.summary ? ' ' + aiResponse.booking.summary : ''}`]
+            ).catch(() => {});
+            const notifyTitle = `Demo confirmed — ${lead.name}`;
+            const notifyBody = `Booked for ${demoTime} via AI Auto-reply.`;
+            if (lead.assigned_to) {
+              await createNotification(lead.tenant_id, lead.assigned_to, notifyTitle, notifyBody, 'demo_due', 'lead', lead.id).catch(() => {});
+            } else {
+              const admins = await query(`SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND is_active = true`, [lead.tenant_id]);
+              for (const admin of admins.rows) {
+                await createNotification(lead.tenant_id, admin.id, notifyTitle, notifyBody, 'demo_due', 'lead', lead.id).catch(() => {});
+              }
+            }
+          }
+
           // If the AI isn't confident it can handle this (unclear intent, complaint,
           // urgent request), hand off to a human instead of continuing automation.
           if (aiResponse.should_human_takeover) {
