@@ -17,7 +17,11 @@ const getWhatsappCreds = async (tenantId) => {
   return {
     wabaId: settings.whatsapp_business_account_id,
     accessToken: settings.whatsapp_access_token,
-    appId: settings.whatsapp_app_id,
+    // CurveLead is a Meta Tech Provider — every client's WhatsApp access token is issued
+    // from a System User under CurveLead's own Business Manager, so it's already tied to
+    // CurveLead's own app. There is no per-client Meta App ID to collect; a client's own
+    // separate app wouldn't be authorized to use their token for the media-upload API anyway.
+    appId: process.env.META_APP_ID,
   };
 };
 
@@ -59,8 +63,13 @@ const uploadBroadcastMedia = async (req, res) => {
     if (!MEDIA_TYPES.includes(mediaType)) return res.status(400).json({ error: `media_type must be one of: ${MEDIA_TYPES.join(', ')}.` });
 
     const { appId, accessToken } = await getWhatsappCreds(req.tenantId);
-    if (!appId || !accessToken) {
-      return res.status(400).json({ error: 'Add your Meta App ID in Integrations first.' });
+    if (!accessToken) {
+      return res.status(400).json({ error: 'Connect WhatsApp and add your access token in Integrations first.' });
+    }
+    if (!appId) {
+      // Server misconfiguration, not something the client can fix — META_APP_ID should always be set.
+      console.error('uploadBroadcastMedia: META_APP_ID is not set on the server.');
+      return res.status(500).json({ error: 'WhatsApp media upload is not configured on the server. Contact support.' });
     }
 
     let fileBuffer = req.file.buffer;
