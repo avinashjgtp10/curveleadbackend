@@ -50,10 +50,24 @@ const qualifyLead = async (leadName, messageHistory, latestMessage, businessCont
     `${m.direction === 'inbound' ? 'Lead' : 'You'}: ${m.message}`
   ).join('\n');
 
+  const k = businessContext.knowledge || {};
+  const section = (title, text) => (text && text.trim() ? `\n${title}:\n${text.trim()}\n` : '');
+  const knowledgeBlock = [
+    section('About the business', k.about),
+    section('Services and prices (only quote what is listed here; never invent prices)', k.services_prices),
+    section('FAQs (answer from these)', k.faqs),
+    section('Tone and style', k.tone),
+    section('Main goal of every conversation', k.goal),
+    section('Never say or promise', k.never_say),
+    section('Hand off to a human (should_human_takeover = true) when', k.handoff_rules),
+    section('Examples of good conversations to imitate', k.example_chats),
+    businessContext.lead_source ? `\nHow this lead found us: ${businessContext.lead_source}\n` : '',
+  ].join('');
+
   const prompt = `You are a friendly sales assistant for ${businessContext.business_name || 'our business'}.
 
 Business context: ${businessContext.description || 'We help businesses with their needs.'}
-
+${knowledgeBlock}
 You are chatting with a potential customer named ${leadName} via WhatsApp.
 
 Previous conversation:
@@ -361,4 +375,63 @@ Compare the two groups and identify what separates a won call from a lost one. R
   }
 };
 
-module.exports = { callGroq, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };
+/**
+ * Draft a complete WhatsApp message template (name, body with {{n}} variables,
+ * example values, optional header text / footer / buttons) from a short brief.
+ * Output is sanitized to Meta's template limits; the caller still shows it to
+ * the user for review before anything is submitted for approval.
+ */
+const generateTemplateDraft = async ({ brief, category, language, businessName, businessDescription }) => {
+  const prompt = `You write WhatsApp Business message templates that Meta approves.
+
+Business: ${businessName || 'a business'}. ${businessDescription || ''}
+Goal of the template: ${brief}
+Category: ${category} (MARKETING = promotions/offers, UTILITY = updates about something the customer already did, AUTHENTICATION = OTP only)
+Language: ${language} (if Hindi/Hinglish, write the message in that language)
+
+Rules:
+- body_text max 1024 characters, warm and concise, light emojis only if it fits.
+- Use {{1}}, {{2}}... for personalization (first variable is normally the customer's name). Never start or end the body with a variable, and never place two variables next to each other.
+- examples: one realistic sample value per variable, in order.
+- name: lowercase letters, numbers and underscores only, max 40 characters.
+- footer_text: optional, max 60 characters (for example "Reply STOP to opt out" for marketing).
+- buttons: optional, at most 3. QUICK_REPLY buttons have text (max 25 characters). A URL button has text (max 25 characters) and a full https url. Only include a URL button if the brief gives a link.
+- No misleading claims, no ALL CAPS shouting, no prohibited content.
+- image_idea: one sentence describing a fitting header image scene (or empty string).
+- image_headline: 2-4 words for the banner headline (or empty). image_subline: up to 6 words, e.g. the offer (or empty). image_cta: 2 words such as "Book Now" (or empty).
+
+Respond ONLY with valid JSON:
+{"name":"","category":"${category}","header_text":"","body_text":"","examples":[],"footer_text":"","buttons":[{"type":"QUICK_REPLY","text":""}],"image_idea":"","image_headline":"","image_subline":"","image_cta":""}`;
+
+  const result = await callGroq([{ role: 'user', content: prompt }], { json: true, temperature: 0.6, maxTokens: 900 });
+  let draft;
+  try { draft = JSON.parse(result.content); } catch { throw new Error('AI returned an unusable draft. Please try again.'); }
+
+  const body = String(draft.body_text || '').trim().slice(0, 1024);
+  if (!body) throw new Error('AI returned an empty draft. Please try again.');
+  const varCount = new Set([...body.matchAll(/\{\{(\d+)\}\}/g)].map(m => m[1])).size;
+  const examples = Array.isArray(draft.examples) ? draft.examples.map(x => String(x).trim()) : [];
+  while (examples.length < varCount) examples.push('');
+
+  const buttons = (Array.isArray(draft.buttons) ? draft.buttons : []).slice(0, 3).map(b => {
+    const text = String(b.text || '').trim().slice(0, 25);
+    if (!text) return null;
+    if (b.type === 'URL' && /^https:\/\//.test(b.url || '')) return { type: 'URL', text, url: b.url };
+    return { type: 'QUICK_REPLY', text };
+  }).filter(Boolean);
+
+  return {
+    name: String(draft.name || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40),
+    category,
+    body_text: body,
+    examples: examples.slice(0, varCount),
+    footer_text: String(draft.footer_text || '').trim().slice(0, 60),
+    buttons,
+    image_idea: String(draft.image_idea || '').trim(),
+    image_headline: String(draft.image_headline || '').trim().slice(0, 40),
+    image_subline: String(draft.image_subline || '').trim().slice(0, 60),
+    image_cta: String(draft.image_cta || '').trim().slice(0, 25),
+  };
+};
+
+module.exports = { callGroq, generateTemplateDraft, qualifyLead, generateFollowUpMessage, summarizeLead, analyzeMarket, transcribeAudio, analyzeRecording, generatePlaybook };

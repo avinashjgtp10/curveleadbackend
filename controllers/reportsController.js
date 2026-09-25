@@ -493,6 +493,7 @@ const getDashboardSummary = async (req, res) => {
           COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3) as leads_in_period,
           COUNT(*) FILTER (WHERE created_at >= $4 AND created_at < $5) as leads_prev_period,
           COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW())) as leads_today,
+          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW()) AND first_response_at IS NOT NULL) as leads_today_contacted,
           COUNT(*) FILTER (WHERE lead_score = 'hot') as hot_leads,
           COUNT(*) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as total_won,
@@ -635,6 +636,7 @@ const getDashboardSummary = async (req, res) => {
 
       total_leads:       parseInt(s.total_leads),
       leads_today:       parseInt(s.leads_today),
+      leads_today_contacted: parseInt(s.leads_today_contacted),
       leads_in_period:   parseInt(s.leads_in_period),
       leads_change:      pct(s.leads_in_period, s.leads_prev_period),
       hot_leads:         parseInt(s.hot_leads),
