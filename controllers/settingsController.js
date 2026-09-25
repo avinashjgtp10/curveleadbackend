@@ -1,4 +1,6 @@
+const path = require('path');
 const { query } = require('../config/db');
+const { uploadToS3 } = require('../config/s3');
 
 // Surfaces a few settings-JSONB fields at the top level for frontend convenience.
 const withExtras = (row) => ({
@@ -145,4 +147,22 @@ const deleteStage = async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getSettings, updateSettings, getStages, createStage, updateStage, deleteStage };
+// POST /api/settings/logo — uploads the tenant's business logo and saves it in one step.
+// Used to watermark AI-generated / uploaded WhatsApp template header images.
+const uploadLogo = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+
+    const ext = path.extname(req.file.originalname).toLowerCase() || '.png';
+    const key = `business-logos/${req.tenantId}/${Date.now()}${ext}`;
+    const url = await uploadToS3(req.file.buffer, key, req.file.mimetype);
+
+    await query('UPDATE tenants SET logo_url = $1 WHERE id = $2', [url, req.tenantId]);
+    res.json({ logo_url: url });
+  } catch (error) {
+    console.error('uploadLogo error:', error);
+    res.status(500).json({ error: 'Failed to upload logo.' });
+  }
+};
+
+module.exports = { getSettings, updateSettings, getStages, createStage, updateStage, deleteStage, uploadLogo };

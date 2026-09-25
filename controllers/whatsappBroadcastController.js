@@ -5,6 +5,7 @@ const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 const { uploadToS3 } = require('../config/s3');
 const { generateTemplateDraft } = require('../services/groqService');
 const imageService = require('../services/imageService');
+const { overlayLogo } = require('../utils/imageCompositor');
 
 const LEAD_FIELD_ALLOWLIST = ['name', 'phone', 'email', 'location', 'stage', 'assigned_to_name'];
 const TEMPLATE_CATEGORIES = ['MARKETING', 'UTILITY', 'AUTHENTICATION'];
@@ -62,11 +63,24 @@ const uploadBroadcastMedia = async (req, res) => {
       return res.status(400).json({ error: 'Add your Meta App ID in Integrations first.' });
     }
 
+    let fileBuffer = req.file.buffer;
+    if (mediaType === 'IMAGE' && req.body.add_logo === 'true') {
+      const tenantResult = await query('SELECT logo_url FROM tenants WHERE id = $1', [req.tenantId]);
+      const logoUrl = tenantResult.rows[0]?.logo_url;
+      if (!logoUrl) return res.status(400).json({ error: 'Add your business logo in Settings first.' });
+      try {
+        fileBuffer = await overlayLogo(fileBuffer, logoUrl);
+      } catch (e) {
+        console.error('overlayLogo:', e.message);
+        return res.status(502).json({ error: 'Failed to add logo to the image.' });
+      }
+    }
+
     const ext = path.extname(req.file.originalname).toLowerCase();
     const key = `whatsapp-templates/${req.tenantId}/${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
-    const url = await uploadToS3(req.file.buffer, key, req.file.mimetype);
+    const url = await uploadToS3(fileBuffer, key, req.file.mimetype);
 
-    const handleResult = await uploadTemplateMedia(appId, accessToken, req.file.buffer, req.file.mimetype);
+    const handleResult = await uploadTemplateMedia(appId, accessToken, fileBuffer, req.file.mimetype);
     if (!handleResult.success) return res.status(502).json({ error: handleResult.error });
 
     res.json({ url, handle: handleResult.handle, media_type: mediaType });
