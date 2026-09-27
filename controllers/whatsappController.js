@@ -97,6 +97,57 @@ const getInbox = async (req, res) => {
   }
 };
 
+// DELETE /api/whatsapp/conversations { lead_ids: [...] } — bulk-delete whole
+// chat histories. Staff can only delete conversations for leads assigned to them.
+const deleteConversations = async (req, res) => {
+  try {
+    const leadIds = Array.isArray(req.body.lead_ids) ? [...new Set(req.body.lead_ids)].filter(Boolean) : [];
+    if (!leadIds.length) return res.status(400).json({ error: 'lead_ids required.' });
+    if (leadIds.length > 200) return res.status(400).json({ error: 'Max 200 conversations at a time.' });
+
+    const params = [req.tenantId, leadIds];
+    let scope = '';
+    if (req.user.role === 'staff') {
+      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $3)';
+      params.push(req.user.id);
+    }
+    const result = await query(
+      `DELETE FROM whatsapp_messages WHERE tenant_id = $1 AND lead_id = ANY($2::uuid[])${scope}`,
+      params
+    );
+    res.json({ deleted_messages: result.rowCount });
+  } catch (error) {
+    console.error('Delete conversations error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// PUT /api/whatsapp/conversations/read { lead_ids: [...] } — bulk mark-as-read,
+// same effect opening each chat individually would have.
+const markConversationsRead = async (req, res) => {
+  try {
+    const leadIds = Array.isArray(req.body.lead_ids) ? [...new Set(req.body.lead_ids)].filter(Boolean) : [];
+    if (!leadIds.length) return res.status(400).json({ error: 'lead_ids required.' });
+    if (leadIds.length > 200) return res.status(400).json({ error: 'Max 200 conversations at a time.' });
+
+    const params = [req.tenantId, leadIds];
+    let scope = '';
+    if (req.user.role === 'staff') {
+      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $3)';
+      params.push(req.user.id);
+    }
+    await query(
+      `UPDATE whatsapp_messages SET read_at = NOW(), status = 'read'
+       WHERE tenant_id = $1 AND lead_id = ANY($2::uuid[]) AND direction = 'inbound' AND read_at IS NULL${scope}`,
+      params
+    );
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Mark conversations read error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
 // POST /api/whatsapp/labels { lead_id, add?: string[], remove?: string[] }
 // Chat labels are the lead's tags, so they persist and are shared with the whole team.
 const clean = (arr, max) => [...new Set((Array.isArray(arr) ? arr : []).map(x => String(x).trim().slice(0, 30)).filter(Boolean))].slice(0, max);
@@ -599,4 +650,7 @@ const handleWebhook = async (req, res) => {
   }
 };
 
-module.exports = { getInbox, getConversation, sendMessage, setConversationAi, sendAttachment, handleWebhook, updateChatLabels };
+module.exports = {
+  getInbox, getConversation, sendMessage, setConversationAi, sendAttachment, handleWebhook,
+  updateChatLabels, deleteConversations, markConversationsRead,
+};

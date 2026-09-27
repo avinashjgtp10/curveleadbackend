@@ -2,7 +2,10 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const router = express.Router();
-const { getInbox, getConversation, sendMessage, setConversationAi, sendAttachment, handleWebhook, updateChatLabels } = require('../controllers/whatsappController');
+const {
+  getInbox, getConversation, sendMessage, setConversationAi, sendAttachment, handleWebhook,
+  updateChatLabels, deleteConversations, markConversationsRead,
+} = require('../controllers/whatsappController');
 const { getSendableTemplates, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, getImagePrompt, generateHeaderImages, sendBroadcast, uploadBroadcastMedia } = require('../controllers/whatsappBroadcastController');
 const hub = require('../controllers/whatsappHubController');
 const { authenticate } = require('../middleware/auth');
@@ -31,6 +34,8 @@ router.put('/conversation/:leadId/ai', setConversationAi);
 router.get('/templates/sendable', getSendableTemplates);
 router.post('/send-attachment', sendAttachment);
 router.post('/labels', updateChatLabels);
+router.delete('/conversations', deleteConversations);
+router.put('/conversations/read', markConversationsRead);
 router.get('/broadcast/templates', requirePermission('settings.manage'), getBroadcastTemplates);
 router.post('/broadcast/templates', requirePermission('settings.manage'), createBroadcastTemplate);
 router.post('/broadcast/templates/ai-draft', requirePermission('settings.manage'), aiDraftTemplate);
