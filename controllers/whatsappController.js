@@ -15,6 +15,7 @@ const { createNotification } = require('./notificationController');
 const { isOptOutMessage } = require('../utils/optOut');
 const { substituteVars } = require('../utils/templateVars');
 const { isWithinBusinessHours } = require('../utils/businessHours');
+const { isSessionOpen } = require('../utils/sessionWindow');
 
 const INBOUND_MEDIA_TYPES = { image: 'image', document: 'document', audio: 'audio', video: 'video', sticker: 'image' };
 
@@ -74,7 +75,8 @@ const getInbox = async (req, res) => {
       `SELECT DISTINCT ON (wm.lead_id)
               wm.lead_id, wm.message, wm.direction, wm.sent_at, wm.status,
               l.name as lead_name, l.phone as lead_phone, l.lead_score, l.stage, COALESCE(l.tags, '{}') as tags,
-              u.name as assigned_to_name,
+              l.assigned_to, u.name as assigned_to_name, l.ai_paused,
+              (SELECT MAX(sent_at) FROM whatsapp_messages WHERE lead_id = wm.lead_id AND direction = 'inbound') as last_inbound_at,
               (SELECT COUNT(*) FROM whatsapp_messages WHERE lead_id = wm.lead_id AND direction = 'inbound' AND read_at IS NULL) as unread_count
        FROM whatsapp_messages wm
        JOIN leads l ON wm.lead_id = l.id
@@ -87,7 +89,8 @@ const getInbox = async (req, res) => {
 
     // Sort by most recent
     const conversations = result.rows.sort((a, b) => new Date(b.sent_at) - new Date(a.sent_at));
-    res.json({ conversations });
+    const tenantRow = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+    res.json({ conversations, ai_enabled: !!tenantRow.rows[0]?.settings?.ai_qualification_enabled });
   } catch (error) {
     console.error('Get inbox error:', error);
     res.status(500).json({ error: 'Failed.' });
@@ -198,32 +201,60 @@ const sendAttachment = async (req, res) => {
   }
 };
 
-// POST /api/whatsapp/send - Send a message to a lead
+// POST /api/whatsapp/send - Send a message to a lead. Free text only works inside
+// WhatsApp's 24h customer-service window; outside it the caller must send an approved
+// template ({ template_name, language_code, template_params, body_text }).
 const sendMessage = async (req, res) => {
   try {
-    const { lead_id, message, template_name } = req.body;
+    const { lead_id, message, template_name, language_code, template_params, body_text } = req.body;
     if (!lead_id || (!message && !template_name)) {
       return res.status(400).json({ error: 'lead_id and message required.' });
     }
 
-    const leadResult = await query('SELECT phone, name, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2', [lead_id, req.tenantId]);
+    const leadResult = await query('SELECT phone, name, assigned_to, opted_out FROM leads WHERE id = $1 AND tenant_id = $2', [lead_id, req.tenantId]);
     if (leadResult.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
 
     const lead = leadResult.rows[0];
     if (req.user.role === 'staff' && lead.assigned_to !== req.user.id) return res.status(404).json({ error: 'Lead not found.' });
-    const credentials = await resolveWhatsAppCredentials(req.tenantId, lead.assigned_to);
-    const result = template_name
-      ? await sendTemplate(lead.phone, template_name, 'en', [], credentials)
-      : await sendTextMessage(lead.phone, message, credentials);
 
-    // Save to DB regardless of send success (for dev mode)
+    if (!template_name && !(await isSessionOpen(lead_id))) {
+      return res.status(409).json({
+        error: 'The 24-hour WhatsApp window is closed for this lead. Send an approved template to restart the conversation.',
+        window_closed: true,
+      });
+    }
+    if (template_name && lead.opted_out) {
+      return res.status(409).json({ error: 'This lead has opted out of WhatsApp messages.' });
+    }
+
+    const credentials = await resolveWhatsAppCredentials(req.tenantId, lead.assigned_to);
+
+    let result, storedText, headerMedia = null;
+    if (template_name) {
+      const lang = language_code || 'en_US';
+      const params = Array.isArray(template_params) ? template_params.map(p => String(p ?? '')) : [];
+      const mediaRow = (await query(
+        'SELECT media_type, media_url FROM whatsapp_template_media WHERE tenant_id = $1 AND template_name = $2 AND language = $3',
+        [req.tenantId, template_name, lang]
+      )).rows[0];
+      headerMedia = mediaRow ? { type: mediaRow.media_type.toLowerCase(), link: mediaRow.media_url } : null;
+
+      result = await sendTemplate(lead.phone, template_name, lang, params.map(text => ({ type: 'text', text })), credentials, headerMedia);
+      storedText = body_text || `[Template: ${template_name}]`;
+      params.forEach((p, i) => { storedText = storedText.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), p); });
+    } else {
+      result = await sendTextMessage(lead.phone, message, credentials);
+      storedText = message;
+    }
+
+    // Save to DB regardless of send success so the failure is visible in the chat
     const saved = await query(
-      `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, sent_by)
-       VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7)
+      `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, template_name, wa_message_id, status, sent_by)
+       VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
-        req.tenantId, lead_id, message || `[Template: ${template_name}]`,
-        template_name ? 'template' : 'text',
+        req.tenantId, lead_id, storedText,
+        template_name ? 'template' : 'text', headerMedia?.link || null, template_name || null,
         result.wa_message_id, result.success ? 'sent' : 'failed', req.user.id,
       ]
     );
@@ -235,6 +266,22 @@ const sendMessage = async (req, res) => {
     res.status(201).json({ message: saved.rows[0], delivery: result });
   } catch (error) {
     console.error('Send message error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
+// PUT /api/whatsapp/conversation/:leadId/ai { paused } - Take over from / hand back to the AI
+const setConversationAi = async (req, res) => {
+  try {
+    const { paused } = req.body;
+    const leadResult = await query('SELECT assigned_to FROM leads WHERE id = $1 AND tenant_id = $2', [req.params.leadId, req.tenantId]);
+    if (leadResult.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
+    if (req.user.role === 'staff' && leadResult.rows[0].assigned_to !== req.user.id) return res.status(404).json({ error: 'Lead not found.' });
+
+    await query('UPDATE leads SET ai_paused = $1 WHERE id = $2 AND tenant_id = $3', [!!paused, req.params.leadId, req.tenantId]);
+    res.json({ ai_paused: !!paused });
+  } catch (error) {
+    console.error('Set conversation AI error:', error);
     res.status(500).json({ error: 'Failed.' });
   }
 };
@@ -552,4 +599,4 @@ const handleWebhook = async (req, res) => {
   }
 };
 
-module.exports = { getInbox, getConversation, sendMessage, sendAttachment, handleWebhook, updateChatLabels };
+module.exports = { getInbox, getConversation, sendMessage, setConversationAi, sendAttachment, handleWebhook, updateChatLabels };

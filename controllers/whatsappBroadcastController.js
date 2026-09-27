@@ -53,6 +53,40 @@ const getBroadcastTemplates = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// GET /api/whatsapp/templates/sendable — APPROVED templates in a slim shape, open to any
+// team member (the full /broadcast/templates list is admin-only) so staff can restart a
+// conversation from the inbox once the 24h window has closed.
+const getSendableTemplates = async (req, res) => {
+  try {
+    const { wabaId, accessToken } = await getWhatsappCreds(req.tenantId);
+    if (!wabaId || !accessToken) {
+      return res.status(400).json({ error: 'WhatsApp templates are not set up yet. Ask an admin to connect the WhatsApp Business Account.' });
+    }
+    const listResult = await listMessageTemplates(wabaId, accessToken);
+    if (!listResult.success) return res.status(502).json({ error: listResult.error });
+
+    const mediaResult = await query(
+      'SELECT template_name, language, media_type FROM whatsapp_template_media WHERE tenant_id = $1',
+      [req.tenantId]
+    );
+    const hasMedia = new Set(mediaResult.rows.map(r => `${r.template_name}::${r.language}`));
+
+    const templates = listResult.templates.filter(t => t.status === 'APPROVED').map(t => {
+      const body = t.components?.find(c => c.type === 'BODY')?.text || '';
+      const header = t.components?.find(c => c.type === 'HEADER');
+      const variableCount = new Set([...body.matchAll(/\{\{(\d+)\}\}/g)].map(m => m[1])).size;
+      let unsupported = null;
+      if (header?.format === 'TEXT' && /\{\{\d+\}\}/.test(header.text || '')) unsupported = 'This template has a variable in its header, which isn\'t supported yet.';
+      else if (['IMAGE', 'VIDEO', 'DOCUMENT'].includes(header?.format) && !hasMedia.has(`${t.name}::${t.language}`)) unsupported = 'Its header media isn\'t on file — recreate it through CurveLead.';
+      return {
+        name: t.name, language: t.language, category: t.category,
+        body_text: body, header_format: header?.format || null, variable_count: variableCount, unsupported,
+      };
+    });
+    res.json({ templates });
+  } catch (e) { console.error('getSendableTemplates:', e.message); res.status(500).json({ error: 'Failed.' }); }
+};
+
 // POST /api/whatsapp/broadcast/templates/media — upload an image/video/document
 // for a template's header: puts it on S3 (used later when sending) and gets a
 // Meta "header_handle" (used now, for the template creation example).
@@ -320,4 +354,4 @@ const sendBroadcast = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getImagePrompt, generateHeaderImages, executeBroadcast, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };
+module.exports = { getSendableTemplates, getImagePrompt, generateHeaderImages, executeBroadcast, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };
