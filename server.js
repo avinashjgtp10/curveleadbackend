@@ -132,6 +132,7 @@ app.use('/api/reports', apiLimiter, require('./routes/reports'));
 app.use('/api/settings', apiLimiter, require('./routes/settings'));
 app.use('/api/payments', apiLimiter, require('./routes/payments'));
 app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
+app.use('/api/support', apiLimiter, require('./routes/support'));
 app.use('/api/webhook', require('./routes/webhook')); // No rate limit - external service
 app.use('/api/integrations', apiLimiter, require('./routes/integrations'));
 
