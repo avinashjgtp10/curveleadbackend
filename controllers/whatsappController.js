@@ -337,6 +337,44 @@ const setConversationAi = async (req, res) => {
   }
 };
 
+// POST /api/whatsapp/start-chat { phone, name } — message someone who isn't a
+// lead yet. Reuses an existing lead if the phone already matches one (never
+// creates a duplicate); otherwise creates a minimal lead so the rest of the
+// app — the inbox thread, inbound replies, follow-ups — works exactly like any
+// other lead from here on. Doesn't send anything itself; the caller sends via
+// the normal /send or template flow once this returns the lead_id.
+const startChat = async (req, res) => {
+  try {
+    const rawPhone = String(req.body.phone || '').replace(/\D/g, '');
+    const phone = rawPhone.length > 10 ? rawPhone.slice(-10) : rawPhone;
+    if (phone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number.' });
+    const name = String(req.body.name || '').trim().slice(0, 100);
+
+    const existing = await query(
+      `SELECT id FROM leads WHERE tenant_id = $1 AND (phone = $2 OR RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = $2)
+       ${req.user.role === 'staff' ? 'AND assigned_to = $3' : ''} LIMIT 1`,
+      req.user.role === 'staff' ? [req.tenantId, phone, req.user.id] : [req.tenantId, phone]
+    );
+    if (existing.rows.length) return res.json({ lead_id: existing.rows[0].id, created: false });
+
+    const leadNumber = await nextLeadNumber(req.tenantId);
+    const inserted = await query(
+      `INSERT INTO leads (tenant_id, lead_number, name, phone, source, stage, assigned_to)
+       VALUES ($1, $2, $3, $4, 'manual', 'new', $5) RETURNING *`,
+      [req.tenantId, leadNumber, name || 'Unknown', phone, req.user.role === 'staff' ? req.user.id : null]
+    );
+    const lead = inserted.rows[0];
+
+    applyAssignmentRules({ tenantId: req.tenantId, lead }).then(() => notifyNewLead({ tenantId: req.tenantId, lead })).catch(() => {});
+    checkNewLeadTriggers({ tenantId: req.tenantId, lead }).catch(() => {});
+
+    res.status(201).json({ lead_id: lead.id, created: true });
+  } catch (error) {
+    console.error('Start chat error:', error);
+    res.status(500).json({ error: 'Failed to start chat.' });
+  }
+};
+
 // A Click-to-WhatsApp ad's first message includes a `referral` block with the
 // ad ID that drove the conversation — the same attribution signal lead-gen
 // forms get via campaign_id, just delivered inside the message webhook
@@ -653,6 +691,6 @@ const handleWebhook = async (req, res) => {
 };
 
 module.exports = {
-  getInbox, getConversation, sendMessage, setConversationAi, sendAttachment, handleWebhook,
+  getInbox, getConversation, sendMessage, setConversationAi, startChat, sendAttachment, handleWebhook,
   updateChatLabels, deleteConversations, markConversationsRead,
 };
