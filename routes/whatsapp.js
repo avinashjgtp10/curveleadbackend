@@ -3,7 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const router = express.Router();
 const {
-  getInbox, getConversation, sendMessage, setConversationAi, sendAttachment, handleWebhook,
+  getInbox, getConversation, sendMessage, setConversationAi, startChat, sendAttachment, handleWebhook,
   updateChatLabels, deleteConversations, markConversationsRead,
 } = require('../controllers/whatsappController');
 const { getSendableTemplates, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, getImagePrompt, generateHeaderImages, sendBroadcast, uploadBroadcastMedia } = require('../controllers/whatsappBroadcastController');
@@ -31,6 +31,7 @@ router.get('/inbox', getInbox);
 router.get('/conversation/:leadId', getConversation);
 router.post('/send', sendMessage);
 router.put('/conversation/:leadId/ai', setConversationAi);
+router.post('/start-chat', startChat);
 router.get('/templates/sendable', getSendableTemplates);
 router.post('/send-attachment', sendAttachment);
 router.post('/labels', updateChatLabels);
