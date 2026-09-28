@@ -402,7 +402,9 @@ const handleWebhook = async (req, res) => {
         } else if (s.status === 'read') {
           await query(`UPDATE whatsapp_messages SET status='read', read_at=$1 WHERE wa_message_id=$2`, [at, s.id]).catch(() => {});
         } else if (s.status === 'failed') {
-          await query(`UPDATE whatsapp_messages SET status='failed' WHERE wa_message_id=$1`, [s.id]).catch(() => {});
+          const err = s.errors?.[0];
+          const detail = err ? `${err.code ? `[${err.code}] ` : ''}${err.title || err.message || 'Unknown error'}${err.error_data?.details ? ` — ${err.error_data.details}` : ''}` : null;
+          await query(`UPDATE whatsapp_messages SET status='failed', error_detail=$2 WHERE wa_message_id=$1`, [s.id, detail]).catch(() => {});
         }
       }
     }
