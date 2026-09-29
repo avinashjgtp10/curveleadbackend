@@ -476,7 +476,12 @@ Draft the following fields for the AI's knowledge base. Every fact (prices, serv
 Respond ONLY with valid JSON:
 {"about":"","services_prices":"","faqs":"","tone":"","goal":"","never_say":"","handoff_rules":""}`;
 
-  const result = await callGroq([{ role: 'user', content: prompt }], { json: true, temperature: 0.4, maxTokens: 1400, reasoningEffort: 'medium' });
+  // This prompt reasons over up to 6000 chars of scraped website text and drafts
+  // 7 fields — 'medium' reasoning effort can burn the whole token budget on
+  // internal reasoning and return nothing (Groq then rejects the empty
+  // completion as json_validate_failed before we even see it). 'low' effort
+  // plus a bigger budget leaves real room for the actual output.
+  const result = await callGroq([{ role: 'user', content: prompt }], { json: true, temperature: 0.4, maxTokens: 3000, reasoningEffort: 'low' });
   let draft;
   try { draft = JSON.parse(result.content); } catch { throw new Error('AI returned an unusable draft. Please try again.'); }
 
