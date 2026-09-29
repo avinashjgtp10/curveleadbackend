@@ -166,10 +166,20 @@ const runAutomationSequences = async () => {
               ? { type: media.rows[0].media_type.toLowerCase(), link: media.rows[0].media_url }
               : null;
             const sendResult = await sendTemplate(row.phone, step.approved_template_name, language, parameters, credentials, headerMedia);
+            // The actual rendered text (body with the lead's name filled in), same as a
+            // manual broadcast send stores — not the bare "[Template: name]" placeholder,
+            // which left the inbox showing nothing but the template name badge.
+            let renderedMessage = `[Template: ${step.approved_template_name}]`;
+            if (bodyComponent?.text) {
+              renderedMessage = bodyComponent.text;
+              parameters.forEach((p, i) => {
+                renderedMessage = renderedMessage.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), p.text);
+              });
+            }
             await query(
               `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, template_name, wa_message_id, status, is_automated)
                VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,true)`,
-              [row.tenant_id, row.lead_id, `[Template: ${step.approved_template_name}]`, step.approved_template_name,
+              [row.tenant_id, row.lead_id, renderedMessage, step.approved_template_name,
                 sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed']
             ).catch(() => {});
             await query(
