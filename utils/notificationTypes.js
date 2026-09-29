@@ -10,6 +10,12 @@ const NOTIFICATION_GROUPS = [
     types: ['new_lead'],
   },
   {
+    key: 'new_messages',
+    label: 'New WhatsApp messages',
+    description: 'A lead sends you a new WhatsApp message.',
+    types: ['whatsapp'],
+  },
+  {
     key: 'assigned_to_me',
     label: 'Leads assigned to me',
     description: 'A lead is assigned or reassigned to you.',

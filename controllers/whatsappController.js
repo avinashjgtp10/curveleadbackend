@@ -676,13 +676,23 @@ const handleWebhook = async (req, res) => {
         }
       }
 
-      // Notify assigned user
+      // Notify about the new message — the assigned rep if there is one, otherwise
+      // every admin, so an unassigned lead's reply never goes unnoticed by everyone.
+      // Goes through createNotification() so it respects each person's own
+      // Notification Settings ("New WhatsApp messages" toggle), instead of the
+      // unconditional raw insert this used to be.
+      const msgNotifyTitle = `New message from ${lead.name}`;
+      const msgNotifyBody = messageText.substring(0, 100);
       if (lead.assigned_to) {
-        await query(
-          `INSERT INTO notifications (tenant_id, user_id, title, message, type, reference_type, reference_id)
-           VALUES ($1, $2, $3, $4, 'whatsapp', 'lead', $5)`,
-          [lead.tenant_id, lead.assigned_to, `New message from ${lead.name}`, messageText.substring(0, 100), lead.id]
+        await createNotification(lead.tenant_id, lead.assigned_to, msgNotifyTitle, msgNotifyBody, 'whatsapp', 'lead', lead.id).catch(() => {});
+      } else {
+        const admins = await query(
+          `SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND is_active = true`,
+          [lead.tenant_id]
         );
+        for (const admin of admins.rows) {
+          await createNotification(lead.tenant_id, admin.id, msgNotifyTitle, msgNotifyBody, 'whatsapp', 'lead', lead.id).catch(() => {});
+        }
       }
     }
   } catch (error) {
