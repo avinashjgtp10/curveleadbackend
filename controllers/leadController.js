@@ -43,6 +43,20 @@ const getLeads = async (req, res) => {
       params.push(req.user.id);
     }
 
+    if(req.query.metric) {
+      if(!['created','won'].includes(req.query.metric)) return res.status(422).json({error:'Invalid metric filter.'});
+      const scope=await require('../services/metrics').metricScope(req);
+      const from=`$${i++}`,to=`$${i++}`;params.push(scope.from,scope.to);
+      whereClause+=` AND ${req.query.metric==='won'?require('../services/metrics').wonPredicate(from,to):`l.created_at>=${from} AND l.created_at<${to}`}`;
+    }
+    if(req.query.activity) {
+      const activity=require('../services/dashboardActivity');const b=await activity.boundaries(req.tenantId);
+      const from=`$${i++}`,month=`$${i++}`,week=`$${i++}`;params.push(b.today,b.month,b.week);
+      const predicate=activity.predicates(from,month,week)[req.query.activity];
+      if(!predicate)return res.status(422).json({error:'Invalid activity filter.'});
+      // Keep all three bound parameters referenced even for predicates with no date restriction.
+      whereClause+=` AND (${predicate}) AND ${from}::timestamptz IS NOT NULL AND ${month}::timestamptz IS NOT NULL AND ${week}::timestamptz IS NOT NULL`;
+    }
     if (hide_stages) {
       const stagesToHide = hide_stages.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
       if (stagesToHide.length) {
@@ -94,7 +108,7 @@ const getLeads = async (req, res) => {
       LEFT JOIN LATERAL (
         SELECT next_followup_at, followup_type
         FROM lead_followups
-        WHERE lead_id = l.id AND is_completed = false
+        WHERE lead_id = l.id AND is_completed = false AND dismissed_at IS NULL
         ORDER BY next_followup_at ASC
         LIMIT 1
       ) pf ON true
@@ -745,9 +759,11 @@ const getTodayFollowups = async (req, res) => {
   try {
     const { search, type, date_from, date_to } = req.query;
 
-    let where = 'WHERE f.tenant_id = $1 AND f.is_completed = false';
+    let where = `WHERE f.tenant_id = $1 AND ${require('../services/followupSummary').active}`;
     const params = [req.tenantId];
-    let idx = 2;
+    const timezone=(await query("SELECT COALESCE(settings->>'timezone','Asia/Kolkata') tz FROM tenants WHERE id=$1",[req.tenantId])).rows[0]?.tz||'Asia/Kolkata';
+    params.push(timezone);let idx = 3;
+    const localDate="(f.next_followup_at AT TIME ZONE 'UTC' AT TIME ZONE $2)::date";
 
     // Staff see only follow-ups for their assigned leads
     if (req.user.role === 'staff') {
@@ -757,14 +773,14 @@ const getTodayFollowups = async (req, res) => {
 
     // If no date range provided, default to today + overdue
     if (!date_from && !date_to) {
-      where += ` AND DATE(f.next_followup_at) <= CURRENT_DATE`;
+      where += ` AND ${localDate} <= (now() AT TIME ZONE $2)::date`;
     }
     if (date_from) {
-      where += ` AND DATE(f.next_followup_at) >= $${idx++}`;
+      where += ` AND ${localDate} >= $${idx++}`;
       params.push(date_from);
     }
     if (date_to) {
-      where += ` AND DATE(f.next_followup_at) <= $${idx++}`;
+      where += ` AND ${localDate} <= $${idx++}`;
       params.push(date_to);
     }
     if (type) {
