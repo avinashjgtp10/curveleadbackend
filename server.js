@@ -149,6 +149,7 @@ app.use('/api/ai-calling', apiLimiter, require('./routes/aiCalling'));
 app.use('/api/playbook', apiLimiter, require('./routes/playbook'));
 app.use('/api/automations', apiLimiter, require('./routes/automations'));
 app.use('/api/teams', apiLimiter, require('./routes/teams'));
+app.use('/api/features', apiLimiter, require('./routes/features'));
 app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
 
 // ============================================
@@ -215,6 +216,7 @@ app.listen(PORT, () => {
   // tenant per day (inside the target UTC hour, guarded by last-sent date)
   const { runDailyReportEmail } = require('./jobs/dailyReportEmail');
   setTimeout(runDailyReportEmail, 40 * 1000);
+  setInterval(() => require('./jobs/featureJobs').runFeatureJobs().catch(e => console.error('Feature jobs:', e.message)), 60 * 1000);
   setInterval(runDailyReportEmail, 15 * 60 * 1000);
 });
 

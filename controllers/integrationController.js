@@ -34,7 +34,7 @@ const getSettings = async (req, res) => {
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     let settings = result.rows[0]?.settings || {};
     // Never expose the raw api_key — send masked version
-    const apiKey = settings.api_key || null;
+    const apiKey = settings.api_key || settings.api_key_prefix || null;
 
     // Legacy rows saved before verification existed have never been checked
     // against Meta — verify them now so stale/invalid credentials don't keep
@@ -147,8 +147,8 @@ const generateApiKey = async (req, res) => {
     const newKey = `clk_${crypto.randomBytes(24).toString('hex')}`;
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
-    const updated = { ...current, api_key: newKey, api_key_created_at: new Date().toISOString() };
-    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
+    const updated = { api_key: null, api_key_hash: crypto.createHash('sha256').update(newKey).digest('hex'), api_key_prefix: newKey.slice(0,8), api_key_created_at: new Date().toISOString() };
+    await query("UPDATE tenants SET settings = (COALESCE(settings,'{}'::jsonb)-'api_key') || $1::jsonb WHERE id = $2", [JSON.stringify(updated), req.tenantId]);
     // Return the full key only once
     res.json({ api_key: newKey, created_at: updated.api_key_created_at });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
@@ -159,8 +159,8 @@ const revokeApiKey = async (req, res) => {
   try {
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
-    const { api_key, api_key_created_at, ...rest } = current;
-    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(rest), req.tenantId]);
+    const { api_key, api_key_hash, api_key_prefix, api_key_created_at, ...rest } = current;
+    await query("UPDATE tenants SET settings=COALESCE(settings,'{}'::jsonb)-'api_key'-'api_key_hash'-'api_key_prefix'-'api_key_created_at' WHERE id=$1",[req.tenantId]);
     res.json({ message: 'API key revoked.' });
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
@@ -172,8 +172,8 @@ const ingestLead = async (req, res) => {
     if (!apiKey) return res.status(401).json({ error: 'API key required.' });
 
     const result = await query(
-      `SELECT id FROM tenants WHERE settings->>'api_key' = $1 AND subscription_status IN ('trial','active')`,
-      [apiKey]
+      `SELECT id FROM tenants WHERE (settings->>'api_key' = $1 OR settings->>'api_key_hash' = $2) AND subscription_status IN ('trial','active')`,
+      [apiKey, crypto.createHash('sha256').update(String(apiKey)).digest('hex')]
     );
     if (!result.rows.length) return res.status(401).json({ error: 'Invalid or expired API key.' });
     const tenantId = result.rows[0].id;
@@ -192,11 +192,11 @@ const ingestLead = async (req, res) => {
 const getEmbedScript = async (req, res) => {
   try {
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
-    const apiKey = result.rows[0]?.settings?.api_key;
+    const apiKey = result.rows[0]?.settings?.api_key || (result.rows[0]?.settings?.api_key_hash ? 'PASTE_YOUR_SAVED_API_KEY_HERE' : null);
     if (!apiKey) return res.status(400).json({ error: 'Generate an API key first.' });
 
     const baseUrl = process.env.FRONTEND_URL || 'https://curvelead.com';
-    const script = `<!-- CurveLead Lead Capture Form -->
+    const script = `<!-- CurveLead Lead Capture Form. Replace PASTE_YOUR_SAVED_API_KEY_HERE with your saved API key before using this form. -->
 <div id="cl-lead-form"></div>
 <script>
 (function(){
@@ -404,11 +404,23 @@ const facebookSubscriptionStatus = async (req, res) => {
   }
 };
 
+const facebookSyncStatus = async (req, res) => {
+  try {
+    const result = await query(`SELECT settings->>'meta_leads_last_synced_at' AS last_synced_at,
+      (COALESCE(settings->>'meta_page_id','') <> '' AND COALESCE(settings->>'meta_page_access_token','') <> '') AS configured
+      FROM tenants WHERE id=$1`, [req.tenantId]);
+    res.json({ last_synced_at: result.rows[0]?.last_synced_at || null, configured: !!result.rows[0]?.configured });
+  } catch (error) {
+    console.error('Facebook sync status error:', error.message);
+    res.status(500).json({ error: 'Failed to load sync status.' });
+  }
+};
+
 // ── POST /api/integrations/facebook/sync-leads ────────────────────────────
 const facebookSyncLeads = async (req, res) => {
   try {
-    const { created, skipped } = await syncFacebookLeadsForTenant(req.tenantId);
-    res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped });
+    const { created, skipped, last_synced_at } = await syncFacebookLeadsForTenant(req.tenantId);
+    res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped, last_synced_at });
   } catch (e) {
     if (e.code === 'NO_PAGE') return res.status(400).json({ error: e.message });
     console.error('facebookSyncLeads:', e.message);
@@ -447,3 +459,5 @@ const getCapiStats = async (req, res) => {
 };
 
 module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
+
+module.exports.facebookSyncStatus = facebookSyncStatus;

@@ -91,7 +91,7 @@ test('ad-set budgets include every page and preserve daily/lifetime dimensions',
 });
 
 test('API-key ingestion rejects invalid phones and returns success for attached duplicates', async () => {
- const deps = {'../config/db':{query:async()=>({rows:[{id:'t'}]})},'../services/leadIngestion':{ingestLead:async(id,data)=>{quality.normalizeLead(data);return {duplicate:true,lead:{id:'old'}};}}};
+ const deps = {'crypto':require('crypto'),'../config/db':{query:async()=>({rows:[{id:'t'}]})},'../services/leadIngestion':{ingestLead:async(id,data)=>{quality.normalizeLead(data);return {duplicate:true,lead:{id:'old'}};}}};
  const ctrl=load('controllers/integrationController.js',deps);
  const req={headers:{'x-api-key':'test'},query:{},body:{name:'Test',phone:'+99917935110'}};
  let res=response();await ctrl.ingestLead(req,res);assert.equal(res.code,422);

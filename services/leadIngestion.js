@@ -1,3 +1,4 @@
+const { assignInTransaction } = require('../utils/leadAssignment');
 const { transaction } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { normalizeLead, normalizePhone } = require('../utils/dataQuality');
@@ -37,7 +38,7 @@ async function ingestLead(tenantId, input, { submissionKey = input.meta_lead_id 
       const entries = Object.entries(data).filter(([key, value]) => COLUMNS.has(key) && value !== undefined);
       const result = await client.query(`INSERT INTO leads (tenant_id, lead_number, ${entries.map(([k]) => k).join(',')}) VALUES ($1,$2,${entries.map((_, i) => '$' + (i + 3)).join(',')}) RETURNING *`,
         [tenantId, number, ...entries.map(([key, value]) => key === 'custom_fields' ? JSON.stringify(value) : value)]);
-      lead = result.rows[0];
+      lead = await assignInTransaction(client, tenantId, result.rows[0]);
     } else {
       await client.query(`INSERT INTO lead_activities (tenant_id,lead_id,activity_type,title,description,metadata,created_by) VALUES ($1,$2,'duplicate',$3,$4,$5,$6)`,
         [tenantId, lead.id, `Duplicate lead received from ${data.source}`, data.notes || null, JSON.stringify({ submission: data }), actorId]);
