@@ -99,7 +99,9 @@ const syncFacebookLeadsForTenant = async (tenantId) => {
     }
   }
 
-  return { created, skipped };
+  const last_synced_at = new Date().toISOString();
+  await query(`UPDATE tenants SET settings = COALESCE(settings, '{}'::jsonb) || jsonb_build_object('meta_leads_last_synced_at', $2::text) WHERE id=$1`, [tenantId,last_synced_at]);
+  return { created, skipped, last_synced_at };
 };
 
 module.exports = { syncFacebookLeadsForTenant };
