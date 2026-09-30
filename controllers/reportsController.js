@@ -89,7 +89,7 @@ const getReportByStaff = async (req, res) => {
               COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3), 0) as revenue,
               ROUND(AVG(l.response_time_seconds) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3 AND l.response_time_seconds IS NOT NULL)) as avg_response_seconds,
               (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
-                WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = false) as pending_followups,
+                WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = false AND lf.dismissed_at IS NULL) as pending_followups,
               (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
                 WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = true) as completed_followups,
               -- Stalled — live snapshot, not period-filtered, same definition as the Leads page
@@ -98,7 +98,7 @@ const getReportByStaff = async (req, res) => {
                 LEFT JOIN lead_stages ls4 ON LOWER(ls4.name) = LOWER(l4.stage) AND ls4.tenant_id = l4.tenant_id
                 LEFT JOIN LATERAL (
                   SELECT next_followup_at FROM lead_followups
-                  WHERE lead_id = l4.id AND is_completed = false
+                  WHERE lead_id = l4.id AND is_completed = false AND dismissed_at IS NULL
                   ORDER BY next_followup_at ASC LIMIT 1
                 ) pf4 ON true
                 WHERE l4.tenant_id = u.tenant_id AND l4.assigned_to = u.id
@@ -205,42 +205,22 @@ const getReportByCampaign = async (req, res) => {
 // not backfilled here.
 const getFunnelReport = async (req, res) => {
   try {
-    const { start, end } = resolvePeriodRange(req.query.period);
+    const {from:start,to:end} = await metricScope(req);
     const isStaff = req.user.role === 'staff';
     const params = isStaff ? [req.tenantId, start, end, req.user.id] : [req.tenantId, start, end];
     const cohortSc = isStaff ? ' AND assigned_to = $4' : '';
     const leaksSc = isStaff ? ' AND l.assigned_to = $4' : '';
 
-    const [stagesRes, leaksRes] = await Promise.all([
+    const [stagesRes, leaksRes, terminalRes] = await Promise.all([
       query(
-        `WITH cohort AS (
-           SELECT id, stage FROM leads
-           WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${cohortSc}
-         ),
-         all_stages AS (
-           SELECT id, name, pos, is_won, is_lost FROM lead_stages WHERE tenant_id = $1 AND is_active = true
-         ),
-         lead_max_pos AS (
-           -- Default to pos 1 (not 0) when a lead's current stage string doesn't match any
-           -- active lead_stages row (e.g. it still holds the hardcoded 'new' default from
-           -- creation while this tenant's actual first stage is named something else) — every
-           -- created lead has at minimum entered the pipeline, so it must count at the first bar.
-           SELECT c.id AS lead_id,
-             GREATEST(
-               COALESCE((SELECT s.pos FROM all_stages s WHERE LOWER(s.name) = LOWER(c.stage)), 1),
-               COALESCE((SELECT MAX(s2.pos) FROM lead_stage_history h
-                          JOIN all_stages s2 ON LOWER(s2.name) = LOWER(h.new_stage)
-                          WHERE h.lead_id = c.id), 0)
-             ) AS max_pos
-           FROM cohort c
-         )
-         SELECT s.id, s.name, s.pos, s.is_won, s.is_lost,
-                COUNT(lmp.lead_id) FILTER (WHERE lmp.max_pos >= s.pos) AS reached_count
-         FROM all_stages s
-         LEFT JOIN lead_max_pos lmp ON true
-         WHERE s.is_won = false AND s.is_lost = false
-         GROUP BY s.id, s.name, s.pos, s.is_won, s.is_lost
-         ORDER BY s.pos ASC`,
+        `WITH cohort AS (SELECT id,stage FROM leads WHERE tenant_id=$1 AND created_at>=$2 AND created_at<$3${cohortSc}),
+ all_stages AS (SELECT id,name,is_won,is_lost,row_number() OVER(ORDER BY is_won,pos,id) pos FROM lead_stages
+ WHERE tenant_id=$1 AND is_active=true AND is_lost=false AND lower(trim(name)) NOT IN ('lost','unqualified','disqualified')),
+ lead_max_pos AS (SELECT c.id lead_id,GREATEST(
+ COALESCE((SELECT pos FROM all_stages WHERE lower(name)=lower(c.stage)),1),
+ COALESCE((SELECT max(s.pos) FROM lead_stage_history h JOIN all_stages s ON lower(s.name)=lower(h.new_stage) WHERE h.lead_id=c.id AND h.tenant_id=$1),1)) max_pos FROM cohort c)
+ SELECT s.*,count(l.lead_id) FILTER(WHERE l.max_pos>=s.pos) reached_count
+ FROM all_stages s LEFT JOIN lead_max_pos l ON true GROUP BY s.id,s.name,s.pos,s.is_won,s.is_lost ORDER BY s.pos`,
         params
       ),
       query(
@@ -255,6 +235,10 @@ const getFunnelReport = async (req, res) => {
          ORDER BY lost_count DESC`,
         params
       ),
+      query(`SELECT s.name, s.is_lost, count(l.id)::int AS count FROM lead_stages s
+ LEFT JOIN leads l ON l.tenant_id=s.tenant_id AND lower(l.stage)=lower(s.name) AND l.created_at>=$2 AND l.created_at<$3${leaksSc}
+ WHERE s.tenant_id=$1 AND s.is_active=true AND (s.is_lost=true OR lower(trim(s.name)) IN ('lost','unqualified','disqualified'))
+ GROUP BY s.id,s.name,s.is_lost,s.pos ORDER BY s.pos`,params),
     ]);
 
     const parsedStages = stagesRes.rows.map(s => ({ ...s, reached_count: parseInt(s.reached_count) }));
@@ -273,7 +257,7 @@ const getFunnelReport = async (req, res) => {
       lost_value: parseFloat(l.lost_value),
     }));
 
-    res.json({ stages, leaks });
+    res.json({ stages, leaks, terminal_stages:terminalRes.rows });
   } catch (error) {
     console.error('Funnel report error:', error);
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
@@ -514,17 +498,7 @@ const getDashboardSummary = async (req, res) => {
         FROM leads WHERE tenant_id = $1${' AND ($6::uuid IS NULL OR assigned_to = $6)'}
       `, compareParams),
 
-      // Today's action items from lead_followups — always live, not period-scoped
-      query(`
-        SELECT
-          COUNT(*) FILTER (WHERE DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as today,
-          COUNT(*) FILTER (WHERE next_followup_at < NOW() AND is_completed = false) as overdue,
-          COUNT(*) FILTER (WHERE followup_type = 'demo' AND DATE(next_followup_at) = CURRENT_DATE AND is_completed = false) as demos_today,
-          COUNT(*) FILTER (WHERE is_completed = false AND next_followup_at < NOW() - INTERVAL '${MISSED_AFTER_HOURS} hours'
-                           AND next_followup_at >= NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours') as missed,
-          COUNT(*) FILTER (WHERE is_completed = false AND next_followup_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours') as critical
-        FROM lead_followups WHERE tenant_id = $1${lsfc}
-      `, liveParams),
+      require('../services/followupSummary').summary(tid, isStaff ? req.user.id : null).then(row => ({rows:[row]})),
 
       // Pipeline: leads created in the selected period, per stage
       query(`
@@ -593,29 +567,7 @@ const getDashboardSummary = async (req, res) => {
         ? Promise.resolve({ rows: [{ count: '0' }] })
         : query('SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND assigned_to IS NULL', [tid]),
 
-      // Automation & AI activity — always live (not period-scoped)
-      query(`
-        SELECT
-          (SELECT COUNT(*) FROM automation_enrollments WHERE tenant_id = $1 AND status = 'active') as active_enrollments,
-          (SELECT COUNT(*) FROM automation_enrollments WHERE tenant_id = $1 AND status = 'completed'
-            AND completed_at >= DATE_TRUNC('month', NOW())) as completed_this_month,
-          (SELECT COUNT(*) FROM whatsapp_messages WHERE tenant_id = $1 AND is_ai_generated = true
-            AND sent_at >= NOW() - INTERVAL '7 days') as ai_replies_this_week,
-          (SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND source = 'meta_ads'
-            AND created_at >= DATE_TRUNC('day', NOW())) as meta_leads_today,
-          (SELECT COUNT(*) FROM whatsapp_messages WHERE tenant_id = $1 AND is_automated = true
-            AND sent_at >= NOW() - INTERVAL '7 days') as automated_sends_this_week,
-          (SELECT COUNT(*) FROM leads WHERE tenant_id = $1
-            AND opted_out_at >= NOW() - INTERVAL '7 days') as opt_outs_this_week,
-          (SELECT COUNT(*) FROM notifications WHERE tenant_id = $1 AND type IN ('lead_escalation', 'ai_handoff')
-            AND created_at >= NOW() - INTERVAL '7 days') as escalations_this_week,
-          (SELECT COUNT(*) FROM whatsapp_messages wm WHERE wm.tenant_id = $1 AND wm.direction = 'inbound'
-            AND wm.sent_at >= NOW() - INTERVAL '7 days'
-            AND EXISTS (
-              SELECT 1 FROM whatsapp_messages wm2 WHERE wm2.lead_id = wm.lead_id AND wm2.is_automated = true
-                AND wm2.sent_at < wm.sent_at AND wm2.sent_at >= NOW() - INTERVAL '7 days'
-            )) as automation_replies_this_week
-      `, [tid]),
+      require('../services/dashboardActivity').counts(tid,uid).then(row=>({rows:[row]})),
     ]);
 
     const s = summary.rows[0];
@@ -632,8 +584,8 @@ const getDashboardSummary = async (req, res) => {
       period_end:   new Date(end.getTime() - 1).toISOString(), // inclusive last moment, for display
 
       total_leads:       parseInt(s.total_leads),
-      leads_today:       parseInt(s.leads_today),
-      leads_today_contacted: parseInt(s.leads_today_contacted),
+      leads_today:       automation.rows[0].new_today,
+      leads_today_contacted: automation.rows[0].contacted_today,
       leads_in_period:   metrics.total_leads,
       leads_change:      pct(s.leads_in_period, s.leads_prev_period),
       hot_leads:         parseInt(s.hot_leads),
@@ -647,7 +599,7 @@ const getDashboardSummary = async (req, res) => {
       conversion_rate: metrics.conversion_rate,
       metrics,
       active_campaigns: metrics.active_campaigns,
-      avg_deal_value:    s.won_in_period > 0 ? Math.round(s.revenue_in_period / s.won_in_period) : 0,
+      avg_deal_value:    metrics.won > 0 ? Math.round(metrics.revenue / metrics.won) : 0,
 
       followups_today:   parseInt(f.today),
       overdue_followups: parseInt(f.overdue),
@@ -657,15 +609,15 @@ const getDashboardSummary = async (req, res) => {
 
       unassigned_leads: metrics.unassigned,
 
-      active_enrollments:    parseInt(automation.rows[0].active_enrollments),
-      completed_this_month:  parseInt(automation.rows[0].completed_this_month),
-      ai_replies_this_week:  parseInt(automation.rows[0].ai_replies_this_week),
-      meta_leads_today:      parseInt(automation.rows[0].meta_leads_today),
-      automated_sends_this_week:    parseInt(automation.rows[0].automated_sends_this_week),
-      opt_outs_this_week:           parseInt(automation.rows[0].opt_outs_this_week),
-      escalations_this_week:        parseInt(automation.rows[0].escalations_this_week),
-      automation_reply_rate_this_week: automation.rows[0].automated_sends_this_week > 0
-        ? Math.round((automation.rows[0].automation_replies_this_week / automation.rows[0].automated_sends_this_week) * 100)
+      active_enrollments:    parseInt(automation.rows[0].active_sequence),
+      completed_this_month:  parseInt(automation.rows[0].completed_sequence),
+      ai_replies_this_week:  parseInt(automation.rows[0].ai_replies),
+      meta_leads_today:      parseInt(automation.rows[0].meta_today),
+      automated_sends_this_week:    parseInt(automation.rows[0].automated_sends),
+      opt_outs_this_week:           parseInt(automation.rows[0].opt_outs),
+      escalations_this_week:        parseInt(automation.rows[0].escalations),
+      automation_reply_rate_this_week: automation.rows[0].automated_sends > 0
+        ? Math.round((automation.rows[0].automation_replies / automation.rows[0].automated_sends) * 100)
         : 0,
 
       pipeline:    pipeline.rows.map(p => ({ ...p, count: parseInt(p.count), pipeline_value: parseFloat(p.pipeline_value) })),

@@ -42,7 +42,9 @@ router.get(
     }),
   ),
 );
+router.get('/overview',handle(async(req,res)=>res.json(await require('../services/workspaceOverview').overview(req.tenantId))));
 router.use(requirePermission("settings.manage"));
+router.put('/onboarding',handle(async(req,res)=>res.json(await require('../services/workspaceOverview').saveOnboarding(req.tenantId,req.body))));
 router.get(
   "/config",
   handle(async (req, res) =>

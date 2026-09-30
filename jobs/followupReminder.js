@@ -16,7 +16,7 @@ const runFollowupReminder = async () => {
         COALESCE(l.assigned_to, f.created_by) AS notify_user_id
       FROM lead_followups f
       JOIN leads l ON f.lead_id = l.id
-      WHERE f.is_completed = false
+      WHERE ${require('../services/followupSummary').active}
         AND f.next_followup_at <= NOW() + INTERVAL '30 minutes'
         AND COALESCE(l.assigned_to, f.created_by) IS NOT NULL
         AND NOT EXISTS (
@@ -66,7 +66,7 @@ const runFollowupReminder = async () => {
         COALESCE(l.assigned_to, f.created_by) AS assigned_user_id
       FROM lead_followups f
       JOIN leads l ON f.lead_id = l.id
-      WHERE f.is_completed = false
+      WHERE ${require('../services/followupSummary').active}
         AND f.next_followup_at < NOW() - INTERVAL '2 hours'
         AND NOT EXISTS (
           SELECT 1 FROM notifications n

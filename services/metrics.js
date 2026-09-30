@@ -26,12 +26,13 @@ async function metricScope(req) {
 }
 // One row per lead: a lead entering Won twice still counts once in a selected period.
 // History remains authoritative after reopening. Legacy won_at is used only if no Won history exists.
+const wonPredicate = (from,to) => `(EXISTS (SELECT 1 FROM lead_stage_history h WHERE h.tenant_id=l.tenant_id AND h.lead_id=l.id
+    AND lower(trim(h.new_stage))='won' AND lower(trim(COALESCE(h.prev_stage,''))) <> 'won' AND h.changed_at >= ${from} AND h.changed_at < ${to})
+  OR (lower(trim(l.stage))='won' AND l.won_at >= ${from} AND l.won_at < ${to} AND NOT EXISTS
+    (SELECT 1 FROM lead_stage_history h WHERE h.tenant_id=l.tenant_id AND h.lead_id=l.id AND lower(trim(h.new_stage))='won')))`;
 const BASE = `WITH scoped AS (
  SELECT l.*, (l.created_at >= $2 AND l.created_at < $3) AS in_period,
- (EXISTS (SELECT 1 FROM lead_stage_history h WHERE h.tenant_id=l.tenant_id AND h.lead_id=l.id
-    AND lower(trim(h.new_stage))='won' AND lower(trim(COALESCE(h.prev_stage,''))) <> 'won' AND h.changed_at >= $2 AND h.changed_at < $3)
-  OR (lower(trim(l.stage))='won' AND l.won_at >= $2 AND l.won_at < $3 AND NOT EXISTS
-    (SELECT 1 FROM lead_stage_history h WHERE h.tenant_id=l.tenant_id AND h.lead_id=l.id AND lower(trim(h.new_stage))='won'))) AS won_in_period
+ ${wonPredicate('$2','$3')} AS won_in_period
  FROM leads l WHERE l.tenant_id=$1 AND ($4::uuid IS NULL OR l.assigned_to=$4)
 )`;
 const COUNTS = `COUNT(*) FILTER (WHERE in_period)::int AS total_leads,
@@ -59,4 +60,4 @@ const getWonCount = async s => (await getMetrics(s)).won;
 const getConversionRate = async s => (await getMetrics(s)).conversion_rate;
 const getUnassignedCount = async s => (await getMetrics(s)).unassigned;
 const getActiveCampaigns = async s => (await getMetrics(s)).active_campaigns;
-module.exports = { metricScope, getMetrics, getBreakdown, getLeadCounts, getWonCount, getConversionRate, getUnassignedCount, getActiveCampaigns };
+module.exports = { wonPredicate, metricScope, getMetrics, getBreakdown, getLeadCounts, getWonCount, getConversionRate, getUnassignedCount, getActiveCampaigns };

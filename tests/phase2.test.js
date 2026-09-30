@@ -70,7 +70,7 @@ test('four page endpoints expose identical shared metrics for the same scope', a
  let scopes=0;
  const metrics={metricScope:async req=>{assert.equal(req.query.period,'this_month');scopes++;return scope;},getMetrics:async s=>{assert.equal(s,scope);return shared;},getBreakdown:async()=>[]};
  const query=async sql=>({ rows: /count\(\*\)::int AS total/.test(sql)?[{total:0}] : /FROM campaigns c/.test(sql)?[] : /FROM users u/.test(sql)?[] : /FROM call_recordings/.test(sql)?[] : [new Proxy({}, {get:()=>0})] });
- const deps={'../services/metrics':metrics,'../config/db':{query},'../utils/campaignInsights':{rankCampaigns:x=>x},'../utils/followupHealth':{}};
+ const deps={'../services/followupSummary':{summary:async()=>({})},'../services/dashboardActivity':{counts:async()=>({})},'../services/metrics':metrics,'../config/db':{query},'../utils/campaignInsights':{rankCampaigns:x=>x},'../utils/followupHealth':{}};
  const reports=load('controllers/reportsController.js',deps), campaigns=load('controllers/campaignController.js',deps), coaching=load('controllers/playbookController.js',deps);
  const req={tenantId:'t',user:{role:'admin'},query:{period:'this_month'}};
  const results=[];
