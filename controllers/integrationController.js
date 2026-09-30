@@ -404,11 +404,23 @@ const facebookSubscriptionStatus = async (req, res) => {
   }
 };
 
+const facebookSyncStatus = async (req, res) => {
+  try {
+    const result = await query(`SELECT settings->>'meta_leads_last_synced_at' AS last_synced_at,
+      (COALESCE(settings->>'meta_page_id','') <> '' AND COALESCE(settings->>'meta_page_access_token','') <> '') AS configured
+      FROM tenants WHERE id=$1`, [req.tenantId]);
+    res.json({ last_synced_at: result.rows[0]?.last_synced_at || null, configured: !!result.rows[0]?.configured });
+  } catch (error) {
+    console.error('Facebook sync status error:', error.message);
+    res.status(500).json({ error: 'Failed to load sync status.' });
+  }
+};
+
 // ── POST /api/integrations/facebook/sync-leads ────────────────────────────
 const facebookSyncLeads = async (req, res) => {
   try {
-    const { created, skipped } = await syncFacebookLeadsForTenant(req.tenantId);
-    res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped });
+    const { created, skipped, last_synced_at } = await syncFacebookLeadsForTenant(req.tenantId);
+    res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped, last_synced_at });
   } catch (e) {
     if (e.code === 'NO_PAGE') return res.status(400).json({ error: e.message });
     console.error('facebookSyncLeads:', e.message);
@@ -447,3 +459,5 @@ const getCapiStats = async (req, res) => {
 };
 
 module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
+
+module.exports.facebookSyncStatus = facebookSyncStatus;

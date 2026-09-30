@@ -1,3 +1,4 @@
+const { buildLeadSearch } = require('../utils/leadSearch');
 const { duplicateGroups } = require('../services/duplicates');
 const { ingestLead } = require('../services/leadIngestion');
 const { normalizePhone, normalizeSource, normalizeLead, statusChangeTitle } = require('../utils/dataQuality');
@@ -28,7 +29,9 @@ const SORT_COLUMNS = {
 
 const getLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, page = 1, limit = 20, hide_stages, has_attachment, stalled } = req.query;
+    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, hide_stages, has_attachment, stalled } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -77,18 +80,9 @@ const getLeads = async (req, res) => {
       if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
       else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
     }
-    if (search) {
-      whereClause += ` AND (normalize(l.name, NFKC) ILIKE $${i} OR l.phone ILIKE $${i} OR l.lead_number ILIKE $${i})`;
-      params.push(`%${search.normalize('NFKC')}%`);
-      i++;
-    }
     const dateColumn = date_field === 'created_at' ? 'l.created_at' : 'COALESCE(l.lead_date, l.created_at)';
     if (date_from) { whereClause += ` AND ${dateColumn} >= $${i++}`; params.push(date_from); }
     if (date_to) { whereClause += ` AND ${dateColumn} < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
-
-    const limitParam = i++;
-    const offsetParam = i;
-    params.push(limit, offset);
 
     // pf = the lead's current pending (not-completed) follow-up, if any — feeds both the
     // follow-up_health filter above and next_followup_at below.
@@ -107,11 +101,26 @@ const getLeads = async (req, res) => {
       ) pf ON true
     `;
 
+    const searchPlan = buildLeadSearch(search, i);
+    const scopedWhere = whereClause;
+    let searchMode = searchPlan ? 'direct' : 'none';
+    if (searchPlan) {
+      params.push(...searchPlan.values);
+      i += searchPlan.values.length;
+      whereClause = `${scopedWhere} AND ${searchPlan.direct}`;
+    }
+    let countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params);
+    if (searchPlan?.fuzzy && Number(countResult.rows[0].count) === 0) {
+      searchMode = 'fuzzy';
+      whereClause = `${scopedWhere} AND (${searchPlan.fuzzy})`;
+      countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params);
+    }
     const sortColumn = SORT_COLUMNS[sort] || 'l.created_at';
     const sortDir = dir === 'asc' ? 'ASC' : 'DESC';
-    const orderClause = sort
-      ? `ORDER BY ${sortColumn} ${sortDir} NULLS LAST, l.created_at DESC`
-      : 'ORDER BY l.created_at DESC';
+    const relevance = searchPlan ? (searchMode === 'fuzzy' ? searchPlan.fuzzyRank : searchPlan.rank) + ', ' : '';
+    const orderClause = `ORDER BY ${relevance}${sortColumn} ${sortDir} NULLS LAST, l.created_at DESC, l.id`;
+    const limitParam = i++, offsetParam = i;
+    params.push(limit, offset);
 
     const leadsQuery = `
       SELECT l.*,
@@ -128,9 +137,9 @@ const getLeads = async (req, res) => {
     `;
 
     const result = await query(leadsQuery, params);
-    const countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params.slice(0, -2));
 
     res.json({
+      search_mode: searchMode,
       leads: result.rows.map(r => ({ ...r, attachment_count: parseInt(r.attachment_count), ...computeLeadSla(r) })),
       pagination: {
         total: parseInt(countResult.rows[0].count),
@@ -141,7 +150,7 @@ const getLeads = async (req, res) => {
     });
   } catch (error) {
     console.error('Get leads error:', error);
-    res.status(500).json({ error: 'Failed to fetch leads.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch leads.' });
   }
 };
 
