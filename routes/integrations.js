@@ -10,6 +10,9 @@ const { tenantContext } = require('../middleware/tenant');
 router.post('/ingest', ctrl.ingestLead);
 router.post('/google-ads/leads/:integrationId', googleAdsCtrl.receiveGoogleAdsLead);
 
+// Minimal read-only sync status does not require integration-management permission.
+router.get('/facebook/sync-status', authenticate, tenantContext, ctrl.facebookSyncStatus);
+
 // Protected routes
 router.use(authenticate, tenantContext, requirePermission('settings.manage'));
 router.get('/settings', ctrl.getSettings);
