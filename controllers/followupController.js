@@ -56,6 +56,7 @@ const getFollowups = async (req, res) => {
 // PUT /api/followups/:id
 const updateFollowup = async (req, res) => {
   try {
+    if ('next_followup_at' in req.body && !require('../utils/dateTime').validAppointmentDate(req.body.next_followup_at)) return res.status(422).json({ error: 'A valid appointment date with timezone is required.' });
     const allowedFields = ['notes', 'followup_type', 'next_followup_at', 'meeting_url'];
     const updates = [];
     const params = [req.params.id, req.tenantId];
@@ -64,7 +65,7 @@ const updateFollowup = async (req, res) => {
     for (const field of allowedFields) {
       if (req.body[field] !== undefined) {
         updates.push(`${field} = $${i++}`);
-        params.push(req.body[field]);
+        params.push(field === 'next_followup_at' ? new Date(req.body[field]).toISOString() : req.body[field]);
       }
     }
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });

@@ -464,13 +464,16 @@ const markContacted = async (req, res) => {
 };
 
 // POST /api/leads/:id/note - Add note/activity
+const { validAppointmentDate, formatDateTime } = require('../utils/dateTime');
+
 const addFollowup = async (req, res) => {
   try {
-    const { notes, followup_type, outcome, next_followup_at, whatsapp_log, meeting_url } = req.body;
+    let { notes, followup_type, outcome, next_followup_at, whatsapp_log, meeting_url } = req.body;
 
-    if (!next_followup_at) {
-      return res.status(400).json({ error: 'Follow-up date and time are required.' });
+    if (!validAppointmentDate(next_followup_at)) {
+      return res.status(400).json({ error: 'A valid follow-up date and time with timezone are required.' });
     }
+    next_followup_at = new Date(next_followup_at).toISOString();
 
     const leadCheck = await query(
       'SELECT id, name, phone, email, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2',
@@ -514,18 +517,18 @@ const addFollowup = async (req, res) => {
     }
 
     const isDemo = (followup_type || '').toLowerCase() === 'demo';
-    const demoTime = new Date(next_followup_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+    const demoTime = formatDateTime(next_followup_at, tenantSettings.timezone || 'Asia/Kolkata');
 
     await query(
-      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [req.tenantId, req.params.id,
        isDemo ? 'demo_scheduled' : 'followup_scheduled',
        isDemo ? 'Demo Scheduled' : 'Follow-up Scheduled',
        isDemo && meeting_url
          ? `Scheduled for ${demoTime} · Link: ${meeting_url}`
          : `Scheduled for ${demoTime}`,
-       req.user.id]
+       req.user.id, JSON.stringify({ scheduled_at: new Date(next_followup_at).toISOString(), meeting_url: meeting_url || null })]
     );
     recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: isDemo ? 'demo_scheduled' : 'followup_scheduled' }).catch(() => {});
 
