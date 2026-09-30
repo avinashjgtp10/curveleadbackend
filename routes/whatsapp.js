@@ -27,6 +27,15 @@ router.post('/webhook', handleWebhook);
 
 // Protected routes
 router.use(authenticate, tenantContext);
+router.put('/conversation/:leadId/attributes', async(req,res)=>{
+ try {
+ const fields=req.body.custom_fields;
+ if(!fields||typeof fields!=='object'||Array.isArray(fields)||Object.keys(fields).length>50||Object.entries(fields).some(([k,v])=>!k.trim()||k.length>100||typeof v!=='string'||v.length>2000))return res.status(422).json({error:'Attributes must be up to 50 name/text pairs.'});
+ const result=await require('../config/db').query(`UPDATE leads SET custom_fields=$1::jsonb WHERE id=$2 AND tenant_id=$3 AND ($4::boolean OR assigned_to=$5) RETURNING custom_fields`,[JSON.stringify(fields),req.params.leadId,req.tenantId,req.user.role!=='staff',req.user.id]);
+ if(!result.rows.length)return res.status(404).json({error:'Lead not found.'});
+ res.json(result.rows[0]);
+ }catch(e){res.status(500).json({error:'Save failed.'});}
+});
 router.get('/inbox', getInbox);
 router.get('/conversation/:leadId', getConversation);
 router.post('/send', sendMessage);

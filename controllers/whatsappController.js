@@ -3,7 +3,7 @@ const { normalizePhone } = require('../utils/dataQuality');
 const axios = require('axios');
 const { query } = require('../config/db');
 const { uploadToS3 } = require('../config/s3');
-const { sendTextMessage, sendTemplate, sendMediaMessage } = require('../services/whatsappService');
+const { sendTextMessage, sendTemplate, sendMediaMessage, listMessageTemplates } = require('../services/whatsappService');
 const { qualifyLead } = require('../services/groqService');
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { changeLeadStage } = require('../utils/leadStage');
@@ -77,7 +77,7 @@ const getInbox = async (req, res) => {
       `SELECT DISTINCT ON (wm.lead_id)
               wm.lead_id, wm.message, wm.direction, wm.sent_at, wm.status,
               l.name as lead_name, l.phone as lead_phone, l.lead_score, l.stage, COALESCE(l.tags, '{}') as tags,
-              l.assigned_to, u.name as assigned_to_name, l.ai_paused,
+              l.assigned_to, u.name as assigned_to_name, l.ai_paused, l.custom_fields,
               (SELECT MAX(sent_at) FROM whatsapp_messages WHERE lead_id = wm.lead_id AND direction = 'inbound') as last_inbound_at,
               (SELECT COUNT(*) FROM whatsapp_messages WHERE lead_id = wm.lead_id AND direction = 'inbound' AND read_at IS NULL) as unread_count
        FROM whatsapp_messages wm
@@ -285,6 +285,11 @@ const sendMessage = async (req, res) => {
     let result, storedText, headerMedia = null;
     if (template_name) {
       const lang = language_code || 'en_US';
+      const settings=(await query('SELECT settings FROM tenants WHERE id=$1',[req.tenantId])).rows[0]?.settings || {};
+      const templates=await listMessageTemplates(settings.whatsapp_business_account_id,settings.whatsapp_access_token);
+      const approved=templates.templates?.find(t=>t.name===template_name&&t.language===lang&&t.status==='APPROVED');
+      if(!approved)return res.status(422).json({error:'Approved template unavailable.'});
+      const templateBody=approved.components?.find(c=>c.type==='BODY')?.text || '';
       const params = Array.isArray(template_params) ? template_params.map(p => String(p ?? '')) : [];
       const mediaRow = (await query(
         'SELECT media_type, media_url FROM whatsapp_template_media WHERE tenant_id = $1 AND template_name = $2 AND language = $3',
@@ -292,9 +297,10 @@ const sendMessage = async (req, res) => {
       )).rows[0];
       headerMedia = mediaRow ? { type: mediaRow.media_type.toLowerCase(), link: mediaRow.media_url } : null;
 
+      if(params.length!==Math.max(0,...[...templateBody.matchAll(/\{\{(\d+)\}\}/g)].map(m=>Number(m[1]))))return res.status(422).json({error:'Map every template variable.'});
       result = await sendTemplate(lead.phone, template_name, lang, params.map(text => ({ type: 'text', text })), credentials, headerMedia);
-      storedText = body_text || `[Template: ${template_name}]`;
-      params.forEach((p, i) => { storedText = storedText.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), p); });
+      storedText = templateBody;
+      params.forEach((p, i) => { storedText = storedText.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), () => p); });
     } else {
       result = await sendTextMessage(lead.phone, message, credentials);
       storedText = message;
@@ -401,7 +407,9 @@ const handleWebhook = async (req, res) => {
     return res.sendStatus(403);
   }
 
-  // Always 200 OK for Meta
+  if (!process.env.META_APP_SECRET) return res.status(503).json({error:'Webhook verification is not configured.'});
+  if (!require('../utils/metaWebhookSignature').verifyMetaWebhook(req.rawBody,req.headers['x-hub-signature-256'],process.env.META_APP_SECRET)) return res.status(401).json({error:'Invalid webhook signature.'});
+  // Acknowledge authenticated Meta deliveries before processing.
   res.sendStatus(200);
 
   try {
@@ -416,13 +424,13 @@ const handleWebhook = async (req, res) => {
       for (const s of statuses) {
         const at = s.timestamp ? new Date(Number(s.timestamp) * 1000) : new Date();
         if (s.status === 'delivered') {
-          await query(`UPDATE whatsapp_messages SET status='delivered', delivered_at=$1 WHERE wa_message_id=$2`, [at, s.id]).catch(() => {});
+          await query(`UPDATE whatsapp_messages SET status=CASE WHEN status='read' THEN 'read' ELSE 'delivered' END, delivered_at=COALESCE(delivered_at,$1) WHERE wa_message_id=$2`, [at, s.id]).catch(() => {});
         } else if (s.status === 'read') {
-          await query(`UPDATE whatsapp_messages SET status='read', read_at=$1 WHERE wa_message_id=$2`, [at, s.id]).catch(() => {});
+          await query(`UPDATE whatsapp_messages SET status='read', read_at=COALESCE(read_at,$1), delivered_at=COALESCE(delivered_at,$1) WHERE wa_message_id=$2`, [at, s.id]).catch(() => {});
         } else if (s.status === 'failed') {
           const err = s.errors?.[0];
           const detail = err ? `${err.code ? `[${err.code}] ` : ''}${err.title || err.message || 'Unknown error'}${err.error_data?.details ? ` — ${err.error_data.details}` : ''}` : null;
-          await query(`UPDATE whatsapp_messages SET status='failed', error_detail=$2 WHERE wa_message_id=$1`, [s.id, detail]).catch(() => {});
+          await query(`UPDATE whatsapp_messages SET status='failed', error_detail=$2 WHERE wa_message_id=$1 AND status NOT IN ('read','delivered')`, [s.id, detail]).catch(() => {});
         }
       }
     }
@@ -440,18 +448,13 @@ const handleWebhook = async (req, res) => {
       const fromPhone = msg.from; // e.g. "919876543210"
       const waMessageId = msg.id;
 
-      // If the message arrived on a rep's own number, scope the lookup to their
-      // tenant. Otherwise fall back to matching by phone across all tenants
-      // (shared tenant-level number, or a number we don't recognize).
-      const leadResult = numberOwner
-        ? await query(
-            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out, source, source_detail FROM leads WHERE tenant_id = $1 AND (phone = $2 OR phone = $3 OR phone = chr(43) || $2) LIMIT 1',
-            [numberOwner.tenant_id, fromPhone, fromPhone.replace(/^91/, '')]
-          )
-        : await query(
-            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out, source, source_detail FROM leads WHERE phone = $1 OR phone = $2 OR phone = chr(43) || $1 LIMIT 1',
-            [fromPhone, fromPhone.replace(/^91/, '')]
-          );
+      // A receiving number identifies the workspace before looking up any sender.
+      const receivingTenantId=numberOwner?.tenant_id || await findTenantBySharedNumber(receivingNumberId);
+      if(!receivingTenantId)continue;
+      const leadResult=await query(
+        'SELECT id,tenant_id,name,assigned_to,ai_paused,opted_out,source,source_detail,phone FROM leads WHERE tenant_id=$1 AND (phone=$2 OR phone=$3 OR phone=chr(43)||$2) LIMIT 1',
+        [receivingTenantId,fromPhone,fromPhone.replace(/^91/,'')]
+      );
 
       let lead = leadResult.rows[0] || null;
 
@@ -484,12 +487,16 @@ const handleWebhook = async (req, res) => {
       // instead of "[button]", and media gets downloaded and re-hosted on our S3.
       const { text: messageText, mediaUrl, messageType } = await resolveInboundContent({ msg, tenantId: lead.tenant_id, assignedTo: lead.assigned_to });
 
-      // Save inbound message
-      await query(
-        `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, wa_message_id, status, sent_at)
-         VALUES ($1, $2, 'inbound', $3, $4, $5, $6, 'delivered', NOW())`,
-        [lead.tenant_id, lead.id, messageText, messageType, mediaUrl, waMessageId]
+      // Claim provider retries and store the inbound message in one atomic statement.
+      const savedInbound=await query(
+        `WITH claimed AS (
+          INSERT INTO inbound_reply_claims(tenant_id,message_id) VALUES($1,$7)
+          ON CONFLICT DO NOTHING RETURNING message_id
+        ) INSERT INTO whatsapp_messages(tenant_id,lead_id,direction,message,message_type,media_url,wa_message_id,status,sent_at)
+          SELECT $1,$2,'inbound',$3,$4,$5,$6,'delivered',NOW() FROM claimed RETURNING id`,
+        [lead.tenant_id,lead.id,messageText,messageType,mediaUrl,waMessageId,`received:${waMessageId}`]
       );
+      if(!savedInbound.rows.length)continue;
 
       // A reply from the lead means any drip sequence has done its job — stop it.
       // If the reply is actually an opt-out request, stop everything permanently
@@ -513,8 +520,9 @@ const handleWebhook = async (req, res) => {
       const aiEnabled = tenant?.settings?.ai_qualification_enabled;
 
       // Away message: outside business hours, at most once per 12h per lead. If sent, the AI skips this turn.
-      let awaySent = false;
-      if (tenant?.settings?.whatsapp_away_enabled && tenant.settings.whatsapp_away_message && !lead.opted_out
+      let awaySent = await require('../services/inboundReplies').replyToInbound({lead,text:messageText,messageId:waMessageId,settings:tenant?.settings || {}});
+      await query("INSERT INTO integration_health(tenant_id,provider,last_lead_received_at,token_valid) VALUES($1,'whatsapp',now(),true) ON CONFLICT(tenant_id,provider) DO UPDATE SET last_lead_received_at=now(),token_valid=true",[lead.tenant_id]);
+      if (!awaySent && !lead.ai_paused && tenant?.settings?.whatsapp_away_enabled && tenant.settings.whatsapp_away_message && !lead.opted_out
           && !isWithinBusinessHours(tenant.settings.whatsapp_business_hours)) {
         try {
           const recent = await query(
