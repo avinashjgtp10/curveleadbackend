@@ -320,6 +320,7 @@ test("every Phase 4 feature API is tenant scoped and config writes are behind se
       saveConfig: scoped,
       viewContent: async () => null,
     },
+    "../services/workspaceOverview": {overview:scoped,saveOnboarding:scoped},
     "../services/outgoingWebhooks": { createWebhook: scoped },
     "../config/db": {
       query: async (sql, p) => {
@@ -340,11 +341,11 @@ test("every Phase 4 feature API is tenant scoped and config writes are behind se
     );
     assert.ok(response.code < 500, `${method} ${url}`);
     if (url === "/content/:token") assert.equal(count, 0);
-    else if (["/health", "/canned-replies"].includes(url))
+    else if (["/health", "/canned-replies", "/overview"].includes(url))
       assert.equal(count, 2);
     else assert.equal(count, 3);
   }
-  assert.equal(routes.length, 11);
+  assert.equal(routes.length, 13);
 });
 module.exports = { load };
 

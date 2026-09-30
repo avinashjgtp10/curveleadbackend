@@ -18,7 +18,7 @@ test('ranked SQL search: exact/prefix/contains, Unicode, literal patterns, fallb
    CREATE TABLE users(id uuid PRIMARY KEY,name text);
    CREATE TABLE campaigns(id uuid PRIMARY KEY,name text,source text);
    CREATE TABLE lead_stages(id uuid,name text,tenant_id uuid,pos int,is_won boolean,is_lost boolean);
-   CREATE TABLE lead_followups(lead_id uuid,next_followup_at timestamp,followup_type text,is_completed boolean);
+   CREATE TABLE lead_followups(lead_id uuid,next_followup_at timestamp,followup_type text,is_completed boolean,dismissed_at timestamptz);
    CREATE TABLE lead_attachments(lead_id uuid);`);
   const migration = fs.readFileSync(path.join(__dirname,'../models/migration_phase3_search.sql'),'utf8');
   await query(migration); await query(migration);
