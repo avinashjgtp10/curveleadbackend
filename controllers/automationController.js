@@ -25,6 +25,14 @@ const getSequences = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// Every step must carry a message (or be AI-written): the runner sends the
+// message inside the 24h window, so a template-only step would send blank text.
+const invalidSteps = (steps) => (steps || []).map((s, i) => (s?.ai_generated || s?.message?.trim() ? null : i + 1)).filter(Boolean);
+const stepsError = (steps) => {
+  const bad = invalidSteps(steps);
+  return bad.length ? `Step ${bad.join(', ')} needs a message.` : null;
+};
+
 const saveSteps = async (client, tenantId, sequenceId, steps) => {
   await client.query('DELETE FROM automation_sequence_steps WHERE sequence_id = $1', [sequenceId]);
   for (let i = 0; i < (steps || []).length; i++) {
@@ -46,6 +54,8 @@ const createSequence = async (req, res) => {
   try {
     const { name, description, steps } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'Name is required.' });
+    const stepErr = stepsError(steps);
+    if (stepErr) return res.status(422).json({ error: stepErr });
 
     const sequenceId = await transaction(async (client) => {
       const result = await client.query(
@@ -64,6 +74,8 @@ const createSequence = async (req, res) => {
 const updateSequence = async (req, res) => {
   try {
     const { name, description, is_active, steps } = req.body;
+    const stepErr = steps !== undefined && stepsError(steps);
+    if (stepErr) return res.status(422).json({ error: stepErr });
 
     const owned = await query('SELECT id FROM automation_sequences WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
     if (!owned.rows.length) return res.status(404).json({ error: 'Sequence not found.' });

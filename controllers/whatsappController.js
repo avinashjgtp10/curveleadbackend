@@ -72,25 +72,30 @@ const getInbox = async (req, res) => {
     const params = [req.tenantId];
     if (req.user.role === 'staff') { where += ' AND l.assigned_to = $2'; params.push(req.user.id); }
 
-    // Group by lead, get latest message per lead
+    // Latest message per lead, then the 100 most recently active conversations.
+    // DISTINCT ON must order by lead_id, so the recency limit is applied outside
+    // it — limiting inside would keep an arbitrary 100 by UUID order.
     const result = await query(
-      `SELECT DISTINCT ON (wm.lead_id)
-              wm.lead_id, wm.message, wm.direction, wm.sent_at, wm.status,
+      `SELECT c.lead_id, c.message, c.direction, c.sent_at, c.status,
               l.name as lead_name, l.phone as lead_phone, l.lead_score, l.stage, COALESCE(l.tags, '{}') as tags,
               l.assigned_to, u.name as assigned_to_name, l.ai_paused, l.custom_fields,
-              (SELECT MAX(sent_at) FROM whatsapp_messages WHERE lead_id = wm.lead_id AND direction = 'inbound') as last_inbound_at,
-              (SELECT COUNT(*) FROM whatsapp_messages WHERE lead_id = wm.lead_id AND direction = 'inbound' AND read_at IS NULL) as unread_count
-       FROM whatsapp_messages wm
-       JOIN leads l ON wm.lead_id = l.id
+              (SELECT MAX(sent_at) FROM whatsapp_messages WHERE lead_id = c.lead_id AND direction = 'inbound') as last_inbound_at,
+              (SELECT COUNT(*) FROM whatsapp_messages WHERE lead_id = c.lead_id AND direction = 'inbound' AND read_at IS NULL) as unread_count
+       FROM (
+         SELECT DISTINCT ON (wm.lead_id) wm.lead_id, wm.message, wm.direction, wm.sent_at, wm.status
+         FROM whatsapp_messages wm
+         JOIN leads l ON wm.lead_id = l.id
+         ${where}
+         ORDER BY wm.lead_id, wm.sent_at DESC
+       ) c
+       JOIN leads l ON l.id = c.lead_id
        LEFT JOIN users u ON l.assigned_to = u.id
-       ${where}
-       ORDER BY wm.lead_id, wm.sent_at DESC
+       ORDER BY c.sent_at DESC NULLS LAST
        LIMIT 100`,
       params
     );
 
-    // Sort by most recent
-    const conversations = result.rows.sort((a, b) => new Date(b.sent_at) - new Date(a.sent_at));
+    const conversations = result.rows;
     const tenantRow = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     res.json({ conversations, ai_enabled: !!tenantRow.rows[0]?.settings?.ai_qualification_enabled });
   } catch (error) {
@@ -357,12 +362,13 @@ const startChat = async (req, res) => {
     const ingestion = await ingestLead(req.tenantId, { name: req.body.name || 'Unknown', phone, source: 'manual', stage: 'new', assigned_to: req.user.role === 'staff' ? req.user.id : null });
     const lead = ingestion.lead;
     if (req.user.role === 'staff' && lead.assigned_to !== req.user.id) return res.status(403).json({ error: 'This contact is assigned to another team member.' });
-    if (ingestion.duplicate) return res.json({ lead_id: lead.id, created: false });
+    const contact = { lead_id: lead.id, lead_name: lead.name, lead_phone: lead.phone, assigned_to: lead.assigned_to };
+    if (ingestion.duplicate) return res.json({ ...contact, created: false });
 
     applyAssignmentRules({ tenantId: req.tenantId, lead }).then(() => notifyNewLead({ tenantId: req.tenantId, lead })).catch(() => {});
     checkNewLeadTriggers({ tenantId: req.tenantId, lead }).catch(() => {});
 
-    res.status(201).json({ lead_id: lead.id, created: true });
+    res.status(201).json({ ...contact, created: true });
   } catch (error) {
     console.error('Start chat error:', error);
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to start chat.' });
