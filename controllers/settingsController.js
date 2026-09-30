@@ -5,6 +5,7 @@ const { uploadToS3 } = require('../config/s3');
 // Surfaces a few settings-JSONB fields at the top level for frontend convenience.
 const withExtras = (row) => ({
   ...row,
+  settings: Object.fromEntries(Object.entries(row?.settings || {}).filter(([key])=> !/token|secret|api_key|password/i.test(key))),
   dedupe_mode: row?.settings?.dedupe_mode || 'phone',
   bank_details: row?.settings?.bank_details || {},
   daily_report_enabled: !!row?.settings?.daily_report_enabled,

@@ -12,7 +12,6 @@ const { createNotification, notifyNewLeadToAdmins } = require('./notificationCon
 const { checkNewLeadTriggers, checkStageChangeTriggers, checkLeadStatusTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
-const { sendLeadConversionEvent } = require('../utils/metaCapi');
 
 // GET /api/leads - with filters
 const SORT_COLUMNS = {
@@ -312,7 +311,6 @@ const updateLead = async (req, res) => {
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
 
     // Auto-set won_at / lost_at based on stage's is_won / is_lost flag
-    let stageMetaEvent = null;
     let stageIsLost = false;
     let stageIsWon = false;
     if (req.body.stage) {
@@ -320,7 +318,6 @@ const updateLead = async (req, res) => {
         'SELECT is_won, is_lost, meta_event_name FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
         [req.tenantId, req.body.stage]
       );
-      stageMetaEvent = stageInfo.rows[0]?.meta_event_name || null;
       stageIsLost = !!stageInfo.rows[0]?.is_lost;
       stageIsWon = !!stageInfo.rows[0]?.is_won;
       if (stageInfo.rows[0]?.is_won && req.body.stage !== prev.stage) updates.push('won_at = NOW()');
@@ -355,9 +352,7 @@ const updateLead = async (req, res) => {
       if ((prev.stage || '').toLowerCase() === 'new') {
         recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: 'stage_change' }).catch(() => {});
       }
-      if (result.rows[0].meta_lead_id && stageMetaEvent) {
-        sendLeadConversionEvent({ tenantId: req.tenantId, lead: result.rows[0], eventName: stageMetaEvent }).catch(() => {});
-      }
+
       checkStageChangeTriggers({
         tenantId: req.tenantId, leadId: req.params.id, newStage: req.body.stage, isLost: stageIsLost, isWon: stageIsWon,
       }).catch(() => {});
@@ -1133,8 +1128,8 @@ const importLeads = async (req, res) => {
     // Normalise header key → field name
     const norm = (k) => String(k).toLowerCase().trim().replace(/[\s\-\/]+/g, '_').replace(/[^a-z0-9_]/g, '');
     const FIELD_MAP = {
-      name:       ['name','full_name','customer_name','lead_name','contact_name','client_name'],
-      phone:      ['phone','mobile','contact','phone_number','mobile_number','cell','telephone','tel'],
+      name:       ['customer','contact_full_name','name','full_name','customer_name','lead_name','contact_name','client_name'],
+      phone:      ['whatsapp_number','whatsapp','contact_number','phone','mobile','contact','phone_number','mobile_number','cell','telephone','tel'],
       email:      ['email','email_address','e_mail','mail'],
       source:     ['source','lead_source','channel','medium'],
       stage:      ['stage','status','lead_stage','pipeline_stage'],
@@ -1151,6 +1146,13 @@ const importLeads = async (req, res) => {
       if (match) keyMap[match] = field;
     }
 
+    let mapping;
+    try { mapping=req.body.column_mapping ? JSON.parse(req.body.column_mapping) : null; } catch { return res.status(422).json({error:'Invalid column mapping.'}); }
+    if(mapping) {
+      if(typeof mapping!=='object'||Array.isArray(mapping)||new Set(Object.values(mapping)).size!==Object.values(mapping).length||Object.values(mapping).some(f=>!Object.hasOwn(FIELD_MAP,f))) return res.status(422).json({error:'Invalid mapped field.'});
+      for(const key of Object.keys(keyMap))delete keyMap[key];
+      for(const [header,field] of Object.entries(mapping))if(Object.hasOwn(rows[0],header))keyMap[header]=field;
+    }
     // Fetch valid stages for this tenant
     const stagesResult = await query(
       'SELECT LOWER(name) as name FROM lead_stages WHERE tenant_id = $1 AND is_active = true',
@@ -1160,9 +1162,24 @@ const importLeads = async (req, res) => {
 
     const invalidPhones = rows.flatMap((row, index) => {
       const phoneKey = Object.keys(keyMap).find(k => keyMap[k] === 'phone');
-      try { normalizePhone(row[phoneKey]); return []; }
+      try { normalizePhone(String(row[phoneKey]??'').replace(/^'(?=\+?\d)/,'')); return []; }
       catch (error) { return [{ row: index + 2, error: error.message }]; }
     });
+    if(req.body.dry_run==='true') {
+      const mode=(await query('SELECT settings FROM tenants WHERE id=$1',[req.tenantId])).rows[0]?.settings?.dedupe_mode || 'phone';
+      const existing=(await query('SELECT phone,email FROM leads WHERE tenant_id=$1',[req.tenantId])).rows;
+      const phones=new Set(),emails=new Set();
+      for(const r of existing) {try {phones.add(normalizePhone(r.phone));}catch {} if(r.email)emails.add(r.email.trim().toLowerCase());}
+      const preview=rows.map((row,index)=>{
+        const lead=Object.fromEntries(Object.entries(keyMap).map(([k,f])=>[f,String(row[k]??'').trim()]));
+        let error=null;try {lead.phone=normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,''));}catch(e){error=e.message;}
+        if(!lead.name)error='Name is required.';
+        const duplicate=!error&&mode!=='off'&&(phones.has(lead.phone)||(mode==='phone_or_email'&&lead.email&&emails.has(lead.email.toLowerCase())));
+        if(!error) {phones.add(lead.phone);if(lead.email)emails.add(lead.email.toLowerCase());}
+        return {row:index+2,name:lead.name,phone:lead.phone,action:error?'invalid':duplicate?'merge':'create',error};
+      });
+      return res.json({dry_run:true,headers:Object.keys(rows[0]),mapping:keyMap,total:rows.length,preview,invalid:preview.filter(r=>r.error).length,duplicates:preview.filter(r=>r.action==='merge').length});
+    }
     if (invalidPhones.length) return res.status(422).json({ error: 'Import contains invalid phone numbers. No rows were imported.', errors: invalidPhones });
 
     let inserted = 0, skipped = 0;
@@ -1185,7 +1202,7 @@ const importLeads = async (req, res) => {
       // Require at least name
       if (!lead.name) { addSkip(rowNumber, '', 'Missing name'); continue; }
 
-      try { lead.phone = normalizePhone(lead.phone); }
+      try { lead.phone = normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,'')); }
       catch (error) { errors.push({ row: rowNumber, error: error.message }); addSkip(rowNumber, lead.name, error.message); continue; }
 
       // Validate/default stage
@@ -1226,69 +1243,20 @@ const importLeads = async (req, res) => {
 // GET /api/leads/export — download all matching leads as CSV
 const exportLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, assigned_to, search, date_field, date_from, date_to } = req.query;
-
-    let whereClause = 'WHERE l.tenant_id = $1';
-    const params = [req.tenantId];
-    let i = 2;
-
-    if (req.user.role === 'staff') {
-      whereClause += ` AND l.assigned_to = $${i++}`;
-      params.push(req.user.id);
+    const rows=[];let page=1,total=Infinity;
+    while(rows.length<total) {
+      let data,code=200;
+      await getLeads({...req,query:{...req.query,page,limit:1000}}, {status(c){code=c;return this;},json(d){data=d;}});
+      if(code!==200)return res.status(code).json(data);
+      const leads=data.leads || [];total=Number(data.pagination?.total)||0;
+      rows.push(...leads);if(!leads.length)break;page++;
     }
-
-    if (stage)       { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`;       params.push(stage); }
-    if (lead_status) { whereClause += ` AND LOWER(l.lead_status) = LOWER($${i++})`; params.push(lead_status); }
-    if (source)      { whereClause += ` AND l.source = $${i++}`;                    params.push(source); }
-    if (score)       { whereClause += ` AND l.lead_score = $${i++}`;                params.push(score); }
-    if (req.user.role !== 'staff') {
-      if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
-      else if (assigned_to)             { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
-    }
-    if (search) {
-      whereClause += ` AND (normalize(l.name, NFKC) ILIKE $${i} OR l.phone ILIKE $${i})`;
-      params.push(`%${search.normalize('NFKC')}%`);
-      i++;
-    }
-    const dateCol = date_field === 'created_at' ? 'l.created_at' : 'COALESCE(l.lead_date, l.created_at)';
-    if (date_from) { whereClause += ` AND ${dateCol} >= $${i++}`;                       params.push(date_from); }
-    if (date_to)   { whereClause += ` AND ${dateCol} < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
-
-    const result = await query(
-      `SELECT l.name, l.phone, l.email, l.location, l.source, l.stage, l.lead_status, l.lead_score,
-              u.name as assigned_to_name, l.deal_value, l.notes, l.lost_reason,
-              TO_CHAR(l.created_at, 'DD-MM-YYYY') as created_at,
-              TO_CHAR(l.last_contacted_at, 'DD-MM-YYYY') as last_contacted_at
-       FROM leads l
-       LEFT JOIN users u ON l.assigned_to = u.id
-       ${whereClause}
-       ORDER BY l.created_at DESC
-       LIMIT 10000`,
-      params
-    );
-
-    const esc = (v) => {
-      if (v == null) return '';
-      const s = String(v);
-      return (s.includes(',') || s.includes('"') || s.includes('\n'))
-        ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-
-    const headers = ['Name','Phone','Email','Location','Source','Stage','Status','Score','Assigned To','Deal Value','Notes','Lost Reason','Created','Last Contacted'];
-    const rows = result.rows.map(r =>
-      [r.name,r.phone,r.email,r.location,r.source,r.stage,r.lead_status,r.lead_score,
-       r.assigned_to_name,r.deal_value,r.notes,r.lost_reason,r.created_at,r.last_contacted_at]
-      .map(esc).join(',')
-    );
-
-    const csv = [headers.join(','), ...rows].join('\n');
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="leads_export.csv"`);
-    res.send(csv);
-  } catch (error) {
-    console.error('Export leads error:', error);
-    res.status(500).json({ error: 'Failed to export leads.' });
-  }
+    const fields=['name','phone','email','location','source','stage','lead_status','lead_score','assigned_to_name','deal_value','notes','lost_reason','created_at','last_contacted_at'];
+    const esc=v=>'"'+String(v instanceof Date ? v.toISOString() : v??'').replace(/^[=+@-]/,"'$&").replace(/"/g,'""')+'"';
+    res.setHeader('Content-Type','text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition','attachment; filename="leads_export.csv"');
+    res.send([fields.join(','),...rows.map(r=>fields.map(f=>esc(r[f])).join(','))].join('\r\n'));
+  } catch(error) {console.error('Export leads:',error.message);res.status(500).json({error:'Export failed.'});}
 };
 
 module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, getDuplicateLeads, mergeDuplicateLeads, importLeads, getImportTemplate, getLeadStats, exportLeads, logCallClick, markContacted };

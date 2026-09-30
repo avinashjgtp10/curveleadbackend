@@ -1,5 +1,5 @@
 const path = require('path');
-const { query } = require('../config/db');
+const { query, transaction } = require('../config/db');
 const { sendTemplate, listMessageTemplates, createMessageTemplate, uploadTemplateMedia } = require('../services/whatsappService');
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 const { uploadToS3 } = require('../config/s3');
@@ -211,6 +211,14 @@ const aiDraftTemplate = async (req, res) => {
 
 // Sends a template to a set of leads, one by one. Shared by the immediate send and the scheduled-send job.
 const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, language_code, body_text, mapping }) => {
+  const { wabaId, accessToken } = await getWhatsappCreds(tenantId);
+  const list = await listMessageTemplates(wabaId, accessToken);
+  const approved = list.templates?.find(t => t.name===template_name && t.language===(language_code||'en_US') && t.status==='APPROVED');
+  if (!approved) throw Object.assign(new Error('Template is not approved or unavailable.'), {status:422});
+  body_text = approved.components?.find(c=>c.type==='BODY')?.text || '';
+  const positions=[...body_text.matchAll(/\{\{(\d+)\}\}/g)].map(m=>Number(m[1]));
+  if (mapping.length!==Math.max(0,...positions)) throw Object.assign(new Error('Map every template variable.'),{status:422});
+  const report=(await query('INSERT INTO whatsapp_broadcast_reports(tenant_id,template_name,recipients) VALUES($1,$2,$3) RETURNING id',[tenantId,template_name,lead_ids.length])).rows[0];
   const needsAssignedName = mapping.some(m => m.source === 'field' && m.value === 'assigned_to_name');
   // Opt-in enforcement is per tenant (Opt-ins tab); the opt-in column is only read when it's on.
   const requireOptIn = !!(await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]))
@@ -219,8 +227,8 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
     `SELECT l.id, l.name, l.phone, l.email, l.location, l.stage, l.assigned_to, l.opted_out${requireOptIn ? ', l.whatsapp_opt_in_at' : ''}${needsAssignedName ? ', u.name as assigned_to_name' : ''}
      FROM leads l
      ${needsAssignedName ? 'LEFT JOIN users u ON l.assigned_to = u.id' : ''}
-     WHERE l.tenant_id = $1 AND l.id = ANY($2::uuid[])`,
-    [tenantId, lead_ids]
+     WHERE l.tenant_id = $1 AND l.id = ANY($2::uuid[]) AND EXISTS(SELECT 1 FROM users sender WHERE sender.id=$3 AND sender.tenant_id=l.tenant_id AND sender.is_active=true AND (sender.role IN ('admin','super_admin') OR l.assigned_to=sender.id))`,
+    [tenantId, lead_ids,userId]
   );
 
   const mediaRow = (await query(
@@ -229,9 +237,9 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
   )).rows[0];
   const headerMedia = mediaRow ? { type: mediaRow.media_type.toLowerCase(), link: mediaRow.media_url } : null;
 
-  const credCache = new Map();
+  const credCache = new Map(), limitCache = new Map();
   const results = [];
-  let sent = 0, failed = 0;
+  let sent = 0, failed = lead_ids.length-leadsResult.rows.length;
 
   for (const lead of leadsResult.rows) {
     try {
@@ -239,28 +247,41 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
       if (lead.opted_out) throw new Error('Lead has opted out of WhatsApp messages.');
       if (requireOptIn && !lead.whatsapp_opt_in_at) throw new Error('No WhatsApp opt-in on record for this lead.');
 
-      const parameters = mapping.map(m => ({
-        type: 'text',
-        text: String(m.source === 'fixed' ? (m.value || '') : (lead[m.value] || '')),
-      }));
-
       const credKey = lead.assigned_to || 'tenant';
       if (!credCache.has(credKey)) {
         credCache.set(credKey, await resolveWhatsAppCredentials(tenantId, lead.assigned_to));
       }
       const credentials = credCache.get(credKey);
 
+      if(!limitCache.has(credKey)) {
+        const settings=(await query('SELECT settings FROM tenants WHERE id=$1',[tenantId])).rows[0]?.settings || {};
+        limitCache.set(credKey,await require('../utils/messagingLimit').messagingLimit(credentials,settings.whatsapp_messaging_limit));
+      }
+      await transaction(async client=>{
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`wa-quota:${tenantId}`]);
+        const limit=limitCache.get(credKey);
+        if (!Number.isInteger(limit)||limit<1) throw new Error('Set the verified WhatsApp messaging limit in Settings before broadcasting.');
+        const quota=(await client.query("SELECT count(*)::int n,COALESCE(bool_or(phone=$2),false) known FROM (SELECT phone FROM whatsapp_quota_claims WHERE tenant_id=$1 AND claimed_at>now()-interval '24 hours' UNION SELECT l.phone FROM whatsapp_messages m JOIN leads l ON l.id=m.lead_id AND l.tenant_id=m.tenant_id WHERE m.tenant_id=$1 AND m.direction='outbound' AND m.status IN ('sent','delivered','read') AND m.sent_at>now()-interval '24 hours') recipients",[tenantId,lead.phone])).rows[0];
+        if(!quota.known&&quota.n>=limit)throw new Error('Workspace messaging limit reached.');
+        await client.query('INSERT INTO whatsapp_quota_claims(tenant_id,phone) VALUES($1,$2) ON CONFLICT(tenant_id,phone) DO UPDATE SET claimed_at=now()',[tenantId,lead.phone]);
+      });
+      const parameters = mapping.map(m => ({
+        type: 'text',
+        text: String(m.source === 'fixed' ? (m.value || '') : (lead[m.value] || '')),
+      }));
+
+
       const sendResult = await sendTemplate(lead.phone, template_name, language_code || 'en_US', parameters, credentials, headerMedia);
 
       let renderedMessage = body_text || `[Template: ${template_name}]`;
       parameters.forEach((p, i) => {
-        renderedMessage = renderedMessage.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), p.text);
+        renderedMessage = renderedMessage.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), () => p.text);
       });
 
       await query(
-        `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, template_name, wa_message_id, status, sent_by)
-         VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,$7,$8)`,
-        [tenantId, lead.id, renderedMessage, headerMedia?.link || null, template_name, sendResult.wa_message_id || null, sendResult.success ? 'sent' : 'failed', userId]
+        `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, media_url, template_name, wa_message_id, status, sent_by, broadcast_id, broadcast_sent)
+         VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,$7,$8,$9,$10)`,
+        [tenantId, lead.id, renderedMessage, headerMedia?.link || null, template_name, sendResult.wa_message_id || null, sendResult.success ? 'sent' : 'failed', userId,report.id,sendResult.success===true]
       );
 
       if (sendResult.success) {
@@ -278,7 +299,8 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
     await new Promise(r => setTimeout(r, 300));
   }
 
-  return { sent, failed, results };
+  await query('UPDATE whatsapp_broadcast_reports SET sent=$2,failed=$3 WHERE id=$1',[report.id,sent,failed]);
+  return { sent, failed, results, broadcast_id: report.id };
 };
 
 // POST /api/whatsapp/broadcast/templates/image-prompt — a ready-to-use image prompt for the template's
@@ -317,6 +339,7 @@ const sendBroadcast = async (req, res) => {
 
     if (!Array.isArray(lead_ids) || !lead_ids.length) return res.status(400).json({ error: 'lead_ids required.' });
     if (lead_ids.length > 250) return res.status(400).json({ error: 'Max 250 leads per broadcast.' });
+    if (new Set(lead_ids).size!==lead_ids.length || lead_ids.some(id=>typeof id!=='string'||!/^[0-9a-f-]{36}$/i.test(id))) return res.status(422).json({error:'Invalid or repeated lead IDs.'});
     if (!template_name) return res.status(400).json({ error: 'template_name required.' });
 
     const mapping = Array.isArray(variable_mapping) ? [...variable_mapping] : [];
@@ -329,6 +352,8 @@ const sendBroadcast = async (req, res) => {
     const sequential = mapping.every((m, i) => m.position === i + 1);
     if (mapping.length && !sequential) return res.status(400).json({ error: 'variable_mapping positions must be sequential starting at 1.' });
 
+    const scoped=await query("SELECT id FROM leads WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND ($3::boolean OR assigned_to=$4)",[req.tenantId,lead_ids,req.user.role!=='staff',req.user.id]);
+    if(scoped.rows.length!==lead_ids.length)return res.status(404).json({error:'Some leads are unavailable.'});
     const scheduledAt = req.body.scheduled_at ? new Date(req.body.scheduled_at) : null;
     if (scheduledAt) {
       const inMs = scheduledAt.getTime() - Date.now();
@@ -351,7 +376,7 @@ const sendBroadcast = async (req, res) => {
       tenantId: req.tenantId, userId: req.user.id, lead_ids, template_name, language_code, body_text, mapping,
     });
     res.json({ sent, failed, results });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) { console.error(e); res.status(e.status||500).json({ error: e.status?e.message:'Failed.' }); }
 };
 
 module.exports = { getSendableTemplates, getImagePrompt, generateHeaderImages, executeBroadcast, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };

@@ -39,7 +39,7 @@ test('real SQL: migration reruns, period wins/sources/scoping, ingestion and mer
  assert.equal(custom.from.toISOString(),'2026-08-31T18:30:00.000Z');assert.equal(custom.to.toISOString(),'2026-09-30T18:30:00.000Z');
  const db={query,transaction:async fn=>{await query('BEGIN');try{const v=await fn(client);await query('COMMIT');return v;}catch(e){await query('ROLLBACK');throw e;}}};
  let n=1;
- const ingest=load('services/leadIngestion.js',{'../config/db':db,'../utils/dataQuality':quality,'../utils/leadNumber':{nextLeadNumber:async()=>n++}}).ingestLead;
+ const ingest=load('services/leadIngestion.js',{'../config/db':db,'../utils/dataQuality':quality,'../utils/leadNumber':{nextLeadNumber:async()=>n++},'../utils/leadAssignment':{assignInTransaction:async(client,tenant,lead)=>lead}}).ingestLead;
  const dup=await ingest(tid,{name:'Again',phone:'+918980235151',source:'Manual',notes:'Second submission'},{submissionKey:'test:1'});
  assert.equal(dup.duplicate,true);assert.equal(dup.lead.id,ids[0].id);
  await ingest(tid,{name:'Again',phone:'918980235151',source:'manual'},{submissionKey:'test:1'});
@@ -63,7 +63,7 @@ test('real SQL: migration reruns, period wins/sources/scoping, ingestion and mer
  const clients=[new Client({connectionString:url}),new Client({connectionString:url})];
  try {
   await Promise.all(clients.map(async c=>{await c.connect();await c.query(`SET search_path TO ${schema}`);}));
-  const writers=clients.map(c=>load('services/leadIngestion.js',{'../config/db':{transaction:async fn=>{await c.query('BEGIN');try{const result=await fn(c);await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK');throw e;}}},'../utils/dataQuality':quality,'../utils/leadNumber':{nextLeadNumber:async()=>n++}}).ingestLead);
+  const writers=clients.map(c=>load('services/leadIngestion.js',{'../config/db':{transaction:async fn=>{await c.query('BEGIN');try{const result=await fn(c);await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK');throw e;}}},'../utils/dataQuality':quality,'../utils/leadNumber':{nextLeadNumber:async()=>n++},'../utils/leadAssignment':{assignInTransaction:async(client,tenant,lead)=>lead}}).ingestLead);
   const concurrent=await Promise.all(writers.map(write=>write(tid,{name:'Race',phone:'9876123450',source:'api'})));
   assert.equal(concurrent.filter(r=>r.duplicate).length,1);
   assert.equal(concurrent[0].lead.id,concurrent[1].lead.id);

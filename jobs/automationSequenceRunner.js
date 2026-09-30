@@ -36,7 +36,7 @@ const runAutomationSequences = async () => {
       JOIN leads l ON l.id = e.lead_id
       JOIN tenants t ON t.id = e.tenant_id
       WHERE e.status = 'active' AND e.next_send_at <= NOW()
-        AND l.opted_out = false AND l.automation_unresponsive = false
+        AND COALESCE(l.ai_paused,false) = false AND l.opted_out = false AND l.automation_unresponsive = false
     `);
 
     for (const row of due.rows) {
@@ -78,6 +78,7 @@ const runAutomationSequences = async () => {
         const lead = { name: row.name, phone: row.phone, email: row.email, location: row.location, source: row.source };
         let message = substituteVars(step.message, lead);
 
+        if ((await query('SELECT ai_paused FROM leads WHERE id=$1 AND tenant_id=$2',[row.lead_id,row.tenant_id])).rows[0]?.ai_paused) continue;
         if (step.channel === 'whatsapp' && row.phone) {
           const credentials = settings.whatsapp_phone_number_id && settings.whatsapp_access_token
             ? { phone_number_id: settings.whatsapp_phone_number_id, access_token: settings.whatsapp_access_token }
@@ -173,7 +174,7 @@ const runAutomationSequences = async () => {
             if (bodyComponent?.text) {
               renderedMessage = bodyComponent.text;
               parameters.forEach((p, i) => {
-                renderedMessage = renderedMessage.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), p.text);
+                renderedMessage = renderedMessage.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), () => p.text);
               });
             }
             await query(
