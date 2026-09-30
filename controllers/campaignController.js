@@ -1,39 +1,13 @@
+const { normalizeSource } = require('../utils/dataQuality');
+const { metricScope, getMetrics, getBreakdown } = require('../services/metrics');
 const { query } = require('../config/db');
 const { rankCampaigns } = require('../utils/campaignInsights');
-
-// Lightweight, unfiltered/unpaginated metrics for every campaign in the tenant —
-// used only as the baseline other campaigns get compared against for verdicts.
-const getBaselineMetrics = async (tenantId) => {
-  const result = await query(
-    `SELECT c.id,
-            (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads,
-            (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
-               AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as won_leads,
-            (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
-               AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_lost = true)) as lost_leads,
-            (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND lead_score = 'hot') as hot_leads
-     FROM campaigns c WHERE c.tenant_id = $1`,
-    [tenantId]
-  );
-  return result.rows.map(c => {
-    const totalLeads = parseInt(c.total_leads) || 0;
-    const wonLeads = parseInt(c.won_leads) || 0;
-    const lostLeads = parseInt(c.lost_leads) || 0;
-    const hotLeads = parseInt(c.hot_leads) || 0;
-    return {
-      id: c.id,
-      total_leads: totalLeads,
-      conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
-      disqualified_rate: totalLeads > 0 ? ((lostLeads / totalLeads) * 100).toFixed(1) : 0,
-      hot_rate: totalLeads > 0 ? ((hotLeads / totalLeads) * 100).toFixed(1) : 0,
-    };
-  });
-};
 
 // GET /api/campaigns - List all campaigns with metrics
 const getCampaigns = async (req, res) => {
   try {
-    const { status, source, search, page = 1, limit = 20 } = req.query;
+    const { status, source, search } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1), limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
 
     let where = 'WHERE c.tenant_id = $1';
@@ -46,14 +20,6 @@ const getCampaigns = async (req, res) => {
 
     const result = await query(
       `SELECT c.*,
-              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads,
-              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
-                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as won_leads,
-              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
-                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_lost = true)) as lost_leads,
-              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND lead_score = 'hot') as hot_leads,
-              (SELECT COALESCE(SUM(deal_value), 0) FROM leads WHERE campaign_id = c.id
-                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as revenue,
               u.name as created_by_name
        FROM campaigns c
        LEFT JOIN users u ON c.created_by = u.id
@@ -63,34 +29,31 @@ const getCampaigns = async (req, res) => {
       [...params, limit, offset]
     );
 
-    // Calculate CPL, quality mix & ROI for each campaign
-    const campaigns = result.rows.map(c => {
-      const totalLeads = parseInt(c.total_leads) || 0;
-      const wonLeads = parseInt(c.won_leads) || 0;
-      const lostLeads = parseInt(c.lost_leads) || 0;
-      const hotLeads = parseInt(c.hot_leads) || 0;
-      const spend = parseFloat(c.actual_spend) || 0;
-      const revenue = parseFloat(c.revenue) || 0;
-      return {
-        ...c,
-        total_leads: totalLeads,
-        won_leads: wonLeads,
-        lost_leads: lostLeads,
-        hot_leads: hotLeads,
-        cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0,
-        cost_per_won: wonLeads > 0 ? (spend / wonLeads).toFixed(2) : 0,
-        conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
-        disqualified_rate: totalLeads > 0 ? ((lostLeads / totalLeads) * 100).toFixed(1) : 0,
-        hot_rate: totalLeads > 0 ? ((hotLeads / totalLeads) * 100).toFixed(1) : 0,
-        roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
-      };
-    });
+    const campaigns = result.rows;
 
-    const baseline = await getBaselineMetrics(req.tenantId);
-    res.json({ campaigns: rankCampaigns(campaigns, baseline) });
+    const scope = await metricScope(req);
+    const metrics = await getMetrics(scope);
+    const breakdown = await getBreakdown(scope, 'campaign_id');
+    const byId = new Map(breakdown.map(m => [m.campaign_id, m]));
+    const lifetime = await getBreakdown({ ...scope, from: new Date(0), to: new Date() }, 'campaign_id');
+    const lifetimeById = new Map(lifetime.map(m => [m.campaign_id,m]));
+    const periodCampaigns = campaigns.map(c => {
+      const m = byId.get(c.id) || { total_leads: 0, won: 0, lost: 0, hot_leads: 0, revenue: 0, conversion_rate: 0 };
+      const spend = Number(c.actual_spend) || 0;
+      const all = lifetimeById.get(c.id) || { total_leads: 0, won: 0, revenue: 0 };
+      return { ...c, ...m, id: c.id, won_leads: m.won, lost_leads: m.lost,
+        cpl: all.total_leads ? (spend / all.total_leads).toFixed(2) : 0,
+        cost_per_won: all.won ? (spend / all.won).toFixed(2) : 0,
+        disqualified_rate: m.total_leads ? (m.lost / m.total_leads * 100).toFixed(1) : 0,
+        hot_rate: m.total_leads ? (m.hot_leads / m.total_leads * 100).toFixed(1) : 0,
+        roi: spend ? ((all.revenue-spend)/spend*100).toFixed(1) : 0 };
+
+    });
+    const counts = await query(`SELECT count(*)::int AS total FROM campaigns c ${where}`, params);
+    res.json({ campaigns: rankCampaigns(periodCampaigns, breakdown.map(m => ({ ...m, id: m.campaign_id, disqualified_rate: m.total_leads ? m.lost/m.total_leads*100 : 0, hot_rate: m.total_leads ? m.hot_leads/m.total_leads*100 : 0 }))), metrics, total: counts.rows[0].total });
   } catch (error) {
     console.error('Get campaigns error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -181,7 +144,7 @@ const getCampaign = async (req, res) => {
     });
   } catch (error) {
     console.error('Get campaign error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -211,7 +174,7 @@ const getCampaignAds = async (req, res) => {
     res.json({ ads });
   } catch (error) {
     console.error('Get campaign ads error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -226,20 +189,21 @@ const createCampaign = async (req, res) => {
                               utm_source, utm_medium, utm_campaign, created_by, is_priority)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
-      [req.tenantId, name, source, description, budget || 0, start_date, end_date,
+      [req.tenantId, name, normalizeSource(source), description, budget || 0, start_date, end_date,
        utm_source, utm_medium, utm_campaign, req.user.id, is_priority || false]
     );
 
     res.status(201).json({ campaign: result.rows[0] });
   } catch (error) {
     console.error('Create campaign error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
 // PUT /api/campaigns/:id
 const updateCampaign = async (req, res) => {
   try {
+    if (req.body.source !== undefined) req.body.source = normalizeSource(req.body.source);
     const allowedFields = [
       'name', 'source', 'description', 'budget', 'actual_spend',
       'start_date', 'end_date', 'status', 'utm_source', 'utm_medium', 'utm_campaign', 'is_priority',
@@ -268,7 +232,7 @@ const updateCampaign = async (req, res) => {
     res.json({ campaign: result.rows[0] });
   } catch (error) {
     console.error('Update campaign error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -283,7 +247,7 @@ const deleteCampaign = async (req, res) => {
     res.json({ message: 'Campaign deleted.' });
   } catch (error) {
     console.error('Delete campaign error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -312,7 +276,7 @@ const getCampaignStats = async (req, res) => {
     res.json({ stats: { ...result.rows[0], ...leadStats.rows[0] } });
   } catch (error) {
     console.error('Campaign stats error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 

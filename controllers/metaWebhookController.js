@@ -1,3 +1,5 @@
+const { ingestLead } = require('../services/leadIngestion');
+const { mapMetaFields } = require('../utils/metaFieldData');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { formatFieldDataNotes } = require('../utils/metaFieldData');
@@ -104,25 +106,28 @@ const receiveLeadFormWebhook = async (req, res) => {
 
       // Check duplicate by meta_lead_id first, then phone
       const existing = await query(
-        'SELECT id FROM leads WHERE tenant_id = $1 AND (meta_lead_id = $2 OR phone = $3)',
-        [tenant.id, leadgenId, phone]
+        'SELECT id FROM leads WHERE tenant_id = $1 AND meta_lead_id = $2',
+        [tenant.id, leadgenId]
       );
       if (existing.rows.length > 0) {
         console.log(`Duplicate lead skipped: ${phone}`);
         continue;
       }
 
-      const leadNumber = await nextLeadNumber(tenant.id);
       const notes = formatFieldDataNotes(leadData.field_data, {
         platform: leadData.platform, tenantName: tenant.name,
         campaignName: leadData.campaign_name, adsetName: leadData.adset_name, adName: leadData.ad_name,
       });
-      const inserted = await query(
-        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, meta_ad_id, meta_adset_id, stage, notes)
-         VALUES ($1, $2, $3, $4, $5, 'meta_ads', $6, $7, $8, $9, $10, 'new', $11) RETURNING *`,
-        [tenant.id, leadNumber, name || 'Unknown', phone, email || null, leadData.ad_name || `Ad: ${adId}`,
-         campaignId || null, leadgenId, leadData.ad_id || adId || null, leadData.adset_id || null, notes]
-      );
+      let ingestion;
+      try {
+        ingestion = await ingestLead(tenant.id, {
+          name: name || 'Unknown', phone, email, source: 'meta_ads', source_detail: leadData.ad_name || `Ad: ${adId}`,
+          campaign_id: campaignId || null, meta_lead_id: leadgenId, meta_ad_id: leadData.ad_id || adId || null,
+          meta_adset_id: leadData.adset_id || null, stage: 'new', notes, ...mapMetaFields(leadData.field_data),
+        });
+      } catch (error) { if (error.status !== 422) throw error; console.warn('Invalid Meta lead phone', leadgenId); continue; }
+      if (ingestion.duplicate) continue;
+      const inserted = { rows: [ingestion.lead] };
       sendWelcomeMessage({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
       applyAssignmentRules({ tenantId: tenant.id, lead: inserted.rows[0] })
         .then(() => notifyNewLead({ tenantId: tenant.id, lead: inserted.rows[0] }))
