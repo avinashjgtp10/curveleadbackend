@@ -1,3 +1,5 @@
+const { ingestLead } = require('../services/leadIngestion');
+const { normalizePhone } = require('../utils/dataQuality');
 const axios = require('axios');
 const { query } = require('../config/db');
 const { uploadToS3 } = require('../config/s3');
@@ -345,25 +347,11 @@ const setConversationAi = async (req, res) => {
 // the normal /send or template flow once this returns the lead_id.
 const startChat = async (req, res) => {
   try {
-    const rawPhone = String(req.body.phone || '').replace(/\D/g, '');
-    const phone = rawPhone.length > 10 ? rawPhone.slice(-10) : rawPhone;
-    if (phone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number.' });
-    const name = String(req.body.name || '').trim().slice(0, 100);
-
-    const existing = await query(
-      `SELECT id FROM leads WHERE tenant_id = $1 AND (phone = $2 OR RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = $2)
-       ${req.user.role === 'staff' ? 'AND assigned_to = $3' : ''} LIMIT 1`,
-      req.user.role === 'staff' ? [req.tenantId, phone, req.user.id] : [req.tenantId, phone]
-    );
-    if (existing.rows.length) return res.json({ lead_id: existing.rows[0].id, created: false });
-
-    const leadNumber = await nextLeadNumber(req.tenantId);
-    const inserted = await query(
-      `INSERT INTO leads (tenant_id, lead_number, name, phone, source, stage, assigned_to)
-       VALUES ($1, $2, $3, $4, 'manual', 'new', $5) RETURNING *`,
-      [req.tenantId, leadNumber, name || 'Unknown', phone, req.user.role === 'staff' ? req.user.id : null]
-    );
-    const lead = inserted.rows[0];
+    const phone = normalizePhone(req.body.phone);
+    const ingestion = await ingestLead(req.tenantId, { name: req.body.name || 'Unknown', phone, source: 'manual', stage: 'new', assigned_to: req.user.role === 'staff' ? req.user.id : null });
+    const lead = ingestion.lead;
+    if (req.user.role === 'staff' && lead.assigned_to !== req.user.id) return res.status(403).json({ error: 'This contact is assigned to another team member.' });
+    if (ingestion.duplicate) return res.json({ lead_id: lead.id, created: false });
 
     applyAssignmentRules({ tenantId: req.tenantId, lead }).then(() => notifyNewLead({ tenantId: req.tenantId, lead })).catch(() => {});
     checkNewLeadTriggers({ tenantId: req.tenantId, lead }).catch(() => {});
@@ -371,7 +359,7 @@ const startChat = async (req, res) => {
     res.status(201).json({ lead_id: lead.id, created: true });
   } catch (error) {
     console.error('Start chat error:', error);
-    res.status(500).json({ error: 'Failed to start chat.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to start chat.' });
   }
 };
 
@@ -381,25 +369,17 @@ const startChat = async (req, res) => {
 // instead of a separate leadgen event. Resolves it to a campaign (via the
 // tenant's connected ad account, if any) and creates the lead.
 const createLeadFromWhatsAppReferral = async ({ tenantId, fromPhone, contactName, referral }) => {
-  const existing = await query('SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2', [tenantId, fromPhone]);
-  if (existing.rows.length) return null; // race with another inbound message — let the next iteration handle it
-
   const matched = await resolveCampaignFromAdId({ tenantId, adId: referral.source_id });
-  const leadNumber = await nextLeadNumber(tenantId);
   const notesParts = ['Started via Click-to-WhatsApp ad.'];
   if (referral.headline) notesParts.push(`Ad headline: ${referral.headline}`);
   if (matched?.adName) notesParts.push(`Ad: ${matched.adName}`);
 
-  const inserted = await query(
-    `INSERT INTO leads (tenant_id, lead_number, name, phone, source, source_detail, campaign_id, meta_ad_id, stage, notes)
-     VALUES ($1, $2, $3, $4, 'whatsapp', $5, $6, $7, 'new', $8) RETURNING *`,
-    [
-      tenantId, leadNumber, contactName || 'Unknown', fromPhone,
-      matched?.adName || referral.headline || null,
-      matched?.campaignId || null, referral.source_id, notesParts.join('\n'),
-    ]
-  );
-  const lead = inserted.rows[0];
+  const ingestion = await ingestLead(tenantId, {
+    name: contactName || 'Unknown', phone: fromPhone, source: 'whatsapp', source_detail: matched?.adName || referral.headline || null,
+    campaign_id: matched?.campaignId || null, meta_ad_id: referral.source_id, stage: 'new', notes: notesParts.join('\n'),
+  });
+  const lead = ingestion.lead;
+  if (ingestion.duplicate) return lead;
 
   applyAssignmentRules({ tenantId, lead }).then(() => notifyNewLead({ tenantId, lead })).catch(() => {});
   checkNewLeadTriggers({ tenantId, lead }).catch(() => {});
@@ -465,11 +445,11 @@ const handleWebhook = async (req, res) => {
       // (shared tenant-level number, or a number we don't recognize).
       const leadResult = numberOwner
         ? await query(
-            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out, source, source_detail FROM leads WHERE tenant_id = $1 AND (phone = $2 OR phone = $3) LIMIT 1',
+            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out, source, source_detail FROM leads WHERE tenant_id = $1 AND (phone = $2 OR phone = $3 OR phone = chr(43) || $2) LIMIT 1',
             [numberOwner.tenant_id, fromPhone, fromPhone.replace(/^91/, '')]
           )
         : await query(
-            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out, source, source_detail FROM leads WHERE phone = $1 OR phone = $2 LIMIT 1',
+            'SELECT id, tenant_id, name, assigned_to, ai_paused, opted_out, source, source_detail FROM leads WHERE phone = $1 OR phone = $2 OR phone = chr(43) || $1 LIMIT 1',
             [fromPhone, fromPhone.replace(/^91/, '')]
           );
 

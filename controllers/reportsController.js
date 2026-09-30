@@ -1,3 +1,4 @@
+const { metricScope, getMetrics, getBreakdown } = require('../services/metrics');
 const { query } = require('../config/db');
 const { MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 
@@ -28,7 +29,9 @@ const resolvePeriodRange = (period) => {
 // GET /api/reports/conversion - Overall conversion funnel
 const getConversionReport = async (req, res) => {
   try {
-    const { start, end } = resolvePeriodRange(req.query.period);
+    const scope = await metricScope(req);
+    const { from: start, to: end } = scope;
+    const metrics = await getMetrics(scope);
     const isStaff = req.user.role === 'staff';
     const params = isStaff ? [req.tenantId, start, end, req.user.id] : [req.tenantId, start, end];
     const sc = isStaff ? ' AND assigned_to = $4' : '';
@@ -45,10 +48,7 @@ const getConversionReport = async (req, res) => {
     const lost = stages.rows.find(s => s.stage === 'lost')?.count || 0;
 
     res.json({
-      total_leads: total,
-      won: parseInt(won),
-      lost: parseInt(lost),
-      conversion_rate: total > 0 ? ((won / total) * 100).toFixed(1) : 0,
+      ...metrics,
       stages: stages.rows.map(s => ({
         ...s,
         count: parseInt(s.count),
@@ -57,48 +57,26 @@ const getConversionReport = async (req, res) => {
     });
   } catch (error) {
     console.error('Conversion report error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
 // GET /api/reports/by-source - Conversion by lead source
 const getReportBySource = async (req, res) => {
   try {
-    const { start, end } = resolvePeriodRange(req.query.period);
-    const isStaff = req.user.role === 'staff';
-    const params = isStaff ? [req.tenantId, start, end, req.user.id] : [req.tenantId, start, end];
-    const sc = isStaff ? ' AND assigned_to = $4' : '';
-
-    const result = await query(
-      `SELECT source,
-              COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3) as total_leads,
-              COUNT(*) FILTER (WHERE stage = 'won' AND won_at >= $2 AND won_at < $3) as won,
-              COUNT(*) FILTER (WHERE stage = 'lost' AND created_at >= $2 AND created_at < $3) as lost,
-              COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won' AND won_at >= $2 AND won_at < $3), 0) as revenue
-       FROM leads WHERE tenant_id = $1
-         AND ((created_at >= $2 AND created_at < $3) OR (stage = 'won' AND won_at >= $2 AND won_at < $3))${sc}
-       GROUP BY source ORDER BY total_leads DESC`,
-      params
-    );
-
-    const sources = result.rows.map(s => ({
-      ...s,
-      total_leads: parseInt(s.total_leads),
-      won: parseInt(s.won),
-      lost: parseInt(s.lost),
-      conversion_rate: s.total_leads > 0 ? ((s.won / s.total_leads) * 100).toFixed(1) : 0,
-    }));
+    const sources = await getBreakdown(await metricScope(req), 'source');
 
     res.json({ sources });
   } catch (error) {
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
 // GET /api/reports/by-staff - Conversion by team member (admin sees all; staff sees only self)
 const getReportByStaff = async (req, res) => {
   try {
-    const { start, end } = resolvePeriodRange(req.query.period);
+    const scope = await metricScope(req);
+    const { from: start, to: end } = scope;
     const isStaff = req.user.role === 'staff';
     const params = isStaff ? [req.tenantId, start, end, req.user.id] : [req.tenantId, start, end];
     const userFilter = isStaff ? ' AND u.id = $4' : '';
@@ -158,16 +136,22 @@ const getReportByStaff = async (req, res) => {
       conversion_rate: s.total_leads > 0 ? ((s.won / s.total_leads) * 100).toFixed(1) : 0,
     }));
 
+    const breakdown = await getBreakdown(scope, 'assigned_to');
+    for (const row of staff) {
+      const m = breakdown.find(m => m.assigned_to === row.id) || { total_leads: 0, won: 0, lost: 0, revenue: 0, conversion_rate: 0 };
+      Object.assign(row, m);
+    }
     res.json({ staff });
   } catch (error) {
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
 // GET /api/reports/by-campaign - Campaign ROI
 const getReportByCampaign = async (req, res) => {
   try {
-    const { start, end } = resolvePeriodRange(req.query.period);
+    const scope = await metricScope(req);
+    const { from: start, to: end } = scope;
     const isStaff = req.user.role === 'staff';
     const params = isStaff ? [req.tenantId, start, end, req.user.id] : [req.tenantId, start, end];
     const staffJoin = isStaff ? ' AND l.assigned_to = $4' : '';
@@ -201,9 +185,17 @@ const getReportByCampaign = async (req, res) => {
       };
     });
 
+    const breakdown = await getBreakdown(scope, 'campaign_id');
+    const lifetime = await getBreakdown({ ...scope, from: new Date(0), to: new Date() }, 'campaign_id');
+    for (const row of campaigns) {
+      const m = breakdown.find(m => m.campaign_id === row.id) || { total_leads: 0, won: 0, lost: 0, revenue: 0, conversion_rate: 0 };
+      const all = lifetime.find(m => m.campaign_id === row.id) || { total_leads: 0, revenue: 0 };
+      const spend = Number(row.actual_spend) || 0;
+      Object.assign(row, m, { cpl: all.total_leads ? (spend/all.total_leads).toFixed(2) : 0, roi: spend ? ((all.revenue-spend)/spend*100).toFixed(1) : 0 });
+    }
     res.json({ campaigns });
   } catch (error) {
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -284,7 +276,7 @@ const getFunnelReport = async (req, res) => {
     res.json({ stages, leaks });
   } catch (error) {
     console.error('Funnel report error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -352,7 +344,7 @@ const getTimeInStageReport = async (req, res) => {
     res.json({ stages });
   } catch (error) {
     console.error('Time-in-stage report error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -385,7 +377,7 @@ const getFollowupTrend = async (req, res) => {
     });
   } catch (error) {
     console.error('Followup trend error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -432,7 +424,7 @@ const getTimeline = async (req, res) => {
 
     res.json({ timeline: result.rows });
   } catch (error) {
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -470,7 +462,12 @@ const getDashboardSummary = async (req, res) => {
     const tid = req.tenantId;
     const isStaff = req.user.role === 'staff';
     const uid = isStaff ? req.user.id : null;
-    const { start, end, prevStart, prevEnd } = resolveDashboardRange(req.query);
+    const scope = await metricScope(req);
+    const { from: start, to: end } = scope;
+    const prevEnd = start, prevStart = new Date(+start - (+end - +start));
+    const metrics = await getMetrics(scope);
+    const sourceMetrics = await getBreakdown(scope, 'source');
+    const staffMetrics = await getBreakdown(scope, 'assigned_to');
 
     // Postgres requires every placeholder number up to the highest referenced to actually
     // appear in the query text (gaps break type inference), so each query below gets only
@@ -557,7 +554,7 @@ const getDashboardSummary = async (req, res) => {
       // Team performance — admin sees all; staff sees only themselves. Leads created in period.
       query(`
         SELECT
-          u.name,
+          u.id, u.name,
           COUNT(l.id) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3) as total_leads,
           COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
@@ -637,19 +634,19 @@ const getDashboardSummary = async (req, res) => {
       total_leads:       parseInt(s.total_leads),
       leads_today:       parseInt(s.leads_today),
       leads_today_contacted: parseInt(s.leads_today_contacted),
-      leads_in_period:   parseInt(s.leads_in_period),
+      leads_in_period:   metrics.total_leads,
       leads_change:      pct(s.leads_in_period, s.leads_prev_period),
       hot_leads:         parseInt(s.hot_leads),
       total_won:         parseInt(s.total_won),
-      won_in_period:     parseInt(s.won_in_period),
+      won_in_period:     metrics.won,
       total_revenue:     parseFloat(s.total_revenue),
-      revenue_in_period: parseFloat(s.revenue_in_period),
+      revenue_in_period: metrics.revenue,
       revenue_change:    pct(s.revenue_in_period, s.revenue_prev_period),
       advance_collected_in_period: parseFloat(s.advance_collected_in_period),
       balance_due_in_period: parseFloat(s.balance_due_in_period),
-      conversion_rate:   s.leads_in_period > 0
-                          ? ((s.won_in_period / s.leads_in_period) * 100).toFixed(1)
-                          : '0.0',
+      conversion_rate: metrics.conversion_rate,
+      metrics,
+      active_campaigns: metrics.active_campaigns,
       avg_deal_value:    s.won_in_period > 0 ? Math.round(s.revenue_in_period / s.won_in_period) : 0,
 
       followups_today:   parseInt(f.today),
@@ -658,7 +655,7 @@ const getDashboardSummary = async (req, res) => {
       missed_followups:  parseInt(f.missed),
       critical_followups: parseInt(f.critical),
 
-      unassigned_leads: isStaff ? 0 : parseInt(unassigned.rows[0].count),
+      unassigned_leads: metrics.unassigned,
 
       active_enrollments:    parseInt(automation.rows[0].active_enrollments),
       completed_this_month:  parseInt(automation.rows[0].completed_this_month),
@@ -672,12 +669,13 @@ const getDashboardSummary = async (req, res) => {
         : 0,
 
       pipeline:    pipeline.rows.map(p => ({ ...p, count: parseInt(p.count), pipeline_value: parseFloat(p.pipeline_value) })),
-      sources:     sources.rows.map(s => ({ ...s, total: parseInt(s.total), won: parseInt(s.won), conversion_rate: s.total > 0 ? ((s.won / s.total) * 100).toFixed(1) : '0.0' })),
+      sources: sourceMetrics.map(s => ({ ...s, total: s.total_leads })),
       team:        team.rows.map(t => ({
         ...t,
         total_leads: parseInt(t.total_leads),
         won: parseInt(t.won),
         revenue: parseFloat(t.revenue),
+        ...(staffMetrics.find(m => m.assigned_to === t.id) || { total_leads: 0, won: 0, revenue: 0, conversion_rate: 0 }),
         avg_response_seconds: t.avg_response_seconds !== null ? parseInt(t.avg_response_seconds) : null,
         completed_followups: parseInt(t.completed_followups),
       })),
@@ -686,7 +684,7 @@ const getDashboardSummary = async (req, res) => {
     });
   } catch (error) {
     console.error('Dashboard summary error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -751,7 +749,7 @@ const getMessagesReport = async (req, res) => {
     });
   } catch (error) {
     console.error('Messages report error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 

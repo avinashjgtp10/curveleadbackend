@@ -1,3 +1,4 @@
+const { ingestLead: ingestNormalizedLead } = require('../services/leadIngestion');
 const crypto = require('crypto');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
@@ -15,17 +16,9 @@ const { syncFacebookLeadsForTenant } = require('../utils/metaLeadSync');
 // ── helpers ────────────────────────────────────────────────────────────────
 
 const createLeadFromSource = async (tenantId, { name, phone, email, source, source_detail, campaign_id, extra = {} }) => {
-  if (!phone) throw new Error('phone required');
-
-  const existing = await query('SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2', [tenantId, phone]);
-  if (existing.rows.length) return { duplicate: true, id: existing.rows[0].id };
-
-  const leadNumber = await nextLeadNumber(tenantId);
-  const result = await query(
-    `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, stage)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'new') RETURNING *`,
-    [tenantId, leadNumber, name || 'Unknown', phone, email || null, source, source_detail || null, campaign_id || null]
-  );
+  const ingestion = await ingestNormalizedLead(tenantId, { name, phone, email, source, source_detail, campaign_id: campaign_id || null, stage: 'new', ...extra });
+  if (ingestion.duplicate) return { duplicate: true, id: ingestion.lead.id };
+  const result = { rows: [ingestion.lead] };
   sendWelcomeMessage({ tenantId, lead: result.rows[0] }).catch(() => {});
   applyAssignmentRules({ tenantId, lead: result.rows[0] })
     .then(() => notifyNewLead({ tenantId, lead: result.rows[0] }))
@@ -189,10 +182,10 @@ const ingestLead = async (req, res) => {
     if (!phone) return res.status(400).json({ error: 'phone is required.' });
 
     const lead = await createLeadFromSource(tenantId, { name, phone, email, source, source_detail, campaign_id });
-    if (lead.duplicate) return res.status(409).json({ error: 'Duplicate lead.', id: lead.id });
+    if (lead.duplicate) return res.status(200).json({ message: 'Duplicate submission attached to existing lead.', duplicate: true, id: lead.id });
 
     res.status(201).json({ message: 'Lead created.', id: lead.id });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) { console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
 };
 
 // ── GET /api/integrations/embed-script ────────────────────────────────────
@@ -388,7 +381,7 @@ const facebookSubscribeWebhook = async (req, res) => {
     }
   } catch (e) {
     console.error('facebookSubscribeWebhook:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 };
 
@@ -407,7 +400,7 @@ const facebookSubscriptionStatus = async (req, res) => {
     res.json({ subscribed, page_id: meta_page_id, page_name: settings.meta_page_name || '', subscribed_fields: app?.subscribed_fields || [] });
   } catch (e) {
     console.error('facebookSubscriptionStatus:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 };
 
