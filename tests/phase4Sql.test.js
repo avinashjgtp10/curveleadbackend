@@ -32,7 +32,7 @@ test(
  CREATE TABLE assignment_rules(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,name text,priority int DEFAULT 0,is_active boolean DEFAULT true,created_at timestamptz DEFAULT now(),sources text[],campaign_ids uuid[],location_contains text,assign_to_user_id uuid,assign_to_team_id uuid,last_assigned_user_id uuid,sequence_id uuid);
  CREATE TABLE leads(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,name text,phone text,email text,source text,stage text,meta_lead_id text,city text,assigned_to uuid,lead_score text DEFAULT 'cold');
  CREATE TABLE lead_stages(tenant_id uuid,name text,is_won boolean,meta_event_name text);
- CREATE TABLE whatsapp_messages(id uuid PRIMARY KEY DEFAULT gen_random_uuid());
+ CREATE TABLE whatsapp_messages(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,lead_id uuid,direction text,status text,sent_at timestamptz DEFAULT now());
  CREATE TABLE lead_activities(tenant_id uuid,lead_id uuid,activity_type text,title text,metadata jsonb);
  CREATE TABLE notifications(tenant_id uuid,user_id uuid,title text,message text,type text,reference_type text,reference_id uuid);`);
       const migration = fs.readFileSync(
@@ -165,7 +165,14 @@ test(
         ).rows[0].n,
         1,
       );
-    } finally {
+      const report=(await c.query("INSERT INTO whatsapp_broadcast_reports(tenant_id,template_name,recipients,sent,failed) VALUES($1,'hello',3,2,1) RETURNING id",[t])).rows[0];
+    await c.query("INSERT INTO whatsapp_messages(tenant_id,lead_id,direction,status,broadcast_id,broadcast_sent,sent_at) VALUES($1,$2,'outbound','read',$4,true,now()-interval '1 minute'),($1,$3,'outbound','failed',$4,true,now()-interval '1 minute'),($1,$2,'inbound','delivered',NULL,false,now())",[t,leads[0].id,leads[1].id,report.id]);
+    const routes=[];const router={use(){},get(p,...f){routes.push([p,f]);},put(){},post(){},delete(){}};
+    load('routes/features.js',{express:{Router:()=>router},'../utils/permissions':{requirePermission:()=>()=>{}},'../config/db':{query:(sql,p)=>c.query(sql,p)}});
+    const response={code:200,status(c){this.code=c;return this;},json(d){this.data=d;}};
+    await routes.find(([p])=>p==='/broadcasts')[1][0]({tenantId:t},response);
+    assert.equal(response.code,200);assert.equal(response.data.broadcasts[0].failed,2);assert.equal(response.data.broadcasts[0].read,1);assert.equal(response.data.broadcasts[0].delivered,1);assert.equal(response.data.broadcasts[0].replied,1);
+  } finally {
       if (pool) await pool.end();
       await c.query(`DROP SCHEMA ${schema} CASCADE`);
       await c.end();
