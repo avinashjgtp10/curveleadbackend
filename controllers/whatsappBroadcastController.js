@@ -49,7 +49,7 @@ const getBroadcastTemplates = async (req, res) => {
       return media ? { ...t, media_type: media.media_type, media_url: media.media_url } : t;
     });
 
-    res.json({ templates });
+    res.json({ templates, stale: Boolean(listResult.stale) });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
@@ -83,7 +83,7 @@ const getSendableTemplates = async (req, res) => {
         body_text: body, header_format: header?.format || null, variable_count: variableCount, unsupported,
       };
     });
-    res.json({ templates });
+    res.json({ templates, stale: Boolean(listResult.stale) });
   } catch (e) { console.error('getSendableTemplates:', e.message); res.status(500).json({ error: 'Failed.' }); }
 };
 

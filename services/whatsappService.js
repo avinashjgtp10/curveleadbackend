@@ -115,14 +115,31 @@ const verifyWhatsAppNumber = async (phoneNumberId, accessToken) => {
  * @param {string} wabaId - WhatsApp Business Account ID
  * @param {string} accessToken
  */
+// Credential-scoped, bounded last-good cache; never reuse data after a token change.
+const templateCache = new Map();
 const listMessageTemplates = async (wabaId, accessToken) => {
-  try {
-    const response = await axios.get(`${META_API_URL}/${wabaId}/message_templates`, {
-      params: { fields: 'name,language,category,status,components,rejected_reason', limit: 100, access_token: accessToken },
-    });
-    return { success: true, templates: response.data.data || [] };
-  } catch (error) {
-    return { success: false, error: error.response?.data?.error?.message || error.message };
+  const key = require('crypto').createHash('sha256').update(`${wabaId}:${accessToken}`).digest('hex');
+  const cached = templateCache.get(key);
+  if (cached && Date.now() - cached.at < 60000) return { success: true, templates: cached.templates };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await axios.get(`${META_API_URL}/${wabaId}/message_templates`, {
+        timeout: 5000,
+        params: { fields: 'name,language,category,status,components,rejected_reason', limit: 100, access_token: accessToken },
+      });
+      const templates = response.data.data || [];
+      if (templateCache.size >= 500) templateCache.delete(templateCache.keys().next().value);
+      templateCache.set(key, { at: Date.now(), templates });
+      return { success: true, templates };
+    } catch (error) {
+      const status = error.response?.status;
+      const transient = !status || status === 429 || status >= 500;
+      console.error('Meta template listing failed:', { status, code: error.code, attempt: attempt + 1 });
+      if (transient && attempt === 0) { await new Promise(resolve => setTimeout(resolve, 250)); continue; }
+      if (transient && cached && Date.now() - cached.at < 86400000) return { success: true, templates: cached.templates, stale: true };
+      if (!transient) templateCache.delete(key);
+      return { success: false, error: error.response?.data?.error?.message || error.message };
+    }
   }
 };
 

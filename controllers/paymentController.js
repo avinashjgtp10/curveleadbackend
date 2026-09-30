@@ -91,7 +91,9 @@ const ensureRazorpayCustomer = async (razorpay, req) => {
 const getPlans = async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, name, price, max_leads, max_users
+      `SELECT id, name, price, max_leads,
+              COALESCE((to_jsonb(plans)->>'max_users')::integer,
+                       (to_jsonb(plans)->>'max_staff')::integer, 1) AS max_users
        FROM plans
        WHERE is_active = true
        ORDER BY price ASC`

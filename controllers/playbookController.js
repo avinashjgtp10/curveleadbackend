@@ -9,7 +9,7 @@ const getPlaybook = async (req, res) => {
       [req.tenantId]
     );
     res.json({ playbook: result.rows[0] || null });
-  } catch (e) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) { console.error('getPlaybook:', e); res.status(500).json({ error: 'Failed to load playbook.' }); }
 };
 
 // POST /api/playbook/generate — regenerate now (admin)
