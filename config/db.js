@@ -1,4 +1,6 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+// Legacy timestamp-without-time-zone columns store UTC instants.
+types.setTypeParser(1114, value => new Date(value.replace(' ', 'T') + 'Z'));
 require('dotenv').config();
 
 const POOL_CONFIG = {
@@ -7,6 +9,7 @@ const POOL_CONFIG = {
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
+  options: '-c timezone=UTC',
   max: 20,
   idleTimeoutMillis: 900000,        // 15 min — outlasts scheduled job interval
   connectionTimeoutMillis: 15000,
