@@ -1,3 +1,6 @@
+const { duplicateGroups } = require('../services/duplicates');
+const { ingestLead } = require('../services/leadIngestion');
+const { normalizePhone, normalizeSource, normalizeLead, statusChangeTitle } = require('../utils/dataQuality');
 const { query, transaction } = require('../config/db');
 const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSED_AFTER_MINUTES } = require('../utils/leadSla');
@@ -75,8 +78,8 @@ const getLeads = async (req, res) => {
       else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
     }
     if (search) {
-      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.lead_number ILIKE $${i})`;
-      params.push(`%${search}%`);
+      whereClause += ` AND (normalize(l.name, NFKC) ILIKE $${i} OR l.phone ILIKE $${i} OR l.lead_number ILIKE $${i})`;
+      params.push(`%${search.normalize('NFKC')}%`);
       i++;
     }
     const dateColumn = date_field === 'created_at' ? 'l.created_at' : 'COALESCE(l.lead_date, l.created_at)';
@@ -204,27 +207,12 @@ const createLead = async (req, res) => {
 
     if (!name || !phone) return res.status(400).json({ error: 'Name and phone required.' });
 
-    // Check duplicate
-    const existing = await query(
-      'SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2',
-      [req.tenantId, phone]
-    );
-    if (existing.rows.length > 0) {
-      return res.status(409).json({ error: 'Lead with this phone already exists.', existing_id: existing.rows[0].id });
-    }
-
-    const result = await transaction(async (client) => {
-      const leadNumber = await nextLeadNumber(req.tenantId, client);
-
-      return client.query(
-        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, location, business_name, address, source, source_detail, campaign_id,
-                            stage, assigned_to, notes, deal_value, expected_close_date, tags, lead_date)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-         RETURNING *`,
-        [req.tenantId, leadNumber, name, phone, email, location, business_name, address, source || 'manual', source_detail, campaign_id || null,
-         stage || 'new', assigned_to, notes, deal_value || 0, expected_close_date, tags, lead_date || new Date()]
-      );
-    });
+    const ingestion = await ingestLead(req.tenantId, {
+      name, phone, email, location, business_name, address, source, source_detail, campaign_id: campaign_id || null,
+      stage: stage || 'new', assigned_to, notes, deal_value: deal_value || 0, expected_close_date, tags, lead_date: lead_date || new Date(),
+    }, { actorId: req.user.id });
+    if (ingestion.duplicate) return res.status(200).json({ message: 'Duplicate submission attached to existing lead.', ...(req.user.role !== 'staff' || ingestion.lead.assigned_to === req.user.id ? { lead: ingestion.lead } : {}), duplicate: true });
+    const result = { rows: [ingestion.lead] };
 
     // Log activity
     await query(
@@ -251,13 +239,16 @@ const createLead = async (req, res) => {
     res.status(201).json({ message: 'Lead created.', lead: result.rows[0] });
   } catch (error) {
     console.error('Create lead error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
 // PUT /api/leads/:id
 const updateLead = async (req, res) => {
   try {
+    if (req.body.phone !== undefined) req.body.phone = normalizePhone(req.body.phone);
+    if (req.body.source !== undefined) req.body.source = normalizeSource(req.body.source);
+    if (req.body.name !== undefined) req.body.name = String(req.body.name).normalize('NFKC');
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'business_name', 'address', 'source', 'source_detail', 'campaign_id',
       'stage', 'lead_status', 'assigned_to', 'notes', 'deal_value', 'expected_close_date',
@@ -323,7 +314,7 @@ const updateLead = async (req, res) => {
       stageMetaEvent = stageInfo.rows[0]?.meta_event_name || null;
       stageIsLost = !!stageInfo.rows[0]?.is_lost;
       stageIsWon = !!stageInfo.rows[0]?.is_won;
-      if (stageInfo.rows[0]?.is_won) updates.push('won_at = NOW()');
+      if (stageInfo.rows[0]?.is_won && req.body.stage !== prev.stage) updates.push('won_at = NOW()');
       if (stageInfo.rows[0]?.is_lost) {
         updates.push('lost_at = NOW()');
         if (!req.body.lost_reason) {
@@ -341,29 +332,16 @@ const updateLead = async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'Lead not found.' });
 
     const stageChanged  = req.body.stage       !== undefined && req.body.stage       !== prev.stage;
-    const statusChanged = req.body.lead_status  !== undefined && req.body.lead_status  !== prev.lead_status;
+    const statusChanged = req.body.lead_status !== undefined && !!statusChangeTitle(prev.lead_status, req.body.lead_status);
 
-    // Log to lead_stage_history when stage or status changes
-    if (stageChanged || statusChanged) {
-      await query(
-        `INSERT INTO lead_stage_history
-           (tenant_id, lead_id, prev_stage, new_stage, prev_status, new_status, changed_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [
-          req.tenantId, req.params.id,
-          stageChanged  ? prev.stage       : null, stageChanged  ? req.body.stage       : null,
-          statusChanged ? prev.lead_status  : null, statusChanged ? req.body.lead_status  : null,
-          req.user.id,
-        ]
-      ).catch(() => {}); // non-blocking
-    }
+    // The database trigger records every writer's transitions transactionally.
 
     // Log stage change to lead_activities
     if (stageChanged) {
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
          VALUES ($1, $2, 'stage_change', $3, $4)`,
-        [req.tenantId, req.params.id, `Stage changed to ${req.body.stage}`, req.user.id]
+        [req.tenantId, req.params.id, statusChangeTitle(prev.stage, req.body.stage, 'Stage'), req.user.id]
       ).catch(() => {});
       if ((prev.stage || '').toLowerCase() === 'new') {
         recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: 'stage_change' }).catch(() => {});
@@ -381,7 +359,7 @@ const updateLead = async (req, res) => {
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
          VALUES ($1, $2, 'status_change', $3, $4)`,
-        [req.tenantId, req.params.id, `Status changed to ${req.body.lead_status}`, req.user.id]
+        [req.tenantId, req.params.id, statusChangeTitle(prev.lead_status, req.body.lead_status), req.user.id]
       ).catch(() => {});
       checkLeadStatusTriggers({
         tenantId: req.tenantId, leadId: req.params.id, newStatus: req.body.lead_status,
@@ -412,7 +390,7 @@ const updateLead = async (req, res) => {
     res.json({ lead: result.rows[0] });
   } catch (error) {
     console.error('Update lead error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -426,7 +404,7 @@ const deleteLead = async (req, res) => {
     res.json({ message: 'Lead deleted.' });
   } catch (error) {
     console.error('Delete lead error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -442,7 +420,7 @@ const logCallClick = async (req, res) => {
     res.json({ first_response_recorded: !!lead });
   } catch (error) {
     console.error('Log call click error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -459,7 +437,7 @@ const markContacted = async (req, res) => {
     res.json({ lead });
   } catch (error) {
     console.error('Mark contacted error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -790,8 +768,8 @@ const getTodayFollowups = async (req, res) => {
       params.push(type);
     }
     if (search) {
-      where += ` AND (l.name ILIKE $${idx} OR l.phone ILIKE $${idx})`;
-      params.push(`%${search}%`);
+      where += ` AND (normalize(l.name, NFKC) ILIKE $${idx} OR l.phone ILIKE $${idx})`;
+      params.push(`%${search.normalize('NFKC')}%`);
       idx++;
     }
 
@@ -888,7 +866,7 @@ const addActivity = async (req, res) => {
     res.status(201).json({ activity: result.rows[0] });
   } catch (error) {
     console.error('Add note error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -909,17 +887,18 @@ const bulkUpdate = async (req, res) => {
     sets.push('updated_at = NOW()');
     params.push(ids);
 
+    const previous = stage !== undefined ? await query('SELECT id,stage FROM leads WHERE tenant_id=$1 AND id=ANY($2::uuid[])', [req.tenantId,ids]) : { rows: [] };
     const result = await query(
       `UPDATE leads SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = ANY($${i}::uuid[]) RETURNING id`,
       params
     );
 
     if (stage) {
-      await Promise.all(ids.map(id =>
+      await Promise.all(previous.rows.filter(row => row.stage !== stage).map(row =>
         query(
           `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
            VALUES ($1,$2,'stage_change',$3,$4)`,
-          [req.tenantId, id, `Stage changed to ${stage}`, req.user.id]
+          [req.tenantId, row.id, statusChangeTitle(row.stage, stage, 'Stage'), req.user.id]
         ).catch(() => {})
       ));
     }
@@ -927,7 +906,7 @@ const bulkUpdate = async (req, res) => {
     res.json({ updated: result.rowCount });
   } catch (error) {
     console.error('Bulk update error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -948,7 +927,7 @@ const bulkDelete = async (req, res) => {
     res.json({ deleted: result.rowCount });
   } catch (error) {
     console.error('Bulk delete error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -956,41 +935,19 @@ const bulkDelete = async (req, res) => {
 // and other formatting, so e.g. "9876543210" and "+91 98765 43210" are one group.
 const getDuplicateLeads = async (req, res) => {
   try {
-    const result = await query(
-      `SELECT RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) AS norm_phone,
-              json_agg(json_build_object(
-                'id', id, 'lead_number', lead_number, 'name', name, 'phone', phone,
-                'email', email, 'source', source, 'stage', stage, 'created_at', created_at
-              ) ORDER BY created_at ASC) AS leads
-       FROM leads
-       WHERE tenant_id = $1
-       GROUP BY norm_phone
-       HAVING COUNT(*) > 1
-       ORDER BY MIN(created_at) DESC`,
-      [req.tenantId]
-    );
-    res.json({ groups: result.rows });
+    const result = await query('SELECT id,lead_number,name,phone,email,source,stage,created_at FROM leads WHERE tenant_id=$1 ORDER BY created_at,id', [req.tenantId]);
+    const settings = await query('SELECT settings FROM tenants WHERE id=$1', [req.tenantId]);
+    res.json({ groups: duplicateGroups(result.rows, settings.rows[0]?.settings?.dedupe_mode) });
   } catch (error) {
     console.error('getDuplicateLeads error:', error);
     res.status(500).json({ error: 'Failed to find duplicate leads.' });
   }
 };
 
-// Every table that carries a lead_id gets its rows re-pointed at the kept lead
-// before the duplicate row is deleted, so notes/calls/quotations aren't lost.
-// students.lead_id has no ON DELETE action (RESTRICT), so leaving it out would
-// make the DELETE below fail outright for any duplicate that was enrolled.
-const DUPLICATE_LEAD_CHILD_TABLES = [
-  'lead_activities', 'followups', 'lead_followups', 'lead_followup_attempts',
-  'whatsapp_messages', 'lead_notes', 'lead_attachments', 'quotations',
-  'brochure_shares', 'call_recordings', 'lead_stage_history', 'ai_voice_calls',
-  'students',
-];
-
 // Nullable scalar columns on the lead itself worth carrying over from a removed
 // duplicate when the kept lead's own value is blank.
 const DUPLICATE_LEAD_FILL_COLUMNS = [
-  'email', 'location', 'meta_lead_id', 'source_detail', 'business_name', 'address',
+  'city', 'email', 'location', 'meta_lead_id', 'source_detail', 'business_name', 'address',
   'lead_status', 'intent_score', 'suggested_action', 'won_lost_reason', 'lost_reason',
   'expected_close_date', 'score_reason', 'course_interest_id',
 ];
@@ -1006,25 +963,40 @@ const mergeDuplicateLeads = async (req, res) => {
       return res.status(400).json({ error: 'keep_id cannot also appear in remove_ids.' });
     }
 
-    const owned = await query(
-      'SELECT id FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
-      [req.tenantId, [keep_id, ...remove_ids]]
-    );
-    if (owned.rows.length !== remove_ids.length + 1) {
-      return res.status(404).json({ error: 'One or more leads not found.' });
-    }
-
     await transaction(async (client) => {
-      for (const table of DUPLICATE_LEAD_CHILD_TABLES) {
-        await client.query(
-          `UPDATE ${table} SET lead_id = $1 WHERE lead_id = ANY($2::uuid[])`,
-          [keep_id, remove_ids]
-        );
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`lead-ingestion:${req.tenantId}`]);
+      const owned = await client.query('SELECT * FROM leads WHERE tenant_id=$1 AND id=ANY($2::uuid[]) ORDER BY created_at,id FOR UPDATE', [req.tenantId, [keep_id, ...remove_ids]]);
+      if (owned.rows.length !== remove_ids.length + 1) throw Object.assign(new Error('One or more leads not found.'), { status: 404 });
+      if (owned.rows[0].id !== keep_id) throw Object.assign(new Error('Keep the oldest lead in the preview.'), { status: 422 });
+      const settings = await client.query('SELECT settings FROM tenants WHERE id=$1', [req.tenantId]);
+      const groups = duplicateGroups(owned.rows, settings.rows[0]?.settings?.dedupe_mode);
+      if (groups.length !== 1 || groups[0].leads.length !== owned.rows.length) throw Object.assign(new Error('Selected leads no longer form a duplicate group. Refresh the preview.'), { status: 409 });
+      // Keep a recoverable snapshot of every removed lead, including custom fields.
+      await client.query(`INSERT INTO lead_activities (tenant_id,lead_id,activity_type,title,metadata,created_by)
+        VALUES ($1,$2,'merge','Duplicate leads merged',$3,$4)`, [req.tenantId, keep_id, JSON.stringify({ removed_leads: owned.rows.slice(1) }), req.user.id]);
+      const children = await client.query(`SELECT DISTINCT ns.nspname AS schema, cl.relname AS table_name, a.attname AS column_name
+        FROM pg_constraint c JOIN pg_class cl ON cl.oid=c.conrelid JOIN pg_namespace ns ON ns.oid=cl.relnamespace
+        JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1]
+        WHERE c.contype='f' AND c.confrelid='leads'::regclass AND array_length(c.conkey,1)=1`);
+      const quote = name => '"' + name.replace(/"/g, '""') + '"';
+      // Preserve colliding sequence state in the merge activity, then retain the oldest enrollment.
+      if (children.rows.some(c => c.table_name === 'automation_enrollments')) {
+        const enrollments = await client.query('SELECT * FROM automation_enrollments WHERE tenant_id=$1 AND lead_id=ANY($2::uuid[]) ORDER BY enrolled_at,id FOR UPDATE', [req.tenantId, [keep_id,...remove_ids]]);
+        const seen = new Set();
+        for (const enrollment of enrollments.rows) {
+          if (!seen.has(enrollment.sequence_id)) { seen.add(enrollment.sequence_id); continue; }
+          await client.query(`INSERT INTO lead_activities (tenant_id,lead_id,activity_type,title,metadata) VALUES ($1,$2,'merge','Duplicate sequence enrollment archived',$3)`, [req.tenantId,keep_id,JSON.stringify({ enrollment })]);
+          await client.query('DELETE FROM automation_enrollments WHERE id=$1', [enrollment.id]);
+        }
       }
-
+      for (const child of children.rows) {
+        await client.query(`UPDATE ${quote(child.schema)}.${quote(child.table_name)} SET ${quote(child.column_name)}=$1 WHERE ${quote(child.column_name)}=ANY($2::uuid[])`, [keep_id,remove_ids]);
+      }
+      const columns = await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='leads'");
+      const available = new Set(columns.rows.map(c => c.column_name));
       // Fill in any blanks on the kept lead — for each column, pull the most recent
       // non-null value among the duplicates being removed.
-      const fillSet = DUPLICATE_LEAD_FILL_COLUMNS.map(col =>
+      const fillSet = DUPLICATE_LEAD_FILL_COLUMNS.filter(col => available.has(col)).map(col =>
         `${col} = COALESCE(k.${col}, (SELECT ${col} FROM leads WHERE id = ANY($2::uuid[]) AND ${col} IS NOT NULL ORDER BY created_at DESC LIMIT 1))`
       ).join(',\n           ');
       await client.query(
@@ -1048,6 +1020,8 @@ const mergeDuplicateLeads = async (req, res) => {
         [keep_id, remove_ids]
       );
 
+      await client.query(`UPDATE leads k SET custom_fields = agg.fields || COALESCE(k.custom_fields, '{}') FROM (SELECT COALESCE(jsonb_object_agg(key,value), '{}') AS fields FROM leads l, jsonb_each(l.custom_fields) WHERE l.id=ANY($2::uuid[])) agg WHERE k.id=$1`, [keep_id,remove_ids]);
+
       // Union tags from the removed duplicates onto the kept lead
       await client.query(
         `UPDATE leads k SET tags = agg.tags
@@ -1067,7 +1041,7 @@ const mergeDuplicateLeads = async (req, res) => {
     res.json({ merged: remove_ids.length, kept: keep_id });
   } catch (error) {
     console.error('mergeDuplicateLeads error:', error);
-    res.status(500).json({ error: 'Failed to merge duplicate leads.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to merge duplicate leads.' });
   }
 };
 
@@ -1080,7 +1054,7 @@ const getStages = async (req, res) => {
     );
     res.json({ stages: result.rows });
   } catch (error) {
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -1138,7 +1112,9 @@ const importLeads = async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
 
     const XLSX = require('xlsx');
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const workbook = /\.csv$/i.test(req.file.originalname)
+      ? XLSX.read(req.file.buffer.toString('utf8').replace(/^\uFEFF/, ''), { type: 'string' })
+      : XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
 
@@ -1173,9 +1149,12 @@ const importLeads = async (req, res) => {
     );
     const validStages = new Set(stagesResult.rows.map(s => s.name));
 
-    // Reserve a block of Lead IDs up front (one per row, worst case) and hand them
-    // out in order as rows are actually inserted below.
-    const getNextLeadNumber = await reserveLeadNumbers(req.tenantId, rows.length);
+    const invalidPhones = rows.flatMap((row, index) => {
+      const phoneKey = Object.keys(keyMap).find(k => keyMap[k] === 'phone');
+      try { normalizePhone(row[phoneKey]); return []; }
+      catch (error) { return [{ row: index + 2, error: error.message }]; }
+    });
+    if (invalidPhones.length) return res.status(422).json({ error: 'Import contains invalid phone numbers. No rows were imported.', errors: invalidPhones });
 
     let inserted = 0, skipped = 0;
     const errors = [];
@@ -1197,9 +1176,8 @@ const importLeads = async (req, res) => {
       // Require at least name
       if (!lead.name) { addSkip(rowNumber, '', 'Missing name'); continue; }
 
-      // Normalise phone — strip non-digits, allow leading +
-      if (lead.phone) lead.phone = lead.phone.replace(/[^\d+]/g, '').slice(0, 15);
-      if (!lead.phone) { addSkip(rowNumber, lead.name, 'Missing phone'); continue; }
+      try { lead.phone = normalizePhone(lead.phone); }
+      catch (error) { errors.push({ row: rowNumber, error: error.message }); addSkip(rowNumber, lead.name, error.message); continue; }
 
       // Validate/default stage
       const stageInput = (lead.stage || '').toLowerCase().trim();
@@ -1209,30 +1187,14 @@ const importLeads = async (req, res) => {
       const dv = parseFloat(String(lead.deal_value).replace(/[^0-9.]/g, ''));
       lead.deal_value = isNaN(dv) ? null : dv;
 
-      const leadNumber = getNextLeadNumber();
 
       try {
-        const insertResult = await query(
-          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, stage, notes, deal_value, location, lead_date)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-           ON CONFLICT DO NOTHING
-           RETURNING id`,
-          [
-            req.tenantId,
-            leadNumber,
-            lead.name,
-            lead.phone,
-            lead.email || null,
-            lead.source || 'import',
-            lead.stage,
-            lead.notes || null,
-            lead.deal_value,
-            lead.city || null,
-            lead.lead_date || new Date(),
-          ]
-        );
-        if (insertResult.rowCount > 0) inserted++;
-        else addSkip(rowNumber, lead.name, `Duplicate phone: ${lead.phone}`);
+        const result = await ingestLead(req.tenantId, {
+          ...lead, source: lead.source || 'import', location: lead.city || null,
+          lead_date: lead.lead_date || new Date(), deal_value: lead.deal_value || 0,
+        }, { actorId: req.user.id });
+        if (!result.duplicate) inserted++;
+        else addSkip(rowNumber, lead.name, `Duplicate submission attached to ${result.lead.lead_number}`);
       } catch (e) {
         errors.push({ row: rowNumber, name: lead.name, error: e.message });
         skipped++;
@@ -1275,8 +1237,8 @@ const exportLeads = async (req, res) => {
       else if (assigned_to)             { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
     }
     if (search) {
-      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i})`;
-      params.push(`%${search}%`);
+      whereClause += ` AND (normalize(l.name, NFKC) ILIKE $${i} OR l.phone ILIKE $${i})`;
+      params.push(`%${search.normalize('NFKC')}%`);
       i++;
     }
     const dateCol = date_field === 'created_at' ? 'l.created_at' : 'COALESCE(l.lead_date, l.created_at)';

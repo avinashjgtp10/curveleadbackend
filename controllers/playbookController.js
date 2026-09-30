@@ -1,3 +1,4 @@
+const { metricScope, getMetrics, getBreakdown } = require('../services/metrics');
 const { query } = require('../config/db');
 const { generatePlaybookForTenant } = require('../jobs/playbookGenerator');
 
@@ -62,7 +63,11 @@ const getCoaching = async (req, res) => {
     const allScores = Object.values(byStaff).flatMap(s => s.scores);
     const teamAvgScore = allScores.length ? allScores.reduce((a, b) => a + b, 0) / allScores.length : null;
 
-    const staff = staffResult.rows.map(row => {
+    const scope = await metricScope(req);
+    const metrics = await getMetrics(scope);
+    const breakdown = await getBreakdown(scope, 'assigned_to');
+    const staff = staffResult.rows.filter(row => !scope.staffId || row.id === scope.staffId).map(original => {
+      const row = { ...original, ...(breakdown.find(m => m.assigned_to === original.id) || { total_leads: 0, won: 0 }) };
       const calls = byStaff[row.id];
       const avgScore = calls?.scores.length ? calls.scores.reduce((a, b) => a + b, 0) / calls.scores.length : null;
       const topMissed = calls
@@ -81,10 +86,10 @@ const getCoaching = async (req, res) => {
       };
     });
 
-    res.json({ staff, team_avg_score: teamAvgScore !== null ? +teamAvgScore.toFixed(1) : null });
+    res.json({ staff, metrics, team_avg_score: teamAvgScore !== null ? +teamAvgScore.toFixed(1) : null });
   } catch (e) {
     console.error('getCoaching error:', e.message);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' });
   }
 };
 
