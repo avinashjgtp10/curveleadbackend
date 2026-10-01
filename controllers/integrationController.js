@@ -137,6 +137,17 @@ const updateSettings = async (req, res) => {
     if (meta_ad_account_id !== undefined) updated.meta_ad_account_id = meta_ad_account_id;
 
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
+    // The credentials were just verified with Meta, so reflect that now instead
+    // of showing the old "Disconnected" until the next 15-minute health check.
+    if (whatsappCredsChanged) {
+      if (updated.whatsapp_phone_number_id && updated.whatsapp_access_token)
+        await query(
+          `INSERT INTO integration_health(tenant_id,provider,token_valid,checked_at) VALUES($1,'whatsapp',true,now())
+           ON CONFLICT(tenant_id,provider) DO UPDATE SET token_valid=true,checked_at=now(),alerted_at=NULL`,
+          [req.tenantId]
+        );
+      else await query("DELETE FROM integration_health WHERE tenant_id=$1 AND provider='whatsapp'", [req.tenantId]);
+    }
     res.json({ message: 'Integration settings saved.' });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
