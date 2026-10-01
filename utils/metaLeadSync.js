@@ -1,3 +1,5 @@
+const { ingestLead } = require('../services/leadIngestion');
+const { mapMetaFields } = require('./metaFieldData');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('./leadNumber');
 const { formatFieldDataNotes } = require('./metaFieldData');
@@ -70,15 +72,21 @@ const syncFacebookLeadsForTenant = async (tenantId) => {
         tenantId, campaignId: lead.campaign_id, campaignName: lead.campaign_name, adsetId: lead.adset_id,
       });
 
-      const leadNumber = await nextLeadNumber(tenantId);
-      const insertResult = await query(
-        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, meta_ad_id, meta_adset_id, stage, created_at, notes)
-         VALUES ($1,$2,$3,$4,$5,'meta_ads',$6,$7,$8,$9,$10,'new',$11,$12) ON CONFLICT DO NOTHING RETURNING *`,
-        [tenantId, leadNumber, name, phone, email, lead.ad_name || form.name || 'Facebook Lead Ad',
-         campaignId || null, lead.id, lead.ad_id || null, lead.adset_id || null, new Date(lead.created_time), notes]
-      );
-      const inserted = insertResult.rows[0];
-      if (!inserted) { skipped++; continue; }
+      let ingestion;
+      try {
+        ingestion = await ingestLead(tenantId, {
+          name, phone, email, source: 'meta_ads', source_detail: lead.ad_name || form.name,
+          campaign_id: campaignId || null, meta_lead_id: lead.id, meta_ad_id: lead.ad_id || null,
+          meta_adset_id: lead.adset_id || null, stage: 'new', created_at: new Date(lead.created_time), notes,
+          ...mapMetaFields(lead.field_data),
+        });
+      } catch (error) {
+        if (error.status !== 422) throw error;
+        console.warn('Invalid Meta lead phone; skipped submission', lead.id);
+        skipped++; continue;
+      }
+      const inserted = ingestion.lead;
+      if (ingestion.duplicate) { skipped++; continue; }
 
       const isFresh = Date.now() - new Date(lead.created_time).getTime() < FRESH_LEAD_WINDOW_MS;
       if (isFresh) sendWelcomeMessage({ tenantId, lead: inserted }).catch(() => {});
@@ -91,7 +99,9 @@ const syncFacebookLeadsForTenant = async (tenantId) => {
     }
   }
 
-  return { created, skipped };
+  const last_synced_at = new Date().toISOString();
+  await query(`UPDATE tenants SET settings = COALESCE(settings, '{}'::jsonb) || jsonb_build_object('meta_leads_last_synced_at', $2::text) WHERE id=$1`, [tenantId,last_synced_at]);
+  return { created, skipped, last_synced_at };
 };
 
 module.exports = { syncFacebookLeadsForTenant };

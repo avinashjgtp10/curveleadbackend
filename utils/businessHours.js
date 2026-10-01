@@ -12,8 +12,11 @@ const isWithinBusinessHours = (hours, now = new Date()) => {
   const day = DAY_INDEX[get('weekday')];
   const minutes = parseInt(get('hour')) * 60 + parseInt(get('minute'));
   const toMin = (hhmm) => parseInt(hhmm.slice(0, 2)) * 60 + parseInt(hhmm.slice(3, 5));
-  if (Array.isArray(hours.days) && !hours.days.includes(day)) return false;
-  return minutes >= toMin(hours.start) && minutes < toMin(hours.end);
+  const start=toMin(hours.start),end=toMin(hours.end);
+  const overnight=start>end;
+  const businessDay=overnight&&minutes<end?(day+6)%7:day;
+  if (Array.isArray(hours.days) && !hours.days.includes(businessDay)) return false;
+  return overnight ? minutes>=start||minutes<end : minutes>=start&&minutes<end;
 };
 
 module.exports = { isWithinBusinessHours };

@@ -46,7 +46,7 @@ const gatherDigest = async ({ tenantId, since, assignedTo }) => {
          COUNT(*) FILTER (WHERE DATE(f.next_followup_at) < CURRENT_DATE) as overdue
        FROM lead_followups f
        JOIN leads l ON f.lead_id = l.id
-       WHERE f.tenant_id = $1 AND f.is_completed = false AND DATE(f.next_followup_at) <= CURRENT_DATE
+       WHERE f.tenant_id = $1 AND ${require('../services/followupSummary').active} AND DATE(f.next_followup_at) <= CURRENT_DATE
          ${assignedTo ? 'AND l.assigned_to = $2' : ''}`,
       assignedTo ? [tenantId, assignedTo] : [tenantId]
     ),

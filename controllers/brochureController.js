@@ -71,11 +71,13 @@ const shareWithLead = async (req, res) => {
     const tenant = tenantRes.rows[0];
     if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number.' });
 
+    if (req.user.role==='staff' && lead.assigned_to!==req.user.id) return res.status(403).json({error:'Lead not assigned to you.'});
+    const trackedUrl=await require('../services/features').newContentLink({tenantId:req.tenantId,leadId,kind:'brochure',contentId:brochureId,title:brochure.name,destination:brochure.file_url});
     const msg = [
       `Hi ${lead.name}! 👋`,
       ``,
       `Here's our *${brochure.name}* for you:`,
-      brochure.file_url,
+      trackedUrl,
       ``,
       tenant.phone ? `For more info, call us at ${tenant.phone}` : null,
       ``,

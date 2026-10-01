@@ -1,3 +1,7 @@
+const { buildLeadSearch } = require('../utils/leadSearch');
+const { duplicateGroups } = require('../services/duplicates');
+const { ingestLead } = require('../services/leadIngestion');
+const { normalizePhone, normalizeSource, normalizeLead, statusChangeTitle } = require('../utils/dataQuality');
 const { query, transaction } = require('../config/db');
 const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSED_AFTER_MINUTES } = require('../utils/leadSla');
@@ -8,7 +12,6 @@ const { createNotification, notifyNewLeadToAdmins } = require('./notificationCon
 const { checkNewLeadTriggers, checkStageChangeTriggers, checkLeadStatusTriggers } = require('../utils/automationTriggers');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
-const { sendLeadConversionEvent } = require('../utils/metaCapi');
 
 // GET /api/leads - with filters
 const SORT_COLUMNS = {
@@ -25,7 +28,9 @@ const SORT_COLUMNS = {
 
 const getLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, page = 1, limit = 20, hide_stages, has_attachment, stalled } = req.query;
+    const { stage, lead_status, source, score, followup_health, sla_status, assigned_to, search, date_field, date_from, date_to, sort, dir, hide_stages, has_attachment, stalled } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
 
     let whereClause = 'WHERE l.tenant_id = $1';
@@ -38,6 +43,20 @@ const getLeads = async (req, res) => {
       params.push(req.user.id);
     }
 
+    if(req.query.metric) {
+      if(!['created','won'].includes(req.query.metric)) return res.status(422).json({error:'Invalid metric filter.'});
+      const scope=await require('../services/metrics').metricScope(req);
+      const from=`$${i++}`,to=`$${i++}`;params.push(scope.from,scope.to);
+      whereClause+=` AND ${req.query.metric==='won'?require('../services/metrics').wonPredicate(from,to):`l.created_at>=${from} AND l.created_at<${to}`}`;
+    }
+    if(req.query.activity) {
+      const activity=require('../services/dashboardActivity');const b=await activity.boundaries(req.tenantId);
+      const from=`$${i++}`,month=`$${i++}`,week=`$${i++}`;params.push(b.today,b.month,b.week);
+      const predicate=activity.predicates(from,month,week)[req.query.activity];
+      if(!predicate)return res.status(422).json({error:'Invalid activity filter.'});
+      // Keep all three bound parameters referenced even for predicates with no date restriction.
+      whereClause+=` AND (${predicate}) AND ${from}::timestamptz IS NOT NULL AND ${month}::timestamptz IS NOT NULL AND ${week}::timestamptz IS NOT NULL`;
+    }
     if (hide_stages) {
       const stagesToHide = hide_stages.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
       if (stagesToHide.length) {
@@ -74,18 +93,9 @@ const getLeads = async (req, res) => {
       if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
       else if (assigned_to) { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
     }
-    if (search) {
-      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.lead_number ILIKE $${i})`;
-      params.push(`%${search}%`);
-      i++;
-    }
     const dateColumn = date_field === 'created_at' ? 'l.created_at' : 'COALESCE(l.lead_date, l.created_at)';
     if (date_from) { whereClause += ` AND ${dateColumn} >= $${i++}`; params.push(date_from); }
     if (date_to) { whereClause += ` AND ${dateColumn} < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
-
-    const limitParam = i++;
-    const offsetParam = i;
-    params.push(limit, offset);
 
     // pf = the lead's current pending (not-completed) follow-up, if any — feeds both the
     // follow-up_health filter above and next_followup_at below.
@@ -98,17 +108,32 @@ const getLeads = async (req, res) => {
       LEFT JOIN LATERAL (
         SELECT next_followup_at, followup_type
         FROM lead_followups
-        WHERE lead_id = l.id AND is_completed = false
+        WHERE lead_id = l.id AND is_completed = false AND dismissed_at IS NULL
         ORDER BY next_followup_at ASC
         LIMIT 1
       ) pf ON true
     `;
 
+    const searchPlan = buildLeadSearch(search, i);
+    const scopedWhere = whereClause;
+    let searchMode = searchPlan ? 'direct' : 'none';
+    if (searchPlan) {
+      params.push(...searchPlan.values);
+      i += searchPlan.values.length;
+      whereClause = `${scopedWhere} AND ${searchPlan.direct}`;
+    }
+    let countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params);
+    if (searchPlan?.fuzzy && Number(countResult.rows[0].count) === 0) {
+      searchMode = 'fuzzy';
+      whereClause = `${scopedWhere} AND (${searchPlan.fuzzy})`;
+      countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params);
+    }
     const sortColumn = SORT_COLUMNS[sort] || 'l.created_at';
     const sortDir = dir === 'asc' ? 'ASC' : 'DESC';
-    const orderClause = sort
-      ? `ORDER BY ${sortColumn} ${sortDir} NULLS LAST, l.created_at DESC`
-      : 'ORDER BY l.created_at DESC';
+    const relevance = searchPlan ? (searchMode === 'fuzzy' ? searchPlan.fuzzyRank : searchPlan.rank) + ', ' : '';
+    const orderClause = `ORDER BY ${relevance}${sortColumn} ${sortDir} NULLS LAST, l.created_at DESC, l.id`;
+    const limitParam = i++, offsetParam = i;
+    params.push(limit, offset);
 
     const leadsQuery = `
       SELECT l.*,
@@ -125,9 +150,9 @@ const getLeads = async (req, res) => {
     `;
 
     const result = await query(leadsQuery, params);
-    const countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params.slice(0, -2));
 
     res.json({
+      search_mode: searchMode,
       leads: result.rows.map(r => ({ ...r, attachment_count: parseInt(r.attachment_count), ...computeLeadSla(r) })),
       pagination: {
         total: parseInt(countResult.rows[0].count),
@@ -138,7 +163,7 @@ const getLeads = async (req, res) => {
     });
   } catch (error) {
     console.error('Get leads error:', error);
-    res.status(500).json({ error: 'Failed to fetch leads.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch leads.' });
   }
 };
 
@@ -204,27 +229,12 @@ const createLead = async (req, res) => {
 
     if (!name || !phone) return res.status(400).json({ error: 'Name and phone required.' });
 
-    // Check duplicate
-    const existing = await query(
-      'SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2',
-      [req.tenantId, phone]
-    );
-    if (existing.rows.length > 0) {
-      return res.status(409).json({ error: 'Lead with this phone already exists.', existing_id: existing.rows[0].id });
-    }
-
-    const result = await transaction(async (client) => {
-      const leadNumber = await nextLeadNumber(req.tenantId, client);
-
-      return client.query(
-        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, location, business_name, address, source, source_detail, campaign_id,
-                            stage, assigned_to, notes, deal_value, expected_close_date, tags, lead_date)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-         RETURNING *`,
-        [req.tenantId, leadNumber, name, phone, email, location, business_name, address, source || 'manual', source_detail, campaign_id || null,
-         stage || 'new', assigned_to, notes, deal_value || 0, expected_close_date, tags, lead_date || new Date()]
-      );
-    });
+    const ingestion = await ingestLead(req.tenantId, {
+      name, phone, email, location, business_name, address, source, source_detail, campaign_id: campaign_id || null,
+      stage: stage || 'new', assigned_to, notes, deal_value: deal_value || 0, expected_close_date, tags, lead_date: lead_date || new Date(),
+    }, { actorId: req.user.id });
+    if (ingestion.duplicate) return res.status(200).json({ message: 'Duplicate submission attached to existing lead.', ...(req.user.role !== 'staff' || ingestion.lead.assigned_to === req.user.id ? { lead: ingestion.lead } : {}), duplicate: true });
+    const result = { rows: [ingestion.lead] };
 
     // Log activity
     await query(
@@ -251,13 +261,16 @@ const createLead = async (req, res) => {
     res.status(201).json({ message: 'Lead created.', lead: result.rows[0] });
   } catch (error) {
     console.error('Create lead error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
 // PUT /api/leads/:id
 const updateLead = async (req, res) => {
   try {
+    if (req.body.phone !== undefined) req.body.phone = normalizePhone(req.body.phone);
+    if (req.body.source !== undefined) req.body.source = normalizeSource(req.body.source);
+    if (req.body.name !== undefined) req.body.name = String(req.body.name).normalize('NFKC');
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'business_name', 'address', 'source', 'source_detail', 'campaign_id',
       'stage', 'lead_status', 'assigned_to', 'notes', 'deal_value', 'expected_close_date',
@@ -312,7 +325,6 @@ const updateLead = async (req, res) => {
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
 
     // Auto-set won_at / lost_at based on stage's is_won / is_lost flag
-    let stageMetaEvent = null;
     let stageIsLost = false;
     let stageIsWon = false;
     if (req.body.stage) {
@@ -320,10 +332,9 @@ const updateLead = async (req, res) => {
         'SELECT is_won, is_lost, meta_event_name FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
         [req.tenantId, req.body.stage]
       );
-      stageMetaEvent = stageInfo.rows[0]?.meta_event_name || null;
       stageIsLost = !!stageInfo.rows[0]?.is_lost;
       stageIsWon = !!stageInfo.rows[0]?.is_won;
-      if (stageInfo.rows[0]?.is_won) updates.push('won_at = NOW()');
+      if (stageInfo.rows[0]?.is_won && req.body.stage !== prev.stage) updates.push('won_at = NOW()');
       if (stageInfo.rows[0]?.is_lost) {
         updates.push('lost_at = NOW()');
         if (!req.body.lost_reason) {
@@ -341,36 +352,21 @@ const updateLead = async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'Lead not found.' });
 
     const stageChanged  = req.body.stage       !== undefined && req.body.stage       !== prev.stage;
-    const statusChanged = req.body.lead_status  !== undefined && req.body.lead_status  !== prev.lead_status;
+    const statusChanged = req.body.lead_status !== undefined && !!statusChangeTitle(prev.lead_status, req.body.lead_status);
 
-    // Log to lead_stage_history when stage or status changes
-    if (stageChanged || statusChanged) {
-      await query(
-        `INSERT INTO lead_stage_history
-           (tenant_id, lead_id, prev_stage, new_stage, prev_status, new_status, changed_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [
-          req.tenantId, req.params.id,
-          stageChanged  ? prev.stage       : null, stageChanged  ? req.body.stage       : null,
-          statusChanged ? prev.lead_status  : null, statusChanged ? req.body.lead_status  : null,
-          req.user.id,
-        ]
-      ).catch(() => {}); // non-blocking
-    }
+    // The database trigger records every writer's transitions transactionally.
 
     // Log stage change to lead_activities
     if (stageChanged) {
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
          VALUES ($1, $2, 'stage_change', $3, $4)`,
-        [req.tenantId, req.params.id, `Stage changed to ${req.body.stage}`, req.user.id]
+        [req.tenantId, req.params.id, statusChangeTitle(prev.stage, req.body.stage, 'Stage'), req.user.id]
       ).catch(() => {});
       if ((prev.stage || '').toLowerCase() === 'new') {
         recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: 'stage_change' }).catch(() => {});
       }
-      if (result.rows[0].meta_lead_id && stageMetaEvent) {
-        sendLeadConversionEvent({ tenantId: req.tenantId, lead: result.rows[0], eventName: stageMetaEvent }).catch(() => {});
-      }
+
       checkStageChangeTriggers({
         tenantId: req.tenantId, leadId: req.params.id, newStage: req.body.stage, isLost: stageIsLost, isWon: stageIsWon,
       }).catch(() => {});
@@ -381,7 +377,7 @@ const updateLead = async (req, res) => {
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
          VALUES ($1, $2, 'status_change', $3, $4)`,
-        [req.tenantId, req.params.id, `Status changed to ${req.body.lead_status}`, req.user.id]
+        [req.tenantId, req.params.id, statusChangeTitle(prev.lead_status, req.body.lead_status), req.user.id]
       ).catch(() => {});
       checkLeadStatusTriggers({
         tenantId: req.tenantId, leadId: req.params.id, newStatus: req.body.lead_status,
@@ -412,7 +408,7 @@ const updateLead = async (req, res) => {
     res.json({ lead: result.rows[0] });
   } catch (error) {
     console.error('Update lead error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -426,7 +422,7 @@ const deleteLead = async (req, res) => {
     res.json({ message: 'Lead deleted.' });
   } catch (error) {
     console.error('Delete lead error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -442,7 +438,7 @@ const logCallClick = async (req, res) => {
     res.json({ first_response_recorded: !!lead });
   } catch (error) {
     console.error('Log call click error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -459,18 +455,21 @@ const markContacted = async (req, res) => {
     res.json({ lead });
   } catch (error) {
     console.error('Mark contacted error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
 // POST /api/leads/:id/note - Add note/activity
+const { validAppointmentDate, formatDateTime } = require('../utils/dateTime');
+
 const addFollowup = async (req, res) => {
   try {
-    const { notes, followup_type, outcome, next_followup_at, whatsapp_log, meeting_url } = req.body;
+    let { notes, followup_type, outcome, next_followup_at, whatsapp_log, meeting_url } = req.body;
 
-    if (!next_followup_at) {
-      return res.status(400).json({ error: 'Follow-up date and time are required.' });
+    if (!validAppointmentDate(next_followup_at)) {
+      return res.status(400).json({ error: 'A valid follow-up date and time with timezone are required.' });
     }
+    next_followup_at = new Date(next_followup_at).toISOString();
 
     const leadCheck = await query(
       'SELECT id, name, phone, email, assigned_to FROM leads WHERE id = $1 AND tenant_id = $2',
@@ -514,18 +513,18 @@ const addFollowup = async (req, res) => {
     }
 
     const isDemo = (followup_type || '').toLowerCase() === 'demo';
-    const demoTime = new Date(next_followup_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+    const demoTime = formatDateTime(next_followup_at, tenantSettings.timezone || 'Asia/Kolkata');
 
     await query(
-      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [req.tenantId, req.params.id,
        isDemo ? 'demo_scheduled' : 'followup_scheduled',
        isDemo ? 'Demo Scheduled' : 'Follow-up Scheduled',
        isDemo && meeting_url
          ? `Scheduled for ${demoTime} · Link: ${meeting_url}`
          : `Scheduled for ${demoTime}`,
-       req.user.id]
+       req.user.id, JSON.stringify({ scheduled_at: new Date(next_followup_at).toISOString(), meeting_url: meeting_url || null })]
     );
     recordFirstResponse(req.tenantId, req.params.id, { by: req.user.id, type: isDemo ? 'demo_scheduled' : 'followup_scheduled' }).catch(() => {});
 
@@ -556,30 +555,21 @@ const addFollowup = async (req, res) => {
       }).catch(() => {});
     }
 
-    // Auto-send WhatsApp confirmation on demo/visit booking
+    // WhatsApp confirmation to the lead on demo/visit booking (reminders follow from
+    // jobs/bookingReminders). Staff can opt a single booking out with notify_lead: false.
     const isAppointment = ['demo', 'visit'].includes((followup_type || '').toLowerCase());
-    let whatsappSent = false;
-    if (isAppointment && lead.phone) {
-      try {
-        const waCredentials = tenantSettings.whatsapp_phone_number_id ? {
-          phone_number_id: tenantSettings.whatsapp_phone_number_id,
-          access_token: tenantSettings.whatsapp_access_token,
-        } : null;
-
-        const label = isDemo ? 'demo' : 'visit/appointment';
-        let msg = `Hi ${lead.name}, your ${label} with *${tenantName}* is confirmed for *${demoTime}*.`;
-        if (meeting_url) msg += `\n\nJoin here: ${meeting_url}`;
-        if (notes) msg += `\n\n_${notes}_`;
-
-        const { sendTextMessage } = require('../services/whatsappService');
-        const waRes = await sendTextMessage(lead.phone, msg, waCredentials);
-        whatsappSent = waRes.success;
-      } catch (e) {
-        console.error('Auto WhatsApp error:', e.message);
-      }
+    const notifyLead = req.body.notify_lead !== false;
+    if (!notifyLead) {
+      await query('UPDATE lead_followups SET notify_lead = false WHERE id = $1', [result.rows[0].id]).catch(() => {});
+    }
+    const { bookingSettings, sendBookingMessage } = require('../services/bookingMessages');
+    let whatsapp = null;
+    if (isAppointment && notifyLead && bookingSettings(tenantSettings).confirmation_enabled) {
+      whatsapp = await sendBookingMessage(result.rows[0].id, 'confirmation')
+        .catch(e => { console.error('Booking confirmation error:', e.message); return { sent: false, status: 'failed', error: 'Failed to send WhatsApp confirmation.' }; });
     }
 
-    res.status(201).json({ followup: result.rows[0], emailSent: !!(isDemo && meeting_url && lead.email), whatsappSent });
+    res.status(201).json({ followup: result.rows[0], emailSent: !!(isDemo && meeting_url && lead.email), whatsappSent: !!whatsapp?.sent, whatsapp });
   } catch (error) {
     console.error('Add followup error:', error);
     res.status(500).json({ error: 'Failed to schedule follow-up.' });
@@ -760,9 +750,11 @@ const getTodayFollowups = async (req, res) => {
   try {
     const { search, type, date_from, date_to } = req.query;
 
-    let where = 'WHERE f.tenant_id = $1 AND f.is_completed = false';
+    let where = `WHERE f.tenant_id = $1 AND ${require('../services/followupSummary').active}`;
     const params = [req.tenantId];
-    let idx = 2;
+    const timezone=(await query("SELECT COALESCE(settings->>'timezone','Asia/Kolkata') tz FROM tenants WHERE id=$1",[req.tenantId])).rows[0]?.tz||'Asia/Kolkata';
+    params.push(timezone);let idx = 3;
+    const localDate="(f.next_followup_at AT TIME ZONE 'UTC' AT TIME ZONE $2)::date";
 
     // Staff see only follow-ups for their assigned leads
     if (req.user.role === 'staff') {
@@ -772,14 +764,14 @@ const getTodayFollowups = async (req, res) => {
 
     // If no date range provided, default to today + overdue
     if (!date_from && !date_to) {
-      where += ` AND DATE(f.next_followup_at) <= CURRENT_DATE`;
+      where += ` AND ${localDate} <= (now() AT TIME ZONE $2)::date`;
     }
     if (date_from) {
-      where += ` AND DATE(f.next_followup_at) >= $${idx++}`;
+      where += ` AND ${localDate} >= $${idx++}`;
       params.push(date_from);
     }
     if (date_to) {
-      where += ` AND DATE(f.next_followup_at) <= $${idx++}`;
+      where += ` AND ${localDate} <= $${idx++}`;
       params.push(date_to);
     }
     if (type) {
@@ -787,8 +779,8 @@ const getTodayFollowups = async (req, res) => {
       params.push(type);
     }
     if (search) {
-      where += ` AND (l.name ILIKE $${idx} OR l.phone ILIKE $${idx})`;
-      params.push(`%${search}%`);
+      where += ` AND (normalize(l.name, NFKC) ILIKE $${idx} OR l.phone ILIKE $${idx})`;
+      params.push(`%${search.normalize('NFKC')}%`);
       idx++;
     }
 
@@ -885,7 +877,7 @@ const addActivity = async (req, res) => {
     res.status(201).json({ activity: result.rows[0] });
   } catch (error) {
     console.error('Add note error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -906,17 +898,18 @@ const bulkUpdate = async (req, res) => {
     sets.push('updated_at = NOW()');
     params.push(ids);
 
+    const previous = stage !== undefined ? await query('SELECT id,stage FROM leads WHERE tenant_id=$1 AND id=ANY($2::uuid[])', [req.tenantId,ids]) : { rows: [] };
     const result = await query(
       `UPDATE leads SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = ANY($${i}::uuid[]) RETURNING id`,
       params
     );
 
     if (stage) {
-      await Promise.all(ids.map(id =>
+      await Promise.all(previous.rows.filter(row => row.stage !== stage).map(row =>
         query(
           `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
            VALUES ($1,$2,'stage_change',$3,$4)`,
-          [req.tenantId, id, `Stage changed to ${stage}`, req.user.id]
+          [req.tenantId, row.id, statusChangeTitle(row.stage, stage, 'Stage'), req.user.id]
         ).catch(() => {})
       ));
     }
@@ -924,7 +917,7 @@ const bulkUpdate = async (req, res) => {
     res.json({ updated: result.rowCount });
   } catch (error) {
     console.error('Bulk update error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -945,7 +938,7 @@ const bulkDelete = async (req, res) => {
     res.json({ deleted: result.rowCount });
   } catch (error) {
     console.error('Bulk delete error:', error);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -953,41 +946,19 @@ const bulkDelete = async (req, res) => {
 // and other formatting, so e.g. "9876543210" and "+91 98765 43210" are one group.
 const getDuplicateLeads = async (req, res) => {
   try {
-    const result = await query(
-      `SELECT RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) AS norm_phone,
-              json_agg(json_build_object(
-                'id', id, 'lead_number', lead_number, 'name', name, 'phone', phone,
-                'email', email, 'source', source, 'stage', stage, 'created_at', created_at
-              ) ORDER BY created_at ASC) AS leads
-       FROM leads
-       WHERE tenant_id = $1
-       GROUP BY norm_phone
-       HAVING COUNT(*) > 1
-       ORDER BY MIN(created_at) DESC`,
-      [req.tenantId]
-    );
-    res.json({ groups: result.rows });
+    const result = await query('SELECT id,lead_number,name,phone,email,source,stage,created_at FROM leads WHERE tenant_id=$1 ORDER BY created_at,id', [req.tenantId]);
+    const settings = await query('SELECT settings FROM tenants WHERE id=$1', [req.tenantId]);
+    res.json({ groups: duplicateGroups(result.rows, settings.rows[0]?.settings?.dedupe_mode) });
   } catch (error) {
     console.error('getDuplicateLeads error:', error);
     res.status(500).json({ error: 'Failed to find duplicate leads.' });
   }
 };
 
-// Every table that carries a lead_id gets its rows re-pointed at the kept lead
-// before the duplicate row is deleted, so notes/calls/quotations aren't lost.
-// students.lead_id has no ON DELETE action (RESTRICT), so leaving it out would
-// make the DELETE below fail outright for any duplicate that was enrolled.
-const DUPLICATE_LEAD_CHILD_TABLES = [
-  'lead_activities', 'followups', 'lead_followups', 'lead_followup_attempts',
-  'whatsapp_messages', 'lead_notes', 'lead_attachments', 'quotations',
-  'brochure_shares', 'call_recordings', 'lead_stage_history', 'ai_voice_calls',
-  'students',
-];
-
 // Nullable scalar columns on the lead itself worth carrying over from a removed
 // duplicate when the kept lead's own value is blank.
 const DUPLICATE_LEAD_FILL_COLUMNS = [
-  'email', 'location', 'meta_lead_id', 'source_detail', 'business_name', 'address',
+  'city', 'email', 'location', 'meta_lead_id', 'source_detail', 'business_name', 'address',
   'lead_status', 'intent_score', 'suggested_action', 'won_lost_reason', 'lost_reason',
   'expected_close_date', 'score_reason', 'course_interest_id',
 ];
@@ -1003,25 +974,40 @@ const mergeDuplicateLeads = async (req, res) => {
       return res.status(400).json({ error: 'keep_id cannot also appear in remove_ids.' });
     }
 
-    const owned = await query(
-      'SELECT id FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
-      [req.tenantId, [keep_id, ...remove_ids]]
-    );
-    if (owned.rows.length !== remove_ids.length + 1) {
-      return res.status(404).json({ error: 'One or more leads not found.' });
-    }
-
     await transaction(async (client) => {
-      for (const table of DUPLICATE_LEAD_CHILD_TABLES) {
-        await client.query(
-          `UPDATE ${table} SET lead_id = $1 WHERE lead_id = ANY($2::uuid[])`,
-          [keep_id, remove_ids]
-        );
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`lead-ingestion:${req.tenantId}`]);
+      const owned = await client.query('SELECT * FROM leads WHERE tenant_id=$1 AND id=ANY($2::uuid[]) ORDER BY created_at,id FOR UPDATE', [req.tenantId, [keep_id, ...remove_ids]]);
+      if (owned.rows.length !== remove_ids.length + 1) throw Object.assign(new Error('One or more leads not found.'), { status: 404 });
+      if (owned.rows[0].id !== keep_id) throw Object.assign(new Error('Keep the oldest lead in the preview.'), { status: 422 });
+      const settings = await client.query('SELECT settings FROM tenants WHERE id=$1', [req.tenantId]);
+      const groups = duplicateGroups(owned.rows, settings.rows[0]?.settings?.dedupe_mode);
+      if (groups.length !== 1 || groups[0].leads.length !== owned.rows.length) throw Object.assign(new Error('Selected leads no longer form a duplicate group. Refresh the preview.'), { status: 409 });
+      // Keep a recoverable snapshot of every removed lead, including custom fields.
+      await client.query(`INSERT INTO lead_activities (tenant_id,lead_id,activity_type,title,metadata,created_by)
+        VALUES ($1,$2,'merge','Duplicate leads merged',$3,$4)`, [req.tenantId, keep_id, JSON.stringify({ removed_leads: owned.rows.slice(1) }), req.user.id]);
+      const children = await client.query(`SELECT DISTINCT ns.nspname AS schema, cl.relname AS table_name, a.attname AS column_name
+        FROM pg_constraint c JOIN pg_class cl ON cl.oid=c.conrelid JOIN pg_namespace ns ON ns.oid=cl.relnamespace
+        JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1]
+        WHERE c.contype='f' AND c.confrelid='leads'::regclass AND array_length(c.conkey,1)=1`);
+      const quote = name => '"' + name.replace(/"/g, '""') + '"';
+      // Preserve colliding sequence state in the merge activity, then retain the oldest enrollment.
+      if (children.rows.some(c => c.table_name === 'automation_enrollments')) {
+        const enrollments = await client.query('SELECT * FROM automation_enrollments WHERE tenant_id=$1 AND lead_id=ANY($2::uuid[]) ORDER BY enrolled_at,id FOR UPDATE', [req.tenantId, [keep_id,...remove_ids]]);
+        const seen = new Set();
+        for (const enrollment of enrollments.rows) {
+          if (!seen.has(enrollment.sequence_id)) { seen.add(enrollment.sequence_id); continue; }
+          await client.query(`INSERT INTO lead_activities (tenant_id,lead_id,activity_type,title,metadata) VALUES ($1,$2,'merge','Duplicate sequence enrollment archived',$3)`, [req.tenantId,keep_id,JSON.stringify({ enrollment })]);
+          await client.query('DELETE FROM automation_enrollments WHERE id=$1', [enrollment.id]);
+        }
       }
-
+      for (const child of children.rows) {
+        await client.query(`UPDATE ${quote(child.schema)}.${quote(child.table_name)} SET ${quote(child.column_name)}=$1 WHERE ${quote(child.column_name)}=ANY($2::uuid[])`, [keep_id,remove_ids]);
+      }
+      const columns = await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='leads'");
+      const available = new Set(columns.rows.map(c => c.column_name));
       // Fill in any blanks on the kept lead — for each column, pull the most recent
       // non-null value among the duplicates being removed.
-      const fillSet = DUPLICATE_LEAD_FILL_COLUMNS.map(col =>
+      const fillSet = DUPLICATE_LEAD_FILL_COLUMNS.filter(col => available.has(col)).map(col =>
         `${col} = COALESCE(k.${col}, (SELECT ${col} FROM leads WHERE id = ANY($2::uuid[]) AND ${col} IS NOT NULL ORDER BY created_at DESC LIMIT 1))`
       ).join(',\n           ');
       await client.query(
@@ -1045,6 +1031,8 @@ const mergeDuplicateLeads = async (req, res) => {
         [keep_id, remove_ids]
       );
 
+      await client.query(`UPDATE leads k SET custom_fields = agg.fields || COALESCE(k.custom_fields, '{}') FROM (SELECT COALESCE(jsonb_object_agg(key,value), '{}') AS fields FROM leads l, jsonb_each(l.custom_fields) WHERE l.id=ANY($2::uuid[])) agg WHERE k.id=$1`, [keep_id,remove_ids]);
+
       // Union tags from the removed duplicates onto the kept lead
       await client.query(
         `UPDATE leads k SET tags = agg.tags
@@ -1064,7 +1052,7 @@ const mergeDuplicateLeads = async (req, res) => {
     res.json({ merged: remove_ids.length, kept: keep_id });
   } catch (error) {
     console.error('mergeDuplicateLeads error:', error);
-    res.status(500).json({ error: 'Failed to merge duplicate leads.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to merge duplicate leads.' });
   }
 };
 
@@ -1077,7 +1065,7 @@ const getStages = async (req, res) => {
     );
     res.json({ stages: result.rows });
   } catch (error) {
-    res.status(500).json({ error: 'Failed.' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
@@ -1141,7 +1129,9 @@ const importLeads = async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
 
     const XLSX = require('xlsx');
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const workbook = /\.csv$/i.test(req.file.originalname)
+      ? XLSX.read(req.file.buffer.toString('utf8').replace(/^\uFEFF/, ''), { type: 'string' })
+      : XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
 
@@ -1161,8 +1151,8 @@ const importLeads = async (req, res) => {
     // Name/Phone unmapped and making every imported row fail as "Missing name".
     const norm = (k) => String(k).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     const FIELD_MAP = {
-      name:       ['name','full_name','customer_name','lead_name','contact_name','client_name'],
-      phone:      ['phone','mobile','contact','phone_number','mobile_number','cell','telephone','tel'],
+      name:       ['customer','contact_full_name','name','full_name','customer_name','lead_name','contact_name','client_name'],
+      phone:      ['whatsapp_number','whatsapp','contact_number','phone','mobile','contact','phone_number','mobile_number','cell','telephone','tel'],
       email:      ['email','email_address','e_mail','mail'],
       source:     ['source','lead_source','channel','medium'],
       stage:      ['stage','status','lead_stage','pipeline_stage'],
@@ -1172,27 +1162,20 @@ const importLeads = async (req, res) => {
       lead_date:  ['lead_date','lead_datetime','lead_time','date','created_date','enquiry_date'],
     };
 
-    const autoMapping = {}; // header → field, auto-detected
+    const keyMap = {}; // header → field, auto-detected
     for (const [field, aliases] of Object.entries(FIELD_MAP)) {
       const match = headers.find(k => aliases.includes(norm(k)));
-      if (match) autoMapping[match] = field;
+      if (match) keyMap[match] = field;
     }
 
-    // An explicit { header: field } mapping from the column-mapping UI (or a preset
-    // like Privyr/AiSensy/Interakt) overrides auto-detection for both the preview
-    // and the real import, so what the user confirms in preview is what gets saved.
-    let clientMapping = null;
-    if (req.body.column_mapping) {
-      try { clientMapping = JSON.parse(req.body.column_mapping); } catch { clientMapping = null; }
+    let mapping;
+    try { mapping=req.body.column_mapping ? JSON.parse(req.body.column_mapping) : null; } catch { return res.status(422).json({error:'Invalid column mapping.'}); }
+    if(mapping) {
+      if(typeof mapping!=='object'||Array.isArray(mapping)||new Set(Object.values(mapping)).size!==Object.values(mapping).length||Object.values(mapping).some(f=>!Object.hasOwn(FIELD_MAP,f))) return res.status(422).json({error:'Invalid mapped field.'});
+      for(const key of Object.keys(keyMap))delete keyMap[key];
+      for(const [header,field] of Object.entries(mapping))if(Object.hasOwn(rows[0],header))keyMap[header]=field;
     }
-    const keyMap = clientMapping && Object.keys(clientMapping).length ? clientMapping : autoMapping;
-
-    // Fetch valid stages for this tenant — keyed by lowercase for case-insensitive
-    // matching against the import file, but stored with each stage's real casing
-    // (e.g. "New") so imported leads match lead_stages.name exactly, the same way
-    // manually-created leads do. Storing a lowercased stage here previously made
-    // the Stage dropdown (which matches options by exact string) show the wrong
-    // selected value for imported leads.
+    // Fetch valid stages for this tenant
     const stagesResult = await query(
       'SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_active = true',
       [req.tenantId]
@@ -1205,9 +1188,27 @@ const importLeads = async (req, res) => {
       ? new Set((await query('SELECT phone FROM leads WHERE tenant_id = $1', [req.tenantId])).rows.map(r => r.phone))
       : null;
 
-    // Reserve a block of Lead IDs up front (one per row, worst case) and hand them
-    // out in order as rows are actually inserted below. Dry runs don't consume any.
-    const getNextLeadNumber = dryRun ? null : await reserveLeadNumbers(req.tenantId, rows.length);
+    const invalidPhones = rows.flatMap((row, index) => {
+      const phoneKey = Object.keys(keyMap).find(k => keyMap[k] === 'phone');
+      try { normalizePhone(String(row[phoneKey]??'').replace(/^'(?=\+?\d)/,'')); return []; }
+      catch (error) { return [{ row: index + 2, error: error.message }]; }
+    });
+    if(req.body.dry_run==='true') {
+      const mode=(await query('SELECT settings FROM tenants WHERE id=$1',[req.tenantId])).rows[0]?.settings?.dedupe_mode || 'phone';
+      const existing=(await query('SELECT phone,email FROM leads WHERE tenant_id=$1',[req.tenantId])).rows;
+      const phones=new Set(),emails=new Set();
+      for(const r of existing) {try {phones.add(normalizePhone(r.phone));}catch {} if(r.email)emails.add(r.email.trim().toLowerCase());}
+      const preview=rows.map((row,index)=>{
+        const lead=Object.fromEntries(Object.entries(keyMap).map(([k,f])=>[f,String(row[k]??'').trim()]));
+        let error=null;try {lead.phone=normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,''));}catch(e){error=e.message;}
+        if(!lead.name)error='Name is required.';
+        const duplicate=!error&&mode!=='off'&&(phones.has(lead.phone)||(mode==='phone_or_email'&&lead.email&&emails.has(lead.email.toLowerCase())));
+        if(!error) {phones.add(lead.phone);if(lead.email)emails.add(lead.email.toLowerCase());}
+        return {row:index+2,name:lead.name,phone:lead.phone,action:error?'invalid':duplicate?'merge':'create',error};
+      });
+      return res.json({dry_run:true,headers:Object.keys(rows[0]),mapping:keyMap,total:rows.length,preview,invalid:preview.filter(r=>r.error).length,duplicates:preview.filter(r=>r.action==='merge').length});
+    }
+    if (invalidPhones.length) return res.status(422).json({ error: 'Import contains invalid phone numbers. No rows were imported.', errors: invalidPhones });
 
     let inserted = 0, skipped = 0, duplicates = 0, invalid = 0;
     const errors = [];
@@ -1234,13 +1235,8 @@ const importLeads = async (req, res) => {
         continue;
       }
 
-      // Normalise phone — strip non-digits, allow leading +
-      if (lead.phone) lead.phone = lead.phone.replace(/[^\d+]/g, '').slice(0, 15);
-      if (!lead.phone) {
-        invalid++; addSkip(rowNumber, lead.name, 'Missing phone');
-        if (dryRun && preview.length < 100) preview.push({ row: rowNumber, name: lead.name, phone: '', error: 'Missing phone' });
-        continue;
-      }
+      try { lead.phone = normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,'')); }
+      catch (error) { errors.push({ row: rowNumber, error: error.message }); addSkip(rowNumber, lead.name, error.message); continue; }
 
       // Validate/default stage — matched case-insensitively, stored with the
       // tenant's actual casing for that stage.
@@ -1251,37 +1247,14 @@ const importLeads = async (req, res) => {
       const dv = parseFloat(String(lead.deal_value).replace(/[^0-9.]/g, ''));
       lead.deal_value = isNaN(dv) ? null : dv;
 
-      if (dryRun) {
-        const isDup = existingPhones.has(lead.phone);
-        if (isDup) duplicates++;
-        if (preview.length < 100) preview.push({ row: rowNumber, name: lead.name, phone: lead.phone, action: isDup ? 'Duplicate — will be skipped' : 'Will be imported' });
-        continue;
-      }
-
-      const leadNumber = getNextLeadNumber();
 
       try {
-        const insertResult = await query(
-          `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, stage, notes, deal_value, location, lead_date)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-           ON CONFLICT DO NOTHING
-           RETURNING id`,
-          [
-            req.tenantId,
-            leadNumber,
-            lead.name,
-            lead.phone,
-            lead.email || null,
-            lead.source || 'import',
-            lead.stage,
-            lead.notes || null,
-            lead.deal_value,
-            lead.city || null,
-            lead.lead_date || new Date(),
-          ]
-        );
-        if (insertResult.rowCount > 0) inserted++;
-        else addSkip(rowNumber, lead.name, `Duplicate phone: ${lead.phone}`);
+        const result = await ingestLead(req.tenantId, {
+          ...lead, source: lead.source || 'import', location: lead.city || null,
+          lead_date: lead.lead_date || new Date(), deal_value: lead.deal_value || 0,
+        }, { actorId: req.user.id });
+        if (!result.duplicate) inserted++;
+        else addSkip(rowNumber, lead.name, `Duplicate submission attached to ${result.lead.lead_number}`);
       } catch (e) {
         errors.push({ row: rowNumber, name: lead.name, error: e.message });
         skipped++;
@@ -1308,69 +1281,20 @@ const importLeads = async (req, res) => {
 // GET /api/leads/export — download all matching leads as CSV
 const exportLeads = async (req, res) => {
   try {
-    const { stage, lead_status, source, score, assigned_to, search, date_field, date_from, date_to } = req.query;
-
-    let whereClause = 'WHERE l.tenant_id = $1';
-    const params = [req.tenantId];
-    let i = 2;
-
-    if (req.user.role === 'staff') {
-      whereClause += ` AND l.assigned_to = $${i++}`;
-      params.push(req.user.id);
+    const rows=[];let page=1,total=Infinity;
+    while(rows.length<total) {
+      let data,code=200;
+      await getLeads({...req,query:{...req.query,page,limit:1000}}, {status(c){code=c;return this;},json(d){data=d;}});
+      if(code!==200)return res.status(code).json(data);
+      const leads=data.leads || [];total=Number(data.pagination?.total)||0;
+      rows.push(...leads);if(!leads.length)break;page++;
     }
-
-    if (stage)       { whereClause += ` AND LOWER(l.stage) = LOWER($${i++})`;       params.push(stage); }
-    if (lead_status) { whereClause += ` AND LOWER(l.lead_status) = LOWER($${i++})`; params.push(lead_status); }
-    if (source)      { whereClause += ` AND l.source = $${i++}`;                    params.push(source); }
-    if (score)       { whereClause += ` AND l.lead_score = $${i++}`;                params.push(score); }
-    if (req.user.role !== 'staff') {
-      if (assigned_to === 'unassigned') { whereClause += ` AND l.assigned_to IS NULL`; }
-      else if (assigned_to)             { whereClause += ` AND l.assigned_to = $${i++}`; params.push(assigned_to); }
-    }
-    if (search) {
-      whereClause += ` AND (l.name ILIKE $${i} OR l.phone ILIKE $${i})`;
-      params.push(`%${search}%`);
-      i++;
-    }
-    const dateCol = date_field === 'created_at' ? 'l.created_at' : 'COALESCE(l.lead_date, l.created_at)';
-    if (date_from) { whereClause += ` AND ${dateCol} >= $${i++}`;                       params.push(date_from); }
-    if (date_to)   { whereClause += ` AND ${dateCol} < $${i++}::date + INTERVAL '1 day'`; params.push(date_to); }
-
-    const result = await query(
-      `SELECT l.name, l.phone, l.email, l.location, l.source, l.stage, l.lead_status, l.lead_score,
-              u.name as assigned_to_name, l.deal_value, l.notes, l.lost_reason,
-              TO_CHAR(l.created_at, 'DD-MM-YYYY') as created_at,
-              TO_CHAR(l.last_contacted_at, 'DD-MM-YYYY') as last_contacted_at
-       FROM leads l
-       LEFT JOIN users u ON l.assigned_to = u.id
-       ${whereClause}
-       ORDER BY l.created_at DESC
-       LIMIT 10000`,
-      params
-    );
-
-    const esc = (v) => {
-      if (v == null) return '';
-      const s = String(v);
-      return (s.includes(',') || s.includes('"') || s.includes('\n'))
-        ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-
-    const headers = ['Name','Phone','Email','Location','Source','Stage','Status','Score','Assigned To','Deal Value','Notes','Lost Reason','Created','Last Contacted'];
-    const rows = result.rows.map(r =>
-      [r.name,r.phone,r.email,r.location,r.source,r.stage,r.lead_status,r.lead_score,
-       r.assigned_to_name,r.deal_value,r.notes,r.lost_reason,r.created_at,r.last_contacted_at]
-      .map(esc).join(',')
-    );
-
-    const csv = [headers.join(','), ...rows].join('\n');
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="leads_export.csv"`);
-    res.send(csv);
-  } catch (error) {
-    console.error('Export leads error:', error);
-    res.status(500).json({ error: 'Failed to export leads.' });
-  }
+    const fields=['name','phone','email','location','source','stage','lead_status','lead_score','assigned_to_name','deal_value','notes','lost_reason','created_at','last_contacted_at'];
+    const esc=v=>'"'+String(v instanceof Date ? v.toISOString() : v??'').replace(/^[=+@-]/,"'$&").replace(/"/g,'""')+'"';
+    res.setHeader('Content-Type','text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition','attachment; filename="leads_export.csv"');
+    res.send([fields.join(','),...rows.map(r=>fields.map(f=>esc(r[f])).join(','))].join('\r\n'));
+  } catch(error) {console.error('Export leads:',error.message);res.status(500).json({error:'Export failed.'});}
 };
 
 module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, getDuplicateLeads, mergeDuplicateLeads, importLeads, getImportTemplate, getLeadStats, exportLeads, logCallClick, markContacted };

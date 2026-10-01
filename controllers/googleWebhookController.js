@@ -1,3 +1,4 @@
+const { ingestLead } = require('../services/leadIngestion');
 const crypto = require('crypto');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
@@ -33,15 +34,9 @@ const receiveGoogleLead = async (req, res) => {
 
     if (!phone) { console.warn('Google webhook: no phone'); return; }
 
-    const existing = await query('SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2', [tenantId, phone]);
-    if (existing.rows.length) { console.log(`Google webhook: duplicate phone ${phone}`); return; }
-
-    const leadNumber = await nextLeadNumber(tenantId);
-    const inserted = await query(
-      `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, stage)
-       VALUES ($1,$2,$3,$4,$5,'google_ads',$6,'new') RETURNING *`,
-      [tenantId, leadNumber, name, phone, email, `Campaign: ${gCampaignId || 'unknown'}`]
-    );
+    const ingestion = await ingestLead(tenantId, { name, phone, email, source: 'google_ads', source_detail: `Campaign: ${gCampaignId || 'unknown'}`, stage: 'new' }, { submissionKey: lead_id ? `google:${lead_id}` : null });
+    if (ingestion.duplicate) return;
+    const inserted = { rows: [ingestion.lead] };
     applyAssignmentRules({ tenantId, lead: inserted.rows[0] })
       .then(() => notifyNewLead({ tenantId, lead: inserted.rows[0] }))
       .catch(() => {});

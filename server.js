@@ -149,6 +149,7 @@ app.use('/api/ai-calling', apiLimiter, require('./routes/aiCalling'));
 app.use('/api/playbook', apiLimiter, require('./routes/playbook'));
 app.use('/api/automations', apiLimiter, require('./routes/automations'));
 app.use('/api/teams', apiLimiter, require('./routes/teams'));
+app.use('/api/features', apiLimiter, require('./routes/features'));
 app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
 
 // ============================================
@@ -200,6 +201,11 @@ app.listen(PORT, () => {
   setTimeout(runScheduledBroadcasts, 35 * 1000);
   setInterval(runScheduledBroadcasts, 60 * 1000);
 
+  // Demo/visit reminders to the lead on WhatsApp — checks every 5 minutes
+  const { runBookingReminders } = require('./jobs/bookingReminders');
+  setTimeout(runBookingReminders, 55 * 1000);
+  setInterval(runBookingReminders, 5 * 60 * 1000);
+
   // Meta ad spend/performance sync — runs every 6 hours
   const { runMetaAdInsightsSync } = require('./jobs/metaAdInsightsSync');
   setTimeout(runMetaAdInsightsSync, 45 * 1000);
@@ -215,6 +221,7 @@ app.listen(PORT, () => {
   // tenant per day (inside the target UTC hour, guarded by last-sent date)
   const { runDailyReportEmail } = require('./jobs/dailyReportEmail');
   setTimeout(runDailyReportEmail, 40 * 1000);
+  setInterval(() => require('./jobs/featureJobs').runFeatureJobs().catch(e => console.error('Feature jobs:', e.message)), 60 * 1000);
   setInterval(runDailyReportEmail, 15 * 60 * 1000);
 });
 

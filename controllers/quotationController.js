@@ -149,8 +149,9 @@ const send = async (req, res) => {
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://curvelead.com';
     const apiUrl = process.env.API_URL || 'http://localhost:3002';
-    const viewUrl = `${frontendUrl}/q/${q.id}`;
-    const pdfUrl = `${apiUrl}/api/quotations/pdf/${q.id}`;
+    const viewUrl = q.lead_id ? await require('../services/features').newContentLink({tenantId:req.tenantId,leadId:q.lead_id,kind:'quotation',contentId:q.id,title:String(q.quote_number),destination:`${frontendUrl}/q/${q.id}`}) : `${frontendUrl}/q/${q.id}`;
+    const pdfDestination = `${apiUrl}/api/quotations/pdf/${q.id}`;
+    const pdfUrl = q.lead_id ? await require('../services/features').newContentLink({tenantId:req.tenantId,leadId:q.lead_id,kind:'quotation',contentId:q.id,title:String(q.quote_number),destination:pdfDestination}) : pdfDestination;
 
     const msg = [
       `*Quotation #${q.quote_number}*`,

@@ -1,3 +1,4 @@
+const { ingestLead: ingestNormalizedLead } = require('../services/leadIngestion');
 const crypto = require('crypto');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
@@ -15,17 +16,9 @@ const { syncFacebookLeadsForTenant } = require('../utils/metaLeadSync');
 // ── helpers ────────────────────────────────────────────────────────────────
 
 const createLeadFromSource = async (tenantId, { name, phone, email, source, source_detail, campaign_id, extra = {} }) => {
-  if (!phone) throw new Error('phone required');
-
-  const existing = await query('SELECT id FROM leads WHERE tenant_id = $1 AND phone = $2', [tenantId, phone]);
-  if (existing.rows.length) return { duplicate: true, id: existing.rows[0].id };
-
-  const leadNumber = await nextLeadNumber(tenantId);
-  const result = await query(
-    `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, stage)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'new') RETURNING *`,
-    [tenantId, leadNumber, name || 'Unknown', phone, email || null, source, source_detail || null, campaign_id || null]
-  );
+  const ingestion = await ingestNormalizedLead(tenantId, { name, phone, email, source, source_detail, campaign_id: campaign_id || null, stage: 'new', ...extra });
+  if (ingestion.duplicate) return { duplicate: true, id: ingestion.lead.id };
+  const result = { rows: [ingestion.lead] };
   sendWelcomeMessage({ tenantId, lead: result.rows[0] }).catch(() => {});
   applyAssignmentRules({ tenantId, lead: result.rows[0] })
     .then(() => notifyNewLead({ tenantId, lead: result.rows[0] }))
@@ -41,7 +34,7 @@ const getSettings = async (req, res) => {
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     let settings = result.rows[0]?.settings || {};
     // Never expose the raw api_key — send masked version
-    const apiKey = settings.api_key || null;
+    const apiKey = settings.api_key || settings.api_key_prefix || null;
 
     // Legacy rows saved before verification existed have never been checked
     // against Meta — verify them now so stale/invalid credentials don't keep
@@ -55,6 +48,13 @@ const getSettings = async (req, res) => {
       } else {
         whatsappError = verify.error;
       }
+    }
+
+    // The 15-minute health job (jobs/featureJobs) re-checks the token; surface a failure here.
+    if (!whatsappError && settings.whatsapp_phone_number_id && settings.whatsapp_access_token) {
+      const health = (await query("SELECT token_valid FROM integration_health WHERE tenant_id = $1 AND provider = 'whatsapp'", [req.tenantId])
+        .catch(() => ({ rows: [] }))).rows[0];
+      if (health?.token_valid === false) whatsappError = 'Meta rejected the saved access token (expired or revoked)';
     }
 
     res.json({
@@ -82,6 +82,7 @@ const getSettings = async (req, res) => {
       whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token) && !whatsappError,
       whatsapp_display_number: settings.whatsapp_display_number || '',
       whatsapp_verified_name: settings.whatsapp_verified_name || '',
+      whatsapp_connected_via: settings.whatsapp_connected_via || 'manual',
       whatsapp_error: whatsappError,
       whatsapp_auto_responder_enabled: !!settings.whatsapp_auto_responder_enabled,
       whatsapp_auto_responder_message: settings.whatsapp_auto_responder_message || '',
@@ -123,6 +124,8 @@ const updateSettings = async (req, res) => {
     if (whatsapp_app_id !== undefined) updated.whatsapp_app_id = whatsapp_app_id;
 
     if (whatsappCredsChanged) {
+      // Manually entered credentials replace any one-click connection.
+      delete updated.whatsapp_connected_via;
       if (updated.whatsapp_phone_number_id && updated.whatsapp_access_token) {
         const verify = await verifyWhatsAppNumber(updated.whatsapp_phone_number_id, updated.whatsapp_access_token);
         if (!verify.verified) {
@@ -144,6 +147,17 @@ const updateSettings = async (req, res) => {
     if (meta_ad_account_id !== undefined) updated.meta_ad_account_id = meta_ad_account_id;
 
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
+    // The credentials were just verified with Meta, so reflect that now instead
+    // of showing the old "Disconnected" until the next 15-minute health check.
+    if (whatsappCredsChanged) {
+      if (updated.whatsapp_phone_number_id && updated.whatsapp_access_token)
+        await query(
+          `INSERT INTO integration_health(tenant_id,provider,token_valid,checked_at) VALUES($1,'whatsapp',true,now())
+           ON CONFLICT(tenant_id,provider) DO UPDATE SET token_valid=true,checked_at=now(),alerted_at=NULL`,
+          [req.tenantId]
+        );
+      else await query("DELETE FROM integration_health WHERE tenant_id=$1 AND provider='whatsapp'", [req.tenantId]);
+    }
     res.json({ message: 'Integration settings saved.' });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
@@ -154,8 +168,8 @@ const generateApiKey = async (req, res) => {
     const newKey = `clk_${crypto.randomBytes(24).toString('hex')}`;
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
-    const updated = { ...current, api_key: newKey, api_key_created_at: new Date().toISOString() };
-    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
+    const updated = { api_key: null, api_key_hash: crypto.createHash('sha256').update(newKey).digest('hex'), api_key_prefix: newKey.slice(0,8), api_key_created_at: new Date().toISOString() };
+    await query("UPDATE tenants SET settings = (COALESCE(settings,'{}'::jsonb)-'api_key') || $1::jsonb WHERE id = $2", [JSON.stringify(updated), req.tenantId]);
     // Return the full key only once
     res.json({ api_key: newKey, created_at: updated.api_key_created_at });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
@@ -166,8 +180,8 @@ const revokeApiKey = async (req, res) => {
   try {
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
-    const { api_key, api_key_created_at, ...rest } = current;
-    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(rest), req.tenantId]);
+    const { api_key, api_key_hash, api_key_prefix, api_key_created_at, ...rest } = current;
+    await query("UPDATE tenants SET settings=COALESCE(settings,'{}'::jsonb)-'api_key'-'api_key_hash'-'api_key_prefix'-'api_key_created_at' WHERE id=$1",[req.tenantId]);
     res.json({ message: 'API key revoked.' });
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
@@ -179,8 +193,8 @@ const ingestLead = async (req, res) => {
     if (!apiKey) return res.status(401).json({ error: 'API key required.' });
 
     const result = await query(
-      `SELECT id FROM tenants WHERE settings->>'api_key' = $1 AND subscription_status IN ('trial','active')`,
-      [apiKey]
+      `SELECT id FROM tenants WHERE (settings->>'api_key' = $1 OR settings->>'api_key_hash' = $2) AND subscription_status IN ('trial','active')`,
+      [apiKey, crypto.createHash('sha256').update(String(apiKey)).digest('hex')]
     );
     if (!result.rows.length) return res.status(401).json({ error: 'Invalid or expired API key.' });
     const tenantId = result.rows[0].id;
@@ -189,21 +203,21 @@ const ingestLead = async (req, res) => {
     if (!phone) return res.status(400).json({ error: 'phone is required.' });
 
     const lead = await createLeadFromSource(tenantId, { name, phone, email, source, source_detail, campaign_id });
-    if (lead.duplicate) return res.status(409).json({ error: 'Duplicate lead.', id: lead.id });
+    if (lead.duplicate) return res.status(200).json({ message: 'Duplicate submission attached to existing lead.', duplicate: true, id: lead.id });
 
     res.status(201).json({ message: 'Lead created.', id: lead.id });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) { console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
 };
 
 // ── GET /api/integrations/embed-script ────────────────────────────────────
 const getEmbedScript = async (req, res) => {
   try {
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
-    const apiKey = result.rows[0]?.settings?.api_key;
+    const apiKey = result.rows[0]?.settings?.api_key || (result.rows[0]?.settings?.api_key_hash ? 'PASTE_YOUR_SAVED_API_KEY_HERE' : null);
     if (!apiKey) return res.status(400).json({ error: 'Generate an API key first.' });
 
     const baseUrl = process.env.FRONTEND_URL || 'https://curvelead.com';
-    const script = `<!-- CurveLead Lead Capture Form -->
+    const script = `<!-- CurveLead Lead Capture Form. Replace PASTE_YOUR_SAVED_API_KEY_HERE with your saved API key before using this form. -->
 <div id="cl-lead-form"></div>
 <script>
 (function(){
@@ -388,7 +402,7 @@ const facebookSubscribeWebhook = async (req, res) => {
     }
   } catch (e) {
     console.error('facebookSubscribeWebhook:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 };
 
@@ -407,37 +421,25 @@ const facebookSubscriptionStatus = async (req, res) => {
     res.json({ subscribed, page_id: meta_page_id, page_name: settings.meta_page_name || '', subscribed_fields: app?.subscribed_fields || [] });
   } catch (e) {
     console.error('facebookSubscriptionStatus:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 };
 
-// ── GET /api/integrations/facebook/sync-status ─────────────────────────────
-// Lightweight status for the Leads page header — whether a Page is connected,
-// and when the most recent Meta-sourced lead came in (a proxy for "last synced"
-// since syncs aren't tracked separately from the leads they create).
 const facebookSyncStatus = async (req, res) => {
   try {
-    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
-    const settings = result.rows[0]?.settings || {};
-    const configured = !!(settings.meta_page_id && settings.meta_page_access_token);
-
-    const lastLead = await query(
-      `SELECT created_at FROM leads WHERE tenant_id = $1 AND source = 'meta_ads' ORDER BY created_at DESC LIMIT 1`,
-      [req.tenantId]
-    );
-
-    res.json({ configured, last_synced_at: lastLead.rows[0]?.created_at || null });
-  } catch (e) {
-    console.error('facebookSyncStatus:', e.message);
-    res.status(500).json({ error: 'Failed.' });
+    const result = await query(`SELECT settings->>'meta_leads_last_synced_at' AS last_synced_at,
+      (COALESCE(settings->>'meta_page_id','') <> '' AND COALESCE(settings->>'meta_page_access_token','') <> '') AS configured
+      FROM tenants WHERE id=$1`, [req.tenantId]);
+    res.json({ last_synced_at: result.rows[0]?.last_synced_at || null, configured: !!result.rows[0]?.configured });
+  } catch (error) {
+    console.error('Facebook sync status error:', error.message);
+    res.status(500).json({ error: 'Failed to load sync status.' });
   }
 };
-
-// ── POST /api/integrations/facebook/sync-leads ────────────────────────────
 const facebookSyncLeads = async (req, res) => {
   try {
-    const { created, skipped } = await syncFacebookLeadsForTenant(req.tenantId);
-    res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped });
+    const { created, skipped, last_synced_at } = await syncFacebookLeadsForTenant(req.tenantId);
+    res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped, last_synced_at });
   } catch (e) {
     if (e.code === 'NO_PAGE') return res.status(400).json({ error: e.message });
     console.error('facebookSyncLeads:', e.message);
@@ -475,4 +477,121 @@ const getCapiStats = async (req, res) => {
   }
 };
 
-module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSyncStatus, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
+// ── POST /api/integrations/whatsapp/embedded-signup ───────────────────────
+// One-click connect via Meta's WhatsApp Embedded Signup. The browser popup
+// returns a one-time code plus the WABA and phone number the customer picked;
+// everything then runs through the platform Meta app (META_APP_ID), so its
+// webhook and META_APP_SECRET cover every connected workspace.
+const fbPost = async (path, token, body) => {
+  const res = await fetch(`${GRAPH}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.error_user_msg || data.error.message);
+  return data;
+};
+
+const whatsappEmbeddedSignup = async (req, res) => {
+  try {
+    const { code, waba_id, phone_number_id } = req.body;
+    const isId = (v) => typeof v === 'string' && /^\d{5,25}$/.test(v);
+    if (typeof code !== 'string' || !code || !isId(waba_id) || !isId(phone_number_id))
+      return res.status(400).json({ error: 'Signup did not return a WhatsApp account and number. Please try again.' });
+
+    const appId = process.env.META_APP_ID;
+    const appSecret = process.env.META_APP_SECRET;
+    if (!appId || !appSecret) return res.status(500).json({ error: 'META_APP_ID / META_APP_SECRET not configured on server.' });
+
+    // Business integration token: scoped to the assets the customer granted, no expiry.
+    const { access_token: token } = await fbGet(
+      `/oauth/access_token?client_id=${appId}&client_secret=${encodeURIComponent(appSecret)}&code=${encodeURIComponent(code)}`
+    );
+    const auth = `access_token=${encodeURIComponent(token)}`;
+
+    // The IDs come from the browser, so confirm the number really is in that WABA.
+    const numbers = await fbGet(`/${waba_id}/phone_numbers?fields=id,display_phone_number,verified_name,platform_type&${auth}`);
+    const number = (numbers.data || []).find((n) => n.id === phone_number_id);
+    if (!number) return res.status(400).json({ error: 'That phone number is not part of the selected WhatsApp Business Account.' });
+
+    // Route this WABA's messages and status updates to our webhook.
+    await fbPost(`/${waba_id}/subscribed_apps`, token);
+
+    // Numbers added during signup still need registering on the Cloud API.
+    // The PIN becomes the number's two-step verification PIN, so keep it.
+    let pin = null;
+    if (number.platform_type !== 'CLOUD_API') {
+      pin = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+      await fbPost(`/${phone_number_id}/register`, token, { messaging_product: 'whatsapp', pin });
+    }
+
+    const current = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings || {};
+    const updated = {
+      ...current,
+      whatsapp_phone_number_id: phone_number_id,
+      whatsapp_access_token: token,
+      whatsapp_business_account_id: waba_id,
+      whatsapp_app_id: appId,
+      whatsapp_display_number: number.display_phone_number || '',
+      whatsapp_verified_name: number.verified_name || '',
+      whatsapp_connected_via: 'embedded_signup',
+      ...(pin ? { whatsapp_two_step_pin: pin } : {}),
+    };
+    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
+    await query(
+      `INSERT INTO integration_health(tenant_id,provider,token_valid,checked_at) VALUES($1,'whatsapp',true,now())
+       ON CONFLICT(tenant_id,provider) DO UPDATE SET token_valid=true,checked_at=now(),alerted_at=NULL`,
+      [req.tenantId]
+    );
+    res.json({ connected: true, display_phone_number: updated.whatsapp_display_number, verified_name: updated.whatsapp_verified_name });
+  } catch (e) {
+    console.error('whatsappEmbeddedSignup:', e.message);
+    res.status(400).json({ error: `Could not connect WhatsApp: ${e.message}` });
+  }
+};
+
+// ── POST /api/integrations/whatsapp/reconnect ─────────────────────────────
+// Re-checks the saved WhatsApp credentials with Meta and re-subscribes our app to the
+// WABA's webhooks (fixes replies/delivery statuses that stopped arriving). An invalid
+// token can't be repaired here — the client asks for a new one (needs_new_token).
+const whatsappReconnect = async (req, res) => {
+  try {
+    const current = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings || {};
+    const { whatsapp_phone_number_id: phoneId, whatsapp_access_token: token, whatsapp_business_account_id: wabaId } = current;
+    if (!phoneId || !token) return res.status(400).json({ error: 'WhatsApp is not connected yet.', needs_new_token: true });
+
+    const markHealth = valid => query(
+      `INSERT INTO integration_health(tenant_id,provider,token_valid,checked_at) VALUES($1,'whatsapp',$2,now())
+       ON CONFLICT(tenant_id,provider) DO UPDATE SET token_valid=$2,checked_at=now(),alerted_at=CASE WHEN $2 THEN NULL ELSE integration_health.alerted_at END`,
+      [req.tenantId, valid]
+    ).catch(() => {});
+
+    const verify = await verifyWhatsAppNumber(phoneId, token);
+    if (!verify.verified) {
+      await markHealth(false);
+      return res.status(400).json({ error: `Meta rejected the saved credentials: ${verify.error}`, needs_new_token: true });
+    }
+
+    let webhookSubscribed = false, warning = null;
+    if (wabaId) {
+      try { await fbPost(`/${wabaId}/subscribed_apps`, token); webhookSubscribed = true; }
+      catch (e) { warning = `Connected, but re-subscribing webhooks failed: ${e.message}`; }
+    } else {
+      warning = 'Connected. Add your WhatsApp Business Account ID to also re-subscribe webhooks and use templates.';
+    }
+
+    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify({
+      ...current, whatsapp_display_number: verify.display_phone_number, whatsapp_verified_name: verify.verified_name,
+    }), req.tenantId]);
+    await markHealth(true);
+    res.json({ connected: true, display_phone_number: verify.display_phone_number, verified_name: verify.verified_name, webhook_subscribed: webhookSubscribed, warning });
+  } catch (e) {
+    console.error('whatsappReconnect:', e.message);
+    res.status(500).json({ error: 'Could not reconnect WhatsApp.' });
+  }
+};
+
+module.exports = { whatsappEmbeddedSignup, whatsappReconnect, getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
+
+module.exports.facebookSyncStatus = facebookSyncStatus;

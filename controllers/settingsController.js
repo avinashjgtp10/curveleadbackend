@@ -5,6 +5,8 @@ const { uploadToS3 } = require('../config/s3');
 // Surfaces a few settings-JSONB fields at the top level for frontend convenience.
 const withExtras = (row) => ({
   ...row,
+  settings: Object.fromEntries(Object.entries(row?.settings || {}).filter(([key])=> !/token|secret|api_key|password/i.test(key))),
+  dedupe_mode: row?.settings?.dedupe_mode || 'phone',
   bank_details: row?.settings?.bank_details || {},
   daily_report_enabled: !!row?.settings?.daily_report_enabled,
   daily_report_time: row?.settings?.daily_report_time || '08:00',
@@ -63,6 +65,10 @@ const updateSettings = async (req, res) => {
 
     // Store bank_details / report / email / automation preferences inside the settings JSONB column
     const settingsPatch = {};
+    if (req.body.dedupe_mode !== undefined) {
+      if (!['phone','phone_or_email','off'].includes(req.body.dedupe_mode)) return res.status(422).json({ error: 'Invalid dedupe mode.' });
+      settingsPatch.dedupe_mode = req.body.dedupe_mode;
+    }
     if (bank_details !== undefined) settingsPatch.bank_details = bank_details;
     if (daily_report_enabled !== undefined) settingsPatch.daily_report_enabled = daily_report_enabled;
     if (daily_report_time !== undefined) settingsPatch.daily_report_time = daily_report_time;
