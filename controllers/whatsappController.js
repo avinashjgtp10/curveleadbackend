@@ -417,8 +417,18 @@ const handleWebhook = async (req, res) => {
   const secrets=webhookSecrets();
   if (!secrets.length) return res.status(503).json({error:'Webhook verification is not configured.'});
   if (!verifyMetaWebhookAny(req.rawBody,req.headers['x-hub-signature-256'],secrets)) {
-    console.warn('WhatsApp webhook rejected: signature matches no configured Meta app secret.');
-    return res.status(401).json({error:'Invalid webhook signature.'});
+    // TEMPORARY: existing workspaces connect through their own Meta apps, whose
+    // secrets we don't hold, so their webhooks can't be verified. Until they move
+    // to the platform app via Embedded Signup, accept unsigned deliveries only for
+    // phone numbers connected to a workspace. Set META_WEBHOOK_REQUIRE_SIGNATURE=true
+    // to enforce signatures again.
+    const numberIds=(req.body?.entry||[]).flatMap(e=>(e.changes||[]).map(c=>c.value?.metadata?.phone_number_id));
+    const known=numberIds.length>0&&(await Promise.all(numberIds.map(async id=>!!(id&&((await findNumberOwner(id))||(await findTenantBySharedNumber(id))))))).every(Boolean);
+    if (process.env.META_WEBHOOK_REQUIRE_SIGNATURE==='true'||!known) {
+      console.warn('WhatsApp webhook rejected: signature matches no configured Meta app secret.');
+      return res.status(401).json({error:'Invalid webhook signature.'});
+    }
+    console.warn(`WhatsApp webhook accepted without a verified signature for number ${numberIds.join(',')} (temporary bypass).`);
   }
   // Acknowledge authenticated Meta deliveries before processing.
   res.sendStatus(200);
