@@ -411,6 +411,28 @@ const facebookSubscriptionStatus = async (req, res) => {
   }
 };
 
+// ── GET /api/integrations/facebook/sync-status ─────────────────────────────
+// Lightweight status for the Leads page header — whether a Page is connected,
+// and when the most recent Meta-sourced lead came in (a proxy for "last synced"
+// since syncs aren't tracked separately from the leads they create).
+const facebookSyncStatus = async (req, res) => {
+  try {
+    const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
+    const settings = result.rows[0]?.settings || {};
+    const configured = !!(settings.meta_page_id && settings.meta_page_access_token);
+
+    const lastLead = await query(
+      `SELECT created_at FROM leads WHERE tenant_id = $1 AND source = 'meta_ads' ORDER BY created_at DESC LIMIT 1`,
+      [req.tenantId]
+    );
+
+    res.json({ configured, last_synced_at: lastLead.rows[0]?.created_at || null });
+  } catch (e) {
+    console.error('facebookSyncStatus:', e.message);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
 // ── POST /api/integrations/facebook/sync-leads ────────────────────────────
 const facebookSyncLeads = async (req, res) => {
   try {
@@ -453,4 +475,4 @@ const getCapiStats = async (req, res) => {
   }
 };
 
-module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
+module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSyncStatus, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };

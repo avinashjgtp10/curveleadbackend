@@ -1103,12 +1103,6 @@ const getImportTemplate = async (req, res) => {
       ['Amit Kumar',    '7654321098', 'amit@example.com',   'Referral',   s1, 'Referred by existing client',100000,'Delhi'],
       ['Sneha Joshi',   '6543210987', '',                   'WhatsApp',   s2, 'Very interested, call back', 30000, 'Bangalore'],
       ['Vikram Singh',  '9988776655', 'vikram@example.com', 'Website',    s1, 'Inquired about pricing',    '',     'Chennai'],
-      // blank separator
-      [],
-      // Allowed values reference
-      [`Allowed Stages: ${stageNames.join(' | ')}`],
-      ['Allowed Sources: Facebook | Google Ads | WhatsApp | Instagram | Referral | Website | Walk-in | Manual'],
-      ['* = Required column. Delete these rows and the example rows before uploading your real data.'],
     ];
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -1118,6 +1112,18 @@ const getImportTemplate = async (req, res) => {
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Leads');
+
+    // Allowed-values reference lives on its own sheet — not the data sheet — so it
+    // never gets parsed as junk lead rows on import (that previously made every
+    // template download register 3 permanently "invalid" rows, which in turn
+    // disabled the Import button entirely since it required zero invalid rows).
+    const refWs = XLSX.utils.aoa_to_sheet([
+      ['Reference — not imported'],
+      [`Allowed Stages: ${stageNames.join(' | ')}`],
+      ['Allowed Sources: Facebook | Google Ads | WhatsApp | Instagram | Referral | Website | Walk-in | Manual'],
+      ['* = Required column on the Leads sheet. Delete the example rows there before uploading your real data.'],
+    ]);
+    XLSX.utils.book_append_sheet(wb, refWs, 'Reference');
 
     const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -1142,8 +1148,18 @@ const importLeads = async (req, res) => {
     if (!rows.length) return res.status(400).json({ error: 'File is empty.' });
     if (rows.length > 2000) return res.status(400).json({ error: 'Max 2000 rows per import.' });
 
-    // Normalise header key → field name
-    const norm = (k) => String(k).toLowerCase().trim().replace(/[\s\-\/]+/g, '_').replace(/[^a-z0-9_]/g, '');
+    const headers = Object.keys(rows[0]);
+    const dryRun = req.body.dry_run === 'true' || req.body.dry_run === true;
+
+    // Normalise header key → field name. Collapses ANY run of non-alphanumeric
+    // characters (spaces, *, parentheses, -, /, ...) to a single underscore and
+    // trims leading/trailing underscores — e.g. "Name *" → "name", "Deal Value
+    // (INR)" → "deal_value_inr". The previous version only replaced whitespace/-//
+    // and then stripped remaining symbols without re-collapsing, so "Name *" (a
+    // required-field marker our own downloadable template adds) normalised to
+    // "name_" with a trailing underscore that matched no alias, silently leaving
+    // Name/Phone unmapped and making every imported row fail as "Missing name".
+    const norm = (k) => String(k).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     const FIELD_MAP = {
       name:       ['name','full_name','customer_name','lead_name','contact_name','client_name'],
       phone:      ['phone','mobile','contact','phone_number','mobile_number','cell','telephone','tel'],
@@ -1151,32 +1167,52 @@ const importLeads = async (req, res) => {
       source:     ['source','lead_source','channel','medium'],
       stage:      ['stage','status','lead_stage','pipeline_stage'],
       notes:      ['notes','note','comment','comments','remarks','description','details'],
-      deal_value: ['deal_value','value','amount','deal_amount','price','budget','revenue','quoted_price','quote','quoted_amount'],
+      deal_value: ['deal_value','value','amount','deal_amount','price','budget','revenue','quoted_price','quote','quoted_amount','deal_value_inr'],
       city:       ['city','location','area','region'],
       lead_date:  ['lead_date','lead_datetime','lead_time','date','created_date','enquiry_date'],
     };
 
-    const sampleKeys = Object.keys(rows[0]).map(norm);
-    const keyMap = {}; // normalized_header → field
+    const autoMapping = {}; // header → field, auto-detected
     for (const [field, aliases] of Object.entries(FIELD_MAP)) {
-      const match = Object.keys(rows[0]).find(k => aliases.includes(norm(k)));
-      if (match) keyMap[match] = field;
+      const match = headers.find(k => aliases.includes(norm(k)));
+      if (match) autoMapping[match] = field;
     }
 
-    // Fetch valid stages for this tenant
+    // An explicit { header: field } mapping from the column-mapping UI (or a preset
+    // like Privyr/AiSensy/Interakt) overrides auto-detection for both the preview
+    // and the real import, so what the user confirms in preview is what gets saved.
+    let clientMapping = null;
+    if (req.body.column_mapping) {
+      try { clientMapping = JSON.parse(req.body.column_mapping); } catch { clientMapping = null; }
+    }
+    const keyMap = clientMapping && Object.keys(clientMapping).length ? clientMapping : autoMapping;
+
+    // Fetch valid stages for this tenant — keyed by lowercase for case-insensitive
+    // matching against the import file, but stored with each stage's real casing
+    // (e.g. "New") so imported leads match lead_stages.name exactly, the same way
+    // manually-created leads do. Storing a lowercased stage here previously made
+    // the Stage dropdown (which matches options by exact string) show the wrong
+    // selected value for imported leads.
     const stagesResult = await query(
-      'SELECT LOWER(name) as name FROM lead_stages WHERE tenant_id = $1 AND is_active = true',
+      'SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_active = true',
       [req.tenantId]
     );
-    const validStages = new Set(stagesResult.rows.map(s => s.name));
+    const stageByLower = new Map(stagesResult.rows.map(s => [s.name.toLowerCase(), s.name]));
+
+    // Dry run never writes to the DB — it just reports what WOULD happen, including
+    // which rows are duplicates of already-saved leads (by phone).
+    const existingPhones = dryRun
+      ? new Set((await query('SELECT phone FROM leads WHERE tenant_id = $1', [req.tenantId])).rows.map(r => r.phone))
+      : null;
 
     // Reserve a block of Lead IDs up front (one per row, worst case) and hand them
-    // out in order as rows are actually inserted below.
-    const getNextLeadNumber = await reserveLeadNumbers(req.tenantId, rows.length);
+    // out in order as rows are actually inserted below. Dry runs don't consume any.
+    const getNextLeadNumber = dryRun ? null : await reserveLeadNumbers(req.tenantId, rows.length);
 
-    let inserted = 0, skipped = 0;
+    let inserted = 0, skipped = 0, duplicates = 0, invalid = 0;
     const errors = [];
     const skipReasons = [];
+    const preview = [];
 
     const addSkip = (row, name, reason) => {
       skipped++;
@@ -1192,19 +1228,35 @@ const importLeads = async (req, res) => {
       }
 
       // Require at least name
-      if (!lead.name) { addSkip(rowNumber, '', 'Missing name'); continue; }
+      if (!lead.name) {
+        invalid++; addSkip(rowNumber, '', 'Missing name');
+        if (dryRun && preview.length < 100) preview.push({ row: rowNumber, name: '', phone: '', error: 'Missing name' });
+        continue;
+      }
 
       // Normalise phone — strip non-digits, allow leading +
       if (lead.phone) lead.phone = lead.phone.replace(/[^\d+]/g, '').slice(0, 15);
-      if (!lead.phone) { addSkip(rowNumber, lead.name, 'Missing phone'); continue; }
+      if (!lead.phone) {
+        invalid++; addSkip(rowNumber, lead.name, 'Missing phone');
+        if (dryRun && preview.length < 100) preview.push({ row: rowNumber, name: lead.name, phone: '', error: 'Missing phone' });
+        continue;
+      }
 
-      // Validate/default stage
+      // Validate/default stage — matched case-insensitively, stored with the
+      // tenant's actual casing for that stage.
       const stageInput = (lead.stage || '').toLowerCase().trim();
-      lead.stage = validStages.has(stageInput) ? stageInput : (validStages.has('new') ? 'new' : [...validStages][0] || 'new');
+      lead.stage = stageByLower.get(stageInput) || stageByLower.get('new') || [...stageByLower.values()][0] || 'New';
 
       // Parse deal value
       const dv = parseFloat(String(lead.deal_value).replace(/[^0-9.]/g, ''));
       lead.deal_value = isNaN(dv) ? null : dv;
+
+      if (dryRun) {
+        const isDup = existingPhones.has(lead.phone);
+        if (isDup) duplicates++;
+        if (preview.length < 100) preview.push({ row: rowNumber, name: lead.name, phone: lead.phone, action: isDup ? 'Duplicate — will be skipped' : 'Will be imported' });
+        continue;
+      }
 
       const leadNumber = getNextLeadNumber();
 
@@ -1234,6 +1286,10 @@ const importLeads = async (req, res) => {
         errors.push({ row: rowNumber, name: lead.name, error: e.message });
         skipped++;
       }
+    }
+
+    if (dryRun) {
+      return res.json({ headers, mapping: keyMap, total: rows.length, duplicates, invalid, preview });
     }
 
     res.json({
