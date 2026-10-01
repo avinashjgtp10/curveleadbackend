@@ -43,5 +43,6 @@ router.get('/meta/capi-stats', ctrl.getCapiStats);
 
 // WhatsApp one-click connect (Meta Embedded Signup)
 router.post('/whatsapp/embedded-signup', ctrl.whatsappEmbeddedSignup);
+router.post('/whatsapp/reconnect', ctrl.whatsappReconnect);
 
 module.exports = router;

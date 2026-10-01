@@ -37,7 +37,18 @@ const getBroadcastTemplates = async (req, res) => {
     }
 
     const listResult = await listMessageTemplates(wabaId, accessToken);
-    if (!listResult.success) return res.status(502).json({ error: listResult.error });
+    if (!listResult.success) {
+      // Meta error 190: the saved access token expired or was revoked. Templates still exist
+      // in Meta; they just can't be read until WhatsApp is reconnected with a new token.
+      if (listResult.code === 190) {
+        return res.status(502).json({
+          token_expired: true,
+          error: 'Your WhatsApp access token has expired or was revoked, so templates can\'t be loaded. They are still safe in Meta. Reconnect WhatsApp with a new permanent token to see them again.',
+          detail: listResult.error,
+        });
+      }
+      return res.status(502).json({ error: listResult.error });
+    }
 
     const mediaResult = await query(
       'SELECT template_name, language, media_type, media_url FROM whatsapp_template_media WHERE tenant_id = $1',
