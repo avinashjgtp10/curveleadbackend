@@ -13,4 +13,15 @@ function verifyMetaWebhook(body, signature, secret) {
     Buffer.from(signature.slice(7), "hex"),
   );
 }
-module.exports = { verifyMetaWebhook };
+// Workspaces may connect WhatsApp through their own Meta app, and Meta signs
+// each webhook with that app's secret. META_APP_SECRET is the platform app;
+// META_EXTRA_APP_SECRETS is an optional comma-separated list of the others.
+function webhookSecrets(env = process.env) {
+  return [env.META_APP_SECRET, ...(env.META_EXTRA_APP_SECRETS || "").split(",")]
+    .map((s) => (s || "").trim())
+    .filter(Boolean);
+}
+function verifyMetaWebhookAny(body, signature, secrets) {
+  return secrets.some((secret) => verifyMetaWebhook(body, signature, secret));
+}
+module.exports = { verifyMetaWebhook, verifyMetaWebhookAny, webhookSecrets };

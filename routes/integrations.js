@@ -41,4 +41,7 @@ router.get('/facebook/ad-accounts', ctrl.getAdAccounts);
 router.post('/facebook/sync-ad-insights', ctrl.syncAdInsightsNow);
 router.get('/meta/capi-stats', ctrl.getCapiStats);
 
+// WhatsApp one-click connect (Meta Embedded Signup)
+router.post('/whatsapp/embedded-signup', ctrl.whatsappEmbeddedSignup);
+
 module.exports = router;

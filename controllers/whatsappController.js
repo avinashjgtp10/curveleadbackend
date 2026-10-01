@@ -413,8 +413,13 @@ const handleWebhook = async (req, res) => {
     return res.sendStatus(403);
   }
 
-  if (!process.env.META_APP_SECRET) return res.status(503).json({error:'Webhook verification is not configured.'});
-  if (!require('../utils/metaWebhookSignature').verifyMetaWebhook(req.rawBody,req.headers['x-hub-signature-256'],process.env.META_APP_SECRET)) return res.status(401).json({error:'Invalid webhook signature.'});
+  const {webhookSecrets,verifyMetaWebhookAny}=require('../utils/metaWebhookSignature');
+  const secrets=webhookSecrets();
+  if (!secrets.length) return res.status(503).json({error:'Webhook verification is not configured.'});
+  if (!verifyMetaWebhookAny(req.rawBody,req.headers['x-hub-signature-256'],secrets)) {
+    console.warn('WhatsApp webhook rejected: signature matches no configured Meta app secret.');
+    return res.status(401).json({error:'Invalid webhook signature.'});
+  }
   // Acknowledge authenticated Meta deliveries before processing.
   res.sendStatus(200);
 
