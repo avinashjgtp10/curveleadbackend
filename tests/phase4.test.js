@@ -577,6 +577,11 @@ test("Meta inbound signatures cover exact raw bytes and reject forged payloads",
   );
   assert.equal(verifyMetaWebhook(body, "bad", secret), false);
   assert.equal(verifyMetaWebhook(body, signed, ""), false);
+  const { verifyMetaWebhookAny, webhookSecrets } = require("../utils/metaWebhookSignature");
+  const secrets = webhookSecrets({ META_APP_SECRET: "platform", META_EXTRA_APP_SECRETS: ` other , ${secret},` });
+  assert.deepEqual(secrets, ["platform", "other", secret]);
+  assert.equal(verifyMetaWebhookAny(body, signed, secrets), true);
+  assert.equal(verifyMetaWebhookAny(body, signed, ["platform", "other"]), false);
 });
 
 test('messaging tier honors the stricter of Meta and workspace limits',async()=>{

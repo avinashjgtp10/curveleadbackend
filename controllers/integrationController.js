@@ -75,6 +75,7 @@ const getSettings = async (req, res) => {
       whatsapp_configured: !!(settings.whatsapp_phone_number_id && settings.whatsapp_access_token) && !whatsappError,
       whatsapp_display_number: settings.whatsapp_display_number || '',
       whatsapp_verified_name: settings.whatsapp_verified_name || '',
+      whatsapp_connected_via: settings.whatsapp_connected_via || 'manual',
       whatsapp_error: whatsappError,
       whatsapp_auto_responder_enabled: !!settings.whatsapp_auto_responder_enabled,
       whatsapp_auto_responder_message: settings.whatsapp_auto_responder_message || '',
@@ -116,6 +117,8 @@ const updateSettings = async (req, res) => {
     if (whatsapp_app_id !== undefined) updated.whatsapp_app_id = whatsapp_app_id;
 
     if (whatsappCredsChanged) {
+      // Manually entered credentials replace any one-click connection.
+      delete updated.whatsapp_connected_via;
       if (updated.whatsapp_phone_number_id && updated.whatsapp_access_token) {
         const verify = await verifyWhatsAppNumber(updated.whatsapp_phone_number_id, updated.whatsapp_access_token);
         if (!verify.verified) {
@@ -469,6 +472,80 @@ const getCapiStats = async (req, res) => {
   }
 };
 
-module.exports = { getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
+// ── POST /api/integrations/whatsapp/embedded-signup ───────────────────────
+// One-click connect via Meta's WhatsApp Embedded Signup. The browser popup
+// returns a one-time code plus the WABA and phone number the customer picked;
+// everything then runs through the platform Meta app (META_APP_ID), so its
+// webhook and META_APP_SECRET cover every connected workspace.
+const fbPost = async (path, token, body) => {
+  const res = await fetch(`${GRAPH}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.error_user_msg || data.error.message);
+  return data;
+};
+
+const whatsappEmbeddedSignup = async (req, res) => {
+  try {
+    const { code, waba_id, phone_number_id } = req.body;
+    const isId = (v) => typeof v === 'string' && /^\d{5,25}$/.test(v);
+    if (typeof code !== 'string' || !code || !isId(waba_id) || !isId(phone_number_id))
+      return res.status(400).json({ error: 'Signup did not return a WhatsApp account and number. Please try again.' });
+
+    const appId = process.env.META_APP_ID;
+    const appSecret = process.env.META_APP_SECRET;
+    if (!appId || !appSecret) return res.status(500).json({ error: 'META_APP_ID / META_APP_SECRET not configured on server.' });
+
+    // Business integration token: scoped to the assets the customer granted, no expiry.
+    const { access_token: token } = await fbGet(
+      `/oauth/access_token?client_id=${appId}&client_secret=${encodeURIComponent(appSecret)}&code=${encodeURIComponent(code)}`
+    );
+    const auth = `access_token=${encodeURIComponent(token)}`;
+
+    // The IDs come from the browser, so confirm the number really is in that WABA.
+    const numbers = await fbGet(`/${waba_id}/phone_numbers?fields=id,display_phone_number,verified_name,platform_type&${auth}`);
+    const number = (numbers.data || []).find((n) => n.id === phone_number_id);
+    if (!number) return res.status(400).json({ error: 'That phone number is not part of the selected WhatsApp Business Account.' });
+
+    // Route this WABA's messages and status updates to our webhook.
+    await fbPost(`/${waba_id}/subscribed_apps`, token);
+
+    // Numbers added during signup still need registering on the Cloud API.
+    // The PIN becomes the number's two-step verification PIN, so keep it.
+    let pin = null;
+    if (number.platform_type !== 'CLOUD_API') {
+      pin = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+      await fbPost(`/${phone_number_id}/register`, token, { messaging_product: 'whatsapp', pin });
+    }
+
+    const current = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings || {};
+    const updated = {
+      ...current,
+      whatsapp_phone_number_id: phone_number_id,
+      whatsapp_access_token: token,
+      whatsapp_business_account_id: waba_id,
+      whatsapp_app_id: appId,
+      whatsapp_display_number: number.display_phone_number || '',
+      whatsapp_verified_name: number.verified_name || '',
+      whatsapp_connected_via: 'embedded_signup',
+      ...(pin ? { whatsapp_two_step_pin: pin } : {}),
+    };
+    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
+    await query(
+      `INSERT INTO integration_health(tenant_id,provider,token_valid,checked_at) VALUES($1,'whatsapp',true,now())
+       ON CONFLICT(tenant_id,provider) DO UPDATE SET token_valid=true,checked_at=now(),alerted_at=NULL`,
+      [req.tenantId]
+    );
+    res.json({ connected: true, display_phone_number: updated.whatsapp_display_number, verified_name: updated.whatsapp_verified_name });
+  } catch (e) {
+    console.error('whatsappEmbeddedSignup:', e.message);
+    res.status(400).json({ error: `Could not connect WhatsApp: ${e.message}` });
+  }
+};
+
+module.exports = { whatsappEmbeddedSignup, getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
 
 module.exports.facebookSyncStatus = facebookSyncStatus;
