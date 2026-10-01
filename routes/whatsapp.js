@@ -6,7 +6,7 @@ const {
   getInbox, getConversation, sendMessage, setConversationAi, startChat, sendAttachment, handleWebhook,
   updateChatLabels, deleteConversations, markConversationsRead,
 } = require('../controllers/whatsappController');
-const { getSendableTemplates, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, getImagePrompt, generateHeaderImages, sendBroadcast, uploadBroadcastMedia } = require('../controllers/whatsappBroadcastController');
+const { getSendableTemplates, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, getImagePrompt, generateHeaderImages, sendBroadcast, getBroadcastProgress, uploadBroadcastMedia } = require('../controllers/whatsappBroadcastController');
 const hub = require('../controllers/whatsappHubController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
@@ -73,5 +73,6 @@ router.post('/hub/ai-agent/draft', admin, hub.draftAiAgent);
 router.post('/hub/ai-agent/share-file', admin, uploadTemplateMedia.single('file'), hub.uploadAiShareFile);
 router.delete('/hub/ai-agent/share-file/:action', admin, hub.removeAiShareFile);
 router.post('/broadcast/send', requirePermission('leads.bulk_edit'), sendBroadcast);
+router.get('/broadcast/progress/:id', requirePermission('leads.bulk_edit'), getBroadcastProgress);
 
 module.exports = router;

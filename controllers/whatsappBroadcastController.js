@@ -221,7 +221,9 @@ const aiDraftTemplate = async (req, res) => {
 };
 
 // Sends a template to a set of leads, one by one. Shared by the immediate send and the scheduled-send job.
-const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, language_code, body_text, mapping, allow_resend = false }) => {
+// onStart(reportId) fires once validation passes and the report row exists; onProgress({ sent, failed, skipped })
+// after every lead. Both are optional (the scheduled-broadcast job just awaits the result).
+const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, language_code, body_text, mapping, allow_resend = false, onStart, onProgress }) => {
   const { wabaId, accessToken } = await getWhatsappCreds(tenantId);
   const list = await listMessageTemplates(wabaId, accessToken);
   const approved = list.templates?.find(t => t.name===template_name && t.language===(language_code||'en_US') && t.status==='APPROVED');
@@ -230,6 +232,7 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
   const positions=[...body_text.matchAll(/\{\{(\d+)\}\}/g)].map(m=>Number(m[1]));
   if (mapping.length!==Math.max(0,...positions)) throw Object.assign(new Error('Map every template variable.'),{status:422});
   const report=(await query('INSERT INTO whatsapp_broadcast_reports(tenant_id,template_name,recipients) VALUES($1,$2,$3) RETURNING id',[tenantId,template_name,lead_ids.length])).rows[0];
+  onStart?.(report.id);
   const needsAssignedName = mapping.some(m => m.source === 'field' && m.value === 'assigned_to_name');
   // Opt-in enforcement is per tenant (Opt-ins tab); the opt-in column is only read when it's on.
   const requireOptIn = !!(await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]))
@@ -270,6 +273,7 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
     if (alreadySent.has(lead.id)) {
       skipped++;
       results.push({ lead_id: lead.id, success: false, skipped: true, error: 'Already received this template.' });
+      onProgress?.({ sent, failed, skipped });
       continue;
     }
     try {
@@ -319,7 +323,10 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
       );
 
       if (sendResult.success) {
-        await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [lead.id]);
+        // Bookkeeping only: the message is already with Meta, so a failure here must not
+        // turn a sent message into a "failed" one (e.g. a lead row that fails a CHECK constraint).
+        await query('UPDATE leads SET last_contacted_at = NOW() WHERE id = $1', [lead.id])
+          .catch(e => console.error('Broadcast: could not update last_contacted_at for', lead.id, e.message));
         sent++;
         results.push({ lead_id: lead.id, success: true });
       } else {
@@ -330,6 +337,7 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
       failed++;
       results.push({ lead_id: lead.id, success: false, error: e.message });
     }
+    onProgress?.({ sent, failed, skipped });
     await new Promise(r => setTimeout(r, 300));
   }
 
@@ -406,12 +414,57 @@ const sendBroadcast = async (req, res) => {
       }
     }
 
-    const { sent, failed, skipped, results } = await executeBroadcast({
-      tenantId: req.tenantId, userId: req.user.id, lead_ids, template_name, language_code, body_text, mapping,
-      allow_resend: req.body.allow_resend === true,
+    // A broadcast takes ~0.5s per lead, longer than the browser/proxy will wait for one
+    // request. Validate synchronously, then answer with the broadcast id and keep sending
+    // in the background; the client polls GET /broadcast/progress/:id.
+    pruneBroadcasts();
+    const runKey = `${req.tenantId}:${template_name}`;
+    const busy = [...runningBroadcasts.values()].find(r => r.key === runKey && !r.done);
+    if (busy || startingBroadcasts.has(runKey)) {
+      return res.status(409).json({ error: `This template is already being sent${busy ? ` (${busy.sent + busy.failed + busy.skipped} of ${busy.total} done)` : ''}. Wait for it to finish before sending it again.` });
+    }
+    startingBroadcasts.add(runKey);
+    let entry = null;
+    const started = new Promise((resolve, reject) => {
+      executeBroadcast({
+        tenantId: req.tenantId, userId: req.user.id, lead_ids, template_name, language_code, body_text, mapping,
+        allow_resend: req.body.allow_resend === true,
+        onStart: (id) => {
+          entry = { id, key: runKey, tenantId: req.tenantId, template_name, total: lead_ids.length, sent: 0, failed: 0, skipped: 0, done: false, results: null, error: null };
+          runningBroadcasts.set(id, entry);
+          startingBroadcasts.delete(runKey);
+          resolve(entry);
+        },
+        onProgress: (p) => { if (entry) Object.assign(entry, p); },
+      }).then((final) => {
+        if (!entry) return resolve(null);
+        Object.assign(entry, { sent: final.sent, failed: final.failed, skipped: final.skipped, results: final.results, done: true, finishedAt: Date.now() });
+      }).catch((e) => {
+        startingBroadcasts.delete(runKey);
+        if (!entry) return reject(e);
+        console.error('Broadcast failed mid-run:', entry.id, e.message);
+        Object.assign(entry, { done: true, error: 'The broadcast stopped part-way. Check Broadcast reports for who received it.', finishedAt: Date.now() });
+      });
     });
-    res.json({ sent, failed, skipped, results });
+    const run = await started;
+    res.status(202).json({ started: true, broadcast_id: run.id, total: run.total });
   } catch (e) { console.error(e); res.status(e.status||500).json({ error: e.status?e.message:'Failed.' }); }
 };
 
-module.exports = { getSendableTemplates, getImagePrompt, generateHeaderImages, executeBroadcast, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };
+// Live progress of broadcasts started from this server process (production runs a single
+// PM2 instance). Kept for an hour after finishing; after a restart, use Broadcast reports.
+const runningBroadcasts = new Map();
+const startingBroadcasts = new Set();
+const pruneBroadcasts = () => {
+  for (const [id, r] of runningBroadcasts) if (r.done && Date.now() - r.finishedAt > 60 * 60 * 1000) runningBroadcasts.delete(id);
+};
+
+// GET /api/whatsapp/broadcast/progress/:id
+const getBroadcastProgress = (req, res) => {
+  const r = runningBroadcasts.get(req.params.id);
+  if (!r || r.tenantId !== req.tenantId) return res.status(404).json({ error: 'No live progress for this broadcast (the server may have restarted). Check WhatsApp → Broadcasts for the report.' });
+  const { id, total, sent, failed, skipped, done, error } = r;
+  res.json({ broadcast_id: id, total, sent, failed, skipped, done, error, ...(done ? { results: r.results } : {}) });
+};
+
+module.exports = { getBroadcastProgress, getSendableTemplates, getImagePrompt, generateHeaderImages, executeBroadcast, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, sendBroadcast, uploadBroadcastMedia };
