@@ -221,7 +221,7 @@ const aiDraftTemplate = async (req, res) => {
 };
 
 // Sends a template to a set of leads, one by one. Shared by the immediate send and the scheduled-send job.
-const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, language_code, body_text, mapping }) => {
+const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, language_code, body_text, mapping, allow_resend = false }) => {
   const { wabaId, accessToken } = await getWhatsappCreds(tenantId);
   const list = await listMessageTemplates(wabaId, accessToken);
   const approved = list.templates?.find(t => t.name===template_name && t.language===(language_code||'en_US') && t.status==='APPROVED');
@@ -248,11 +248,30 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
   )).rows[0];
   const headerMedia = mediaRow ? { type: mediaRow.media_type.toLowerCase(), link: mediaRow.media_url } : null;
 
+  // Don't send the same template twice to one person: skip leads (or other leads
+  // sharing their phone) who already received it — from a broadcast or a sequence.
+  const alreadySent = new Set();
+  if (!allow_resend) {
+    const prior = await query(
+      `SELECT l.id FROM leads l WHERE l.tenant_id=$1 AND l.id=ANY($2::uuid[]) AND EXISTS (
+         SELECT 1 FROM whatsapp_messages m JOIN leads p ON p.id=m.lead_id AND p.tenant_id=m.tenant_id
+         WHERE m.tenant_id=$1 AND m.direction='outbound' AND m.template_name=$3
+           AND m.status IN ('sent','delivered','read') AND (m.lead_id=l.id OR (l.phone IS NOT NULL AND p.phone=l.phone)))`,
+      [tenantId, lead_ids, template_name]
+    );
+    prior.rows.forEach(r => alreadySent.add(r.id));
+  }
+
   const credCache = new Map(), limitCache = new Map();
   const results = [];
-  let sent = 0, failed = lead_ids.length-leadsResult.rows.length;
+  let sent = 0, skipped = 0, failed = lead_ids.length-leadsResult.rows.length;
 
   for (const lead of leadsResult.rows) {
+    if (alreadySent.has(lead.id)) {
+      skipped++;
+      results.push({ lead_id: lead.id, success: false, skipped: true, error: 'Already received this template.' });
+      continue;
+    }
     try {
       if (!lead.phone) throw new Error('Lead has no phone number.');
       if (lead.opted_out) throw new Error('Lead has opted out of WhatsApp messages.');
@@ -266,8 +285,12 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
 
       if(!limitCache.has(credKey)) {
         const settings=(await query('SELECT settings FROM tenants WHERE id=$1',[tenantId])).rows[0]?.settings || {};
-        limitCache.set(credKey,await require('../utils/messagingLimit').messagingLimit(credentials,settings.whatsapp_messaging_limit));
+        // Cache a failed lookup too: otherwise every lead re-queries Meta (10s
+        // timeout each) and a large broadcast times out instead of failing fast.
+        try { limitCache.set(credKey,await require('../utils/messagingLimit').messagingLimit(credentials,settings.whatsapp_messaging_limit)); }
+        catch (e) { limitCache.set(credKey,e); }
       }
+      if (limitCache.get(credKey) instanceof Error) throw limitCache.get(credKey);
       await transaction(async client=>{
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`wa-quota:${tenantId}`]);
         const limit=limitCache.get(credKey);
@@ -311,7 +334,7 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
   }
 
   await query('UPDATE whatsapp_broadcast_reports SET sent=$2,failed=$3 WHERE id=$1',[report.id,sent,failed]);
-  return { sent, failed, results, broadcast_id: report.id };
+  return { sent, failed, skipped, results, broadcast_id: report.id };
 };
 
 // POST /api/whatsapp/broadcast/templates/image-prompt — a ready-to-use image prompt for the template's
@@ -383,10 +406,11 @@ const sendBroadcast = async (req, res) => {
       }
     }
 
-    const { sent, failed, results } = await executeBroadcast({
+    const { sent, failed, skipped, results } = await executeBroadcast({
       tenantId: req.tenantId, userId: req.user.id, lead_ids, template_name, language_code, body_text, mapping,
+      allow_resend: req.body.allow_resend === true,
     });
-    res.json({ sent, failed, results });
+    res.json({ sent, failed, skipped, results });
   } catch (e) { console.error(e); res.status(e.status||500).json({ error: e.status?e.message:'Failed.' }); }
 };
 
