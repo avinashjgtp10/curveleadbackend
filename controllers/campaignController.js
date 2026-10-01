@@ -135,7 +135,17 @@ const getCampaign = async (req, res) => {
       roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
     };
 
-    const baseline = await getBaselineMetrics(req.tenantId);
+    // Baseline for the verdict: every campaign's lifetime numbers, shaped like the
+    // campaign list's baseline (getBaselineMetrics was removed in the Phase 2 refactor).
+    const lifetime = await getBreakdown(
+      { workspaceId: req.tenantId, from: new Date(0), to: new Date(), staffId: req.user.role === 'staff' ? req.user.id : null },
+      'campaign_id'
+    );
+    const baseline = lifetime.filter(m => m.campaign_id).map(m => ({
+      ...m, id: m.campaign_id,
+      disqualified_rate: m.total_leads ? m.lost / m.total_leads * 100 : 0,
+      hot_rate: m.total_leads ? m.hot_leads / m.total_leads * 100 : 0,
+    }));
 
     res.json({
       campaign: rankCampaigns([campaignMetrics], baseline)[0],

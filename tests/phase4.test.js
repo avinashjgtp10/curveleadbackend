@@ -604,3 +604,47 @@ test('health monitoring distinguishes rejected credentials from transient provid
  await jobs.checkHealth();assert.equal(validity,false);assert.equal(alerts,1);await jobs.checkHealth();assert.equal(alerts,1);
  rejectToken=false;await jobs.checkHealth();assert.equal(validity,null);
 });
+test("broadcast skips leads who already received the template unless resending is allowed", async () => {
+  const run = async (allow_resend) => {
+    let sends = 0, priorChecked = false;
+    const db = {
+      query: async (sql, p) => {
+        if (sql.includes("SELECT settings"))
+          return { rows: [{ settings: { whatsapp_business_account_id: "w", whatsapp_access_token: "token", whatsapp_messaging_limit: 100 } }] };
+        if (sql.includes("INSERT INTO whatsapp_broadcast_reports")) return { rows: [{ id: "report" }] };
+        if (sql.includes("SELECT l.id, l.name"))
+          return { rows: [{ id: "a", name: "Got it", phone: "1" }, { id: "b", name: "New", phone: "2" }] };
+        if (sql.includes("m.template_name=$3")) {
+          priorChecked = true;
+          assert.equal(p[2], "hello");
+          return { rows: [{ id: "a" }] };
+        }
+        if (sql.includes("count(*)::int n")) return { rows: [{ n: 0, known: false }] };
+        return { rows: [] };
+      },
+    };
+    db.transaction = (fn) => fn(db);
+    const ctrl = load("controllers/whatsappBroadcastController.js", {
+      "../utils/messagingLimit": { messagingLimit: async () => 100 },
+      "../config/db": db,
+      "../utils/whatsappCredentials": { resolveWhatsAppCredentials: async () => ({}) },
+      "../services/whatsappService": {
+        listMessageTemplates: async () => ({ templates: [{ name: "hello", language: "en_US", status: "APPROVED", components: [{ type: "BODY", text: "Hi" }] }] }),
+        sendTemplate: async () => { sends++; return { success: true, wa_message_id: "wa" }; },
+      },
+    });
+    const result = await ctrl.executeBroadcast({ tenantId: "t", userId: "u", lead_ids: ["a", "b"], template_name: "hello", mapping: [], allow_resend });
+    return { result, sends, priorChecked };
+  };
+  const first = await run(false);
+  assert.equal(first.priorChecked, true);
+  assert.equal(first.result.sent, 1);
+  assert.equal(first.result.skipped, 1);
+  assert.equal(first.result.failed, 0);
+  assert.equal(first.sends, 1);
+  assert.equal(first.result.results.find((r) => r.lead_id === "a").skipped, true);
+  const again = await run(true);
+  assert.equal(again.priorChecked, false);
+  assert.equal(again.result.sent, 2);
+  assert.equal(again.result.skipped, 0);
+});
