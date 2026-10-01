@@ -64,6 +64,8 @@ router.get('/hub/numbers', admin, hub.getNumbers);
 router.get('/hub/ctwa', admin, hub.getClickToWhatsApp);
 router.get('/hub/auto-messages', admin, hub.getAutoMessages);
 router.put('/hub/auto-messages', admin, hub.updateAutoMessages);
+router.get('/hub/booking-messages', admin, hub.getBookingMessages);
+router.put('/hub/booking-messages', admin, hub.updateBookingMessages);
 router.get('/hub/ai-knowledge', admin, hub.getAiKnowledge);
 router.put('/hub/ai-knowledge', admin, hub.updateAiKnowledge);
 router.get('/hub/ai-replies', admin, hub.getAiReplies);

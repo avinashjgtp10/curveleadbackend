@@ -344,6 +344,64 @@ const updateAutoMessages = async (req, res) => {
   } catch (e) { console.error('updateAutoMessages:', e.message); res.status(500).json({ error: 'Failed to save.' }); }
 };
 
+// ── Booking messages (demo/visit confirmation + reminders) ─────────────────
+const getBookingMessages = async (req, res) => {
+  try {
+    const { bookingSettings } = require('../services/bookingMessages');
+    const t = (await query('SELECT name, address, city, settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0] || {};
+    let recent = [];
+    try {
+      recent = (await query(
+        `SELECT b.id, b.kind, b.status, b.via, b.error, b.booking_at, b.created_at, f.followup_type, l.id AS lead_id, l.name AS lead_name
+         FROM booking_messages b
+         JOIN lead_followups f ON f.id = b.followup_id
+         JOIN leads l ON l.id = f.lead_id AND l.tenant_id = b.tenant_id
+         WHERE b.tenant_id = $1 ORDER BY b.created_at DESC LIMIT 20`, [req.tenantId]
+      )).rows;
+    } catch (e) { if (!isMissingSchema(e)) throw e; }
+    res.json({
+      ...bookingSettings(t.settings),
+      business_name: t.name || '',
+      business_address: [t.address, t.city].filter(Boolean).join(', '),
+      timezone: t.settings?.timezone || 'Asia/Kolkata',
+      recent,
+    });
+  } catch (e) { console.error('getBookingMessages:', e.message); res.status(500).json({ error: 'Failed.' }); }
+};
+
+const updateBookingMessages = async (req, res) => {
+  try {
+    const { DEFAULTS } = require('../services/bookingMessages');
+    const current = (await getSettings(req.tenantId)).booking_messages || {};
+    const next = { ...DEFAULTS, ...current };
+    for (const key of ['confirmation_enabled', 'reminders_enabled']) {
+      if (req.body[key] !== undefined) next[key] = !!req.body[key];
+    }
+    for (const key of ['reminder_1_minutes', 'reminder_2_minutes']) {
+      if (req.body[key] === undefined) continue;
+      const m = Number(req.body[key]);
+      if (!Number.isInteger(m) || (m !== 0 && (m < 15 || m > 7 * 24 * 60))) {
+        return res.status(400).json({ error: 'Reminder times must be between 15 minutes and 7 days before the booking, or off.' });
+      }
+      next[key] = m;
+    }
+    for (const key of ['demo_confirmation_template', 'visit_confirmation_template', 'demo_reminder_template', 'visit_reminder_template']) {
+      if (req.body[key] !== undefined) next[key] = String(req.body[key] || '').trim().slice(0, 512);
+    }
+    if (req.body.address !== undefined) next.address = String(req.body.address || '').trim().slice(0, 300);
+    if (req.body.maps_url !== undefined) {
+      const url = String(req.body.maps_url || '').trim();
+      if (url && !/^https?:\/\/\S+$/i.test(url)) return res.status(400).json({ error: 'Google Maps link must start with http:// or https://' });
+      next.maps_url = url.slice(0, 500);
+    }
+    if (next.reminders_enabled && !(next.reminder_1_minutes > 0) && !(next.reminder_2_minutes > 0)) {
+      return res.status(400).json({ error: 'Pick at least one reminder time, or turn reminders off.' });
+    }
+    await saveSettings(req.tenantId, { booking_messages: next });
+    res.json({ ok: true });
+  } catch (e) { console.error('updateBookingMessages:', e.message); res.status(500).json({ error: 'Failed to save.' }); }
+};
+
 // ── AI auto-reply training ──────────────────────────────────────────────────
 const KNOWLEDGE_FIELDS = ['about', 'services_prices', 'faqs', 'tone', 'goal', 'never_say', 'handoff_rules', 'example_chats'];
 
@@ -489,6 +547,6 @@ const cancelScheduledBroadcast = async (req, res) => {
 module.exports = {
   getScheduledBroadcasts, cancelScheduledBroadcast,
   getAnalytics, getBroadcastHistory, getOptIns, updateOptIns, updateOptInSettings, getNumbers,
-  getClickToWhatsApp, getAutoMessages, updateAutoMessages, getAiKnowledge, updateAiKnowledge, getAiReplies, draftAiAgent,
+  getClickToWhatsApp, getAutoMessages, updateAutoMessages, getBookingMessages, updateBookingMessages, getAiKnowledge, updateAiKnowledge, getAiReplies, draftAiAgent,
   uploadAiShareFile, removeAiShareFile,
 };
