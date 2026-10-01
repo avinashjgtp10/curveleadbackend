@@ -50,6 +50,13 @@ const getSettings = async (req, res) => {
       }
     }
 
+    // The 15-minute health job (jobs/featureJobs) re-checks the token; surface a failure here.
+    if (!whatsappError && settings.whatsapp_phone_number_id && settings.whatsapp_access_token) {
+      const health = (await query("SELECT token_valid FROM integration_health WHERE tenant_id = $1 AND provider = 'whatsapp'", [req.tenantId])
+        .catch(() => ({ rows: [] }))).rows[0];
+      if (health?.token_valid === false) whatsappError = 'Meta rejected the saved access token (expired or revoked)';
+    }
+
     res.json({
       meta_page_id: settings.meta_page_id || '',
       meta_page_name: settings.meta_page_name || '',
@@ -546,6 +553,47 @@ const whatsappEmbeddedSignup = async (req, res) => {
   }
 };
 
-module.exports = { whatsappEmbeddedSignup, getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
+// ── POST /api/integrations/whatsapp/reconnect ─────────────────────────────
+// Re-checks the saved WhatsApp credentials with Meta and re-subscribes our app to the
+// WABA's webhooks (fixes replies/delivery statuses that stopped arriving). An invalid
+// token can't be repaired here — the client asks for a new one (needs_new_token).
+const whatsappReconnect = async (req, res) => {
+  try {
+    const current = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings || {};
+    const { whatsapp_phone_number_id: phoneId, whatsapp_access_token: token, whatsapp_business_account_id: wabaId } = current;
+    if (!phoneId || !token) return res.status(400).json({ error: 'WhatsApp is not connected yet.', needs_new_token: true });
+
+    const markHealth = valid => query(
+      `INSERT INTO integration_health(tenant_id,provider,token_valid,checked_at) VALUES($1,'whatsapp',$2,now())
+       ON CONFLICT(tenant_id,provider) DO UPDATE SET token_valid=$2,checked_at=now(),alerted_at=CASE WHEN $2 THEN NULL ELSE integration_health.alerted_at END`,
+      [req.tenantId, valid]
+    ).catch(() => {});
+
+    const verify = await verifyWhatsAppNumber(phoneId, token);
+    if (!verify.verified) {
+      await markHealth(false);
+      return res.status(400).json({ error: `Meta rejected the saved credentials: ${verify.error}`, needs_new_token: true });
+    }
+
+    let webhookSubscribed = false, warning = null;
+    if (wabaId) {
+      try { await fbPost(`/${wabaId}/subscribed_apps`, token); webhookSubscribed = true; }
+      catch (e) { warning = `Connected, but re-subscribing webhooks failed: ${e.message}`; }
+    } else {
+      warning = 'Connected. Add your WhatsApp Business Account ID to also re-subscribe webhooks and use templates.';
+    }
+
+    await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify({
+      ...current, whatsapp_display_number: verify.display_phone_number, whatsapp_verified_name: verify.verified_name,
+    }), req.tenantId]);
+    await markHealth(true);
+    res.json({ connected: true, display_phone_number: verify.display_phone_number, verified_name: verify.verified_name, webhook_subscribed: webhookSubscribed, warning });
+  } catch (e) {
+    console.error('whatsappReconnect:', e.message);
+    res.status(500).json({ error: 'Could not reconnect WhatsApp.' });
+  }
+};
+
+module.exports = { whatsappEmbeddedSignup, whatsappReconnect, getSettings, updateSettings, generateApiKey, revokeApiKey, ingestLead, getEmbedScript, facebookAuth, facebookConnectPage, facebookSyncLeads, facebookSubscribeWebhook, facebookSubscriptionStatus, getCapiStats, getAdAccounts, syncAdInsightsNow };
 
 module.exports.facebookSyncStatus = facebookSyncStatus;

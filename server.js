@@ -201,6 +201,11 @@ app.listen(PORT, () => {
   setTimeout(runScheduledBroadcasts, 35 * 1000);
   setInterval(runScheduledBroadcasts, 60 * 1000);
 
+  // Demo/visit reminders to the lead on WhatsApp — checks every 5 minutes
+  const { runBookingReminders } = require('./jobs/bookingReminders');
+  setTimeout(runBookingReminders, 55 * 1000);
+  setInterval(runBookingReminders, 5 * 60 * 1000);
+
   // Meta ad spend/performance sync — runs every 6 hours
   const { runMetaAdInsightsSync } = require('./jobs/metaAdInsightsSync');
   setTimeout(runMetaAdInsightsSync, 45 * 1000);

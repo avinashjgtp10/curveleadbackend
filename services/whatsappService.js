@@ -138,7 +138,7 @@ const listMessageTemplates = async (wabaId, accessToken) => {
       if (transient && attempt === 0) { await new Promise(resolve => setTimeout(resolve, 250)); continue; }
       if (transient && cached && Date.now() - cached.at < 86400000) return { success: true, templates: cached.templates, stale: true };
       if (!transient) templateCache.delete(key);
-      return { success: false, error: error.response?.data?.error?.message || error.message };
+      return { success: false, error: error.response?.data?.error?.message || error.message, code: error.response?.data?.error?.code };
     }
   }
 };

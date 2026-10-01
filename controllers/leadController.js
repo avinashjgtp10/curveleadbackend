@@ -555,30 +555,21 @@ const addFollowup = async (req, res) => {
       }).catch(() => {});
     }
 
-    // Auto-send WhatsApp confirmation on demo/visit booking
+    // WhatsApp confirmation to the lead on demo/visit booking (reminders follow from
+    // jobs/bookingReminders). Staff can opt a single booking out with notify_lead: false.
     const isAppointment = ['demo', 'visit'].includes((followup_type || '').toLowerCase());
-    let whatsappSent = false;
-    if (isAppointment && lead.phone) {
-      try {
-        const waCredentials = tenantSettings.whatsapp_phone_number_id ? {
-          phone_number_id: tenantSettings.whatsapp_phone_number_id,
-          access_token: tenantSettings.whatsapp_access_token,
-        } : null;
-
-        const label = isDemo ? 'demo' : 'visit/appointment';
-        let msg = `Hi ${lead.name}, your ${label} with *${tenantName}* is confirmed for *${demoTime}*.`;
-        if (meeting_url) msg += `\n\nJoin here: ${meeting_url}`;
-        if (notes) msg += `\n\n_${notes}_`;
-
-        const { sendTextMessage } = require('../services/whatsappService');
-        const waRes = await sendTextMessage(lead.phone, msg, waCredentials);
-        whatsappSent = waRes.success;
-      } catch (e) {
-        console.error('Auto WhatsApp error:', e.message);
-      }
+    const notifyLead = req.body.notify_lead !== false;
+    if (!notifyLead) {
+      await query('UPDATE lead_followups SET notify_lead = false WHERE id = $1', [result.rows[0].id]).catch(() => {});
+    }
+    const { bookingSettings, sendBookingMessage } = require('../services/bookingMessages');
+    let whatsapp = null;
+    if (isAppointment && notifyLead && bookingSettings(tenantSettings).confirmation_enabled) {
+      whatsapp = await sendBookingMessage(result.rows[0].id, 'confirmation')
+        .catch(e => { console.error('Booking confirmation error:', e.message); return { sent: false, status: 'failed', error: 'Failed to send WhatsApp confirmation.' }; });
     }
 
-    res.status(201).json({ followup: result.rows[0], emailSent: !!(isDemo && meeting_url && lead.email), whatsappSent });
+    res.status(201).json({ followup: result.rows[0], emailSent: !!(isDemo && meeting_url && lead.email), whatsappSent: !!whatsapp?.sent, whatsapp });
   } catch (error) {
     console.error('Add followup error:', error);
     res.status(500).json({ error: 'Failed to schedule follow-up.' });
