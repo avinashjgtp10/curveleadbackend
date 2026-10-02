@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const META_API_URL = 'https://graph.facebook.com/v25.0';
+const { GRAPH_URL: META_API_URL } = require('../config/meta');
 
 const normalizePhone = (phone) => {
   let p = phone.replace(/\D/g, '');

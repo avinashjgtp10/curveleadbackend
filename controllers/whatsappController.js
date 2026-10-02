@@ -18,6 +18,7 @@ const { isOptOutMessage } = require('../utils/optOut');
 const { substituteVars } = require('../utils/templateVars');
 const { isWithinBusinessHours } = require('../utils/businessHours');
 const { isSessionOpen } = require('../utils/sessionWindow');
+const { GRAPH_URL } = require('../config/meta');
 
 const INBOUND_MEDIA_TYPES = { image: 'image', document: 'document', audio: 'audio', video: 'video', sticker: 'image' };
 
@@ -25,7 +26,7 @@ const INBOUND_MEDIA_TYPES = { image: 'image', document: 'document', audio: 'audi
 // quickly, so inbound media is fetched once here and re-hosted on our own S3 —
 // same approach as outbound attachments — rather than storing Meta's URL directly.
 const downloadWhatsAppMedia = async (mediaId, accessToken) => {
-  const meta = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, {
+  const meta = await axios.get(`${GRAPH_URL}/${mediaId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const file = await axios.get(meta.data.url, {

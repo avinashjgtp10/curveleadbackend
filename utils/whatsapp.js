@@ -1,3 +1,4 @@
+const { GRAPH_URL } = require('../config/meta');
 // WhatsApp Business Cloud API integration
 // Requires: WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN in .env
 
@@ -17,7 +18,7 @@ const sendWhatsAppMessage = async (to, message) => {
 
     const fetch = (await import('node-fetch')).default;
     const response = await fetch(
-      `https://graph.facebook.com/v25.0/${phoneNumberId}/messages`,
+      `${GRAPH_URL}/${phoneNumberId}/messages`,
       {
         method: 'POST',
         headers: {

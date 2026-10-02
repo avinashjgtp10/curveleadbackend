@@ -1,4 +1,5 @@
 const axios = require("axios");
+const { GRAPH_URL } = require('../config/meta');
 function parseTier(value) {
   if (value === "TIER_UNLIMITED") return Number.MAX_SAFE_INTEGER;
   const match = /^(?:TIER_)?(\d+)(K)?$/.exec(String(value || ""));
@@ -9,7 +10,7 @@ async function messagingLimit(credentials, configured) {
   if (credentials?.phone_number_id && credentials?.access_token)
     try {
       const { data } = await axios.get(
-        `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phone_number_id)}`,
+        `${GRAPH_URL}/${encodeURIComponent(credentials.phone_number_id)}`,
         {
           params: { fields: "messaging_limit_tier" },
           headers: { Authorization: `Bearer ${credentials.access_token}` },

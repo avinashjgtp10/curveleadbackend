@@ -151,6 +151,7 @@ app.use('/api/automations', apiLimiter, require('./routes/automations'));
 app.use('/api/teams', apiLimiter, require('./routes/teams'));
 app.use('/api/features', apiLimiter, require('./routes/features'));
 app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
+app.use('/api/ads', apiLimiter, require('./routes/ads'));
 
 // ============================================
 // 404 handler
@@ -223,6 +224,11 @@ app.listen(PORT, () => {
   setTimeout(runDailyReportEmail, 40 * 1000);
   setInterval(() => require('./jobs/featureJobs').runFeatureJobs().catch(e => console.error('Feature jobs:', e.message)), 60 * 1000);
   setInterval(runDailyReportEmail, 15 * 60 * 1000);
+
+  // Ads module jobs (insights sync every 4h, daily token checks) — BullMQ when
+  // REDIS_URL is set, otherwise in-process timers.
+  require('./jobs/adsJobs').registerAdsJobs();
+  require('./jobs/queues').start().catch(e => console.error('Job queues failed to start:', e.message));
 });
 
 // Graceful shutdown

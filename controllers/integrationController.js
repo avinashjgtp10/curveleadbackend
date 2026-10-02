@@ -249,7 +249,7 @@ const getEmbedScript = async (req, res) => {
 
 // ── Facebook OAuth helpers ─────────────────────────────────────────────────
 
-const GRAPH = 'https://graph.facebook.com/v25.0';
+const { GRAPH_URL: GRAPH } = require('../config/meta');
 
 const fbGet = async (path) => {
   const res = await fetch(`${GRAPH}${path}`);

@@ -11,7 +11,7 @@ const { notifyNewLeadToAdmins } = require('../controllers/notificationController
 const { findOrCreateMetaCampaign } = require('./metaCampaignMatch');
 const { isMetaLeadDeleted } = require('./deletedLeads');
 
-const GRAPH = 'https://graph.facebook.com/v25.0';
+const { GRAPH_URL: GRAPH } = require('../config/meta');
 
 // A lead older than this is imported and assigned but NOT messaged: the first sync
 // after this shipped could otherwise pull in a backlog of old, never-imported leads

@@ -11,6 +11,8 @@ const PERMISSIONS = {
   'staff.manage': 'Invite, edit and remove team members',
   'settings.manage': 'Change integration and business settings',
   'automations.manage': 'Build automation sequences and rules',
+  'ads.manage': 'Connect ad accounts, change budgets and pause/resume ads',
+  'social.publish': 'Create, schedule and publish social posts',
 };
 
 // Role defaults, used when a user has no explicit override row for a key.
