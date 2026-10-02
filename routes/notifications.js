@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getNotifications, markAsRead, markAllAsRead, getUnreadCount, getNotificationGroups } = require('../controllers/notificationController');
+const { getNotifications, markAsRead, markAllAsRead, markVisibleAsRead, getUnreadCount, getNotificationGroups } = require('../controllers/notificationController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 
@@ -16,6 +16,7 @@ router.put('/read-visible', async (req,res) => {
  catch(e) { res.status(500).json({error:'Could not mark notifications read.'}); }
 });
 router.put('/read-all', markAllAsRead);
+router.put('/read-visible', markVisibleAsRead);
 router.put('/:id/read', markAsRead);
 
 module.exports = router;

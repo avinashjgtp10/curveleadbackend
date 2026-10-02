@@ -436,8 +436,6 @@ const facebookSyncStatus = async (req, res) => {
     res.status(500).json({ error: 'Failed to load sync status.' });
   }
 };
-
-// ── POST /api/integrations/facebook/sync-leads ────────────────────────────
 const facebookSyncLeads = async (req, res) => {
   try {
     const { created, skipped, last_synced_at } = await syncFacebookLeadsForTenant(req.tenantId);

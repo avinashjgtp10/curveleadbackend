@@ -16,7 +16,7 @@ const getNotifications = async (req, res) => {
     );
 
     res.json({ notifications: result.rows, unreadCount: parseInt(unreadCount.rows[0].count) });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Get notifications error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // PUT /api/notifications/:id/read - Mark as read
@@ -27,7 +27,7 @@ const markAsRead = async (req, res) => {
       [req.params.id, req.tenantId, req.user.id]
     );
     res.json({ message: 'Marked as read.' });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Mark notification read error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // PUT /api/notifications/read-all - Mark all as read
@@ -38,7 +38,22 @@ const markAllAsRead = async (req, res) => {
       [req.tenantId, req.user.id]
     );
     res.json({ message: 'All marked as read.' });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Mark all notifications read error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// PUT /api/notifications/read-visible - Mark a given set of notifications as read
+// (called by the bell dropdown for whatever's currently visible/unread on screen)
+const markVisibleAsRead = async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+    if (ids.length) {
+      await query(
+        'UPDATE notifications SET is_read = true WHERE tenant_id = $1 AND user_id = $2 AND id = ANY($3::uuid[])',
+        [req.tenantId, req.user.id, ids]
+      );
+    }
+    res.json({ message: 'Marked as read.' });
+  } catch (error) { console.error('Mark visible notifications read error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // GET /api/notifications/count - Unread count only
@@ -49,7 +64,7 @@ const getUnreadCount = async (req, res) => {
       [req.tenantId, req.user.id]
     );
     res.json({ count: parseInt(result.rows[0].count) });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Get unread count error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // Helper: Create notification — skipped if the target user has turned this
@@ -100,6 +115,6 @@ const getNotificationGroups = (req, res) => {
 };
 
 module.exports = {
-  getNotifications, markAsRead, markAllAsRead, getUnreadCount, getNotificationGroups,
+  getNotifications, markAsRead, markAllAsRead, markVisibleAsRead, getUnreadCount, getNotificationGroups,
   createNotification, notifyNewLeadToAdmins,
 };

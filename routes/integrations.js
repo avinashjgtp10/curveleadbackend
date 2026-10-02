@@ -35,6 +35,7 @@ router.delete('/google-ads/:id', googleAdsCtrl.deleteIntegration);
 router.post('/facebook/auth', ctrl.facebookAuth);
 router.post('/facebook/connect-page', ctrl.facebookConnectPage);
 router.post('/facebook/sync-leads', ctrl.facebookSyncLeads);
+router.get('/facebook/sync-status', ctrl.facebookSyncStatus);
 router.post('/facebook/subscribe-webhook', ctrl.facebookSubscribeWebhook);
 router.get('/facebook/subscription-status', ctrl.facebookSubscriptionStatus);
 router.get('/facebook/ad-accounts', ctrl.getAdAccounts);
