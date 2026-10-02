@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { query } = require('../config/db');
 
-const GRAPH = 'https://graph.facebook.com/v21.0';
+const { GRAPH_URL: GRAPH } = require('../config/meta');
 
 // Meta CAPI requires hashed PII: lowercase/trim for email, digits-only for phone.
 const hashSha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');

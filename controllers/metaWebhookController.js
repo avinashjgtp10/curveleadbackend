@@ -11,6 +11,7 @@ const { notifyNewLeadToAdmins } = require('./notificationController');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { isMetaLeadDeleted } = require('../utils/deletedLeads');
 const axios = require('axios');
+const { GRAPH_URL } = require('../config/meta');
 
 // GET /api/webhook/meta - Verify webhook
 const verifyWebhook = (req, res) => {
@@ -68,7 +69,7 @@ const receiveLeadFormWebhook = async (req, res) => {
       let leadData;
       try {
         const response = await axios.get(
-          `https://graph.facebook.com/v25.0/${leadgenId}`,
+          `${GRAPH_URL}/${leadgenId}`,
           {
             params: {
               access_token: tenant.page_access_token,

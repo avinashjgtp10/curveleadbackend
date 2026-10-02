@@ -4,6 +4,7 @@ const { healthState } = require("../services/features");
 const { runWebhooks } = require("../services/outgoingWebhooks");
 const { decryptSecret } = require("../utils/cryptoSecrets");
 const { createNotification } = require("../controllers/notificationController");
+const { GRAPH_URL } = require('../config/meta');
 let running = false,
   lastHealth = 0;
 async function checkHealth() {
@@ -38,7 +39,7 @@ async function checkHealth() {
       else
         try {
           await axios.get(
-            `https://graph.facebook.com/v21.0/${encodeURIComponent(id)}`,
+            `${GRAPH_URL}/${encodeURIComponent(id)}`,
             {
               headers: { Authorization: `Bearer ${token}` },
               params: { fields: "id" },

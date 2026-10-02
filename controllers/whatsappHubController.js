@@ -5,7 +5,7 @@ const { uploadToS3 } = require('../config/s3');
 const { fetchWebsiteText } = require('../utils/websiteFetcher');
 const { generateAiAgentKnowledge } = require('../services/groqService');
 
-const META_API_URL = 'https://graph.facebook.com/v25.0';
+const { GRAPH_URL: META_API_URL } = require('../config/meta');
 
 const getSettings = async (tenantId) => {
   const r = await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]);

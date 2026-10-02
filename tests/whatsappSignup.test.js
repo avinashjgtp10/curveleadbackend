@@ -17,7 +17,7 @@ function setup(graph) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../controllers/integrationController.js"), "utf8"), {
     module, console: { ...console, error() {} }, JSON, URL, fetch, Set, Map, Date, Promise, String, Number,
     process: { env: { META_APP_ID: "111", META_APP_SECRET: "s3cret" } },
-    require: (k) => (k === "crypto" ? require("crypto") : k === "../config/db" ? { query } : {}),
+    require: (k) => (k === "crypto" ? require("crypto") : k === "../config/db" ? { query } : k === "../config/meta" ? require("../config/meta") : {}),
   });
   return { ctrl: module.exports, calls, writes };
 }

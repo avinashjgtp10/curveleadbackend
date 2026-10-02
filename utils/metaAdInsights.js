@@ -2,7 +2,7 @@ const { parseBudgets, fetchAdSetBudgets } = require('./metaBudget');
 const { query } = require('../config/db');
 const { findOrCreateMetaCampaign } = require('./metaCampaignMatch');
 
-const GRAPH = 'https://graph.facebook.com/v25.0';
+const { GRAPH_URL: GRAPH } = require('../config/meta');
 
 // The Ads Manager statuses to pull — Insights only ever returns campaigns that
 // have delivered something, but Ads Manager itself lists every campaign in

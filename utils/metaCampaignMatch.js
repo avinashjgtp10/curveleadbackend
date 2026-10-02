@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { query } = require('../config/db');
+const { GRAPH_URL } = require('../config/meta');
 
 // Finds the CRM campaign matching a Meta campaign ID, auto-creating one
 // (with the real Meta campaign name) if it doesn't exist yet — no manual
@@ -41,7 +42,7 @@ const resolveCampaignFromAdId = async ({ tenantId, adId }) => {
   if (!meta_ads_access_token) return null;
 
   try {
-    const { data } = await axios.get(`https://graph.facebook.com/v25.0/${adId}`, {
+    const { data } = await axios.get(`${GRAPH_URL}/${adId}`, {
       params: { fields: 'name,campaign{id,name},adset{id,name}', access_token: meta_ads_access_token },
     });
     const campaignId = await findOrCreateMetaCampaign({
