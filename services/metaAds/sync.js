@@ -11,11 +11,19 @@ const REFRESH_DAYS = 3;
 const isoDate = (d) => d.toISOString().slice(0, 10);
 const addDays = (d, n) => new Date(d.getTime() + n * 864e5);
 
+// A DATE column comes back from pg as a Date at local midnight (or as 'YYYY-MM-DD' text);
+// String(date) would give 'Fri Oct 03 …', so read the calendar day from its local parts.
+const dayString = (v) => {
+  if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  return String(v).slice(0, 10);
+};
+
 const syncRange = (account, now = new Date()) => {
   const until = isoDate(now);
   const backfillFrom = isoDate(addDays(now, -BACKFILL_DAYS));
   if (!account.insights_synced_through) return { since: backfillFrom, until };
-  const through = new Date(`${String(account.insights_synced_through).slice(0, 10)}T00:00:00Z`);
+  const through = new Date(`${dayString(account.insights_synced_through)}T00:00:00Z`);
+  if (Number.isNaN(through.getTime())) return { since: backfillFrom, until };
   const since = isoDate(new Date(Math.min(addDays(through, -REFRESH_DAYS + 1).getTime(), addDays(now, -REFRESH_DAYS + 1).getTime())));
   return { since: since < backfillFrom ? backfillFrom : since, until };
 };
