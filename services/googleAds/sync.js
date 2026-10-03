@@ -25,7 +25,8 @@ const effectiveStatus = (status, serving) => {
 
 const GAQL = {
   campaigns: `SELECT campaign.id, campaign.name, campaign.status, campaign.serving_status, campaign.advertising_channel_type,
-      campaign_budget.amount_micros, campaign_budget.period, campaign_budget.total_amount_micros
+      campaign_budget.resource_name, campaign_budget.amount_micros, campaign_budget.period, campaign_budget.total_amount_micros,
+      campaign_budget.explicitly_shared
     FROM campaign WHERE campaign.status != 'REMOVED'`,
   adGroups: `SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.type, campaign.id
     FROM ad_group WHERE ad_group.status != 'REMOVED' AND campaign.status != 'REMOVED'`,
@@ -49,6 +50,7 @@ const parseCampaign = (r) => {
     external_id: id(r.campaign.id), name: r.campaign.name, objective: r.campaign.advertisingChannelType || null,
     status: r.campaign.status, effective_status: effectiveStatus(r.campaign.status, r.campaign.servingStatus),
     daily_budget_paise: daily, lifetime_budget_paise: b.period === 'CUSTOM_PERIOD' ? toPaise(b.totalAmountMicros) : null,
+    budget_resource: b.resourceName || null, budget_shared: !!b.explicitlyShared,
   };
 };
 const parseAdGroup = (r) => ({
@@ -98,13 +100,16 @@ const saveHierarchy = async ({ tenantId, adAccountId, campaigns, adGroups, ads }
   for (const c of campaigns) {
     const crmId = await findOrCreateGoogleCampaign(client, { tenantId, googleCampaignId: c.external_id, name: c.name });
     const { rows } = await client.query(
-      `INSERT INTO ad_campaigns (tenant_id, ad_account_id, external_id, campaign_id, name, objective, status, effective_status, daily_budget_paise, lifetime_budget_paise, synced_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+      `INSERT INTO ad_campaigns (tenant_id, ad_account_id, external_id, campaign_id, name, objective, status, effective_status, daily_budget_paise, lifetime_budget_paise,
+                                 budget_resource, budget_shared, synced_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
        ON CONFLICT (tenant_id, external_id) DO UPDATE SET ad_account_id = EXCLUDED.ad_account_id, campaign_id = COALESCE(ad_campaigns.campaign_id, EXCLUDED.campaign_id),
          name = EXCLUDED.name, objective = EXCLUDED.objective, status = EXCLUDED.status, effective_status = EXCLUDED.effective_status,
-         daily_budget_paise = EXCLUDED.daily_budget_paise, lifetime_budget_paise = EXCLUDED.lifetime_budget_paise, synced_at = now()
+         daily_budget_paise = EXCLUDED.daily_budget_paise, lifetime_budget_paise = EXCLUDED.lifetime_budget_paise,
+         budget_resource = EXCLUDED.budget_resource, budget_shared = EXCLUDED.budget_shared, synced_at = now()
        RETURNING id, campaign_id`,
-      [tenantId, adAccountId, c.external_id, crmId, c.name, c.objective, c.status, c.effective_status, c.daily_budget_paise, c.lifetime_budget_paise]);
+      [tenantId, adAccountId, c.external_id, crmId, c.name, c.objective, c.status, c.effective_status, c.daily_budget_paise, c.lifetime_budget_paise,
+        c.budget_resource || null, !!c.budget_shared]);
     campaignIds.set(c.external_id, rows[0].id);
     await client.query(
       `UPDATE campaigns SET status = $3, daily_budget = COALESCE($4, daily_budget), lifetime_budget = COALESCE($5, lifetime_budget),
@@ -212,4 +217,4 @@ const syncGoogleAccount = async ({ tenantId, adAccountId }, deps = {}) => {
   }
 };
 
-module.exports = { syncGoogleAccount, parseCampaign, parseAdGroup, parseAd, parseMetrics, effectiveStatus, findOrCreateGoogleCampaign, GAQL };
+module.exports = { syncGoogleAccount, saveHierarchy, parseCampaign, parseAdGroup, parseAd, parseMetrics, effectiveStatus, findOrCreateGoogleCampaign, GAQL };

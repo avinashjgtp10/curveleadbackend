@@ -4,12 +4,15 @@ const gads = require('../utils/googleAds');
 const { decryptToken } = require('../utils/cryptoSecrets');
 const { saveGoogleToken, discoverGoogleAccounts } = require('../services/googleAds/accounts');
 const { isSchemaError, schemaErrorMessage } = require('../utils/schemaErrors');
+const aiSearch = require('../services/googleAds/aiSearch');
 
-// Google Ads connection (Phase 7a). Reading campaigns, metrics and the dashboard uses the
-// shared /api/ads endpoints with ?provider=google.
+// Google Ads connection (Phase 7a) and AI search ads (Phase 7b). Reading campaigns, metrics
+// and the dashboard uses the shared /api/ads endpoints with ?provider=google; pause/resume
+// and budgets use the shared /api/ads/campaigns|adsets endpoints.
 
 const fail = (label) => (e, res) => {
   if (isSchemaError(e)) return res.status(503).json({ code: 'MIGRATION_PENDING', error: schemaErrorMessage(e) });
+  if (e.status && e.name !== 'GoogleAdsError') return res.status(e.status).json({ error: e.message });
   if (e.name === 'GoogleAdsError') return res.status(e.status === 503 ? 503 : 400).json({ error: e.message, code: e.code || undefined });
   console.error(`[google-ads] ${label}:`, e);
   res.status(500).json({ error: `${label} failed. Please try again.` });
@@ -75,4 +78,19 @@ const refresh = async (req, res) => {
   }
 };
 
-module.exports = { status, connectUrl, callback, refresh };
+// ── AI search ads (Phase 7b) ────────────────────────────────────────────────
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const aiRoute = (label, fn) => async (req, res) => {
+  try {
+    if (req.params.id && !UUID.test(req.params.id)) return res.status(422).json({ error: 'Invalid id.' });
+    res.json(await fn(req));
+  } catch (e) { fail(label)(e, res); }
+};
+const aiCreateDraft = aiRoute('Google AI draft', (req) => aiSearch.generateDraft({ tenantId: req.tenantId, userId: req.user.id, brief: req.body?.brief }));
+const aiListDrafts = aiRoute('List Google AI drafts', async (req) => ({ drafts: await aiSearch.listDrafts(req.tenantId) }));
+const aiGetDraft = aiRoute('Get Google AI draft', (req) => aiSearch.getDraft(req.tenantId, req.params.id));
+const aiUpdateDraft = aiRoute('Update Google AI draft', (req) => aiSearch.updateDraft({ tenantId: req.tenantId, id: req.params.id, draft: req.body?.draft }));
+const aiCreate = aiRoute('Create search campaign in Google Ads', (req) => aiSearch.createOnGoogle({ tenantId: req.tenantId, userId: req.user.id, id: req.params.id }));
+const aiActivate = aiRoute('Activate search campaign', (req) => aiSearch.activate({ tenantId: req.tenantId, userId: req.user.id, id: req.params.id, confirm: req.body?.confirm }));
+
+module.exports = { status, connectUrl, callback, refresh, aiCreateDraft, aiListDrafts, aiGetDraft, aiUpdateDraft, aiCreate, aiActivate };

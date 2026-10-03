@@ -28,7 +28,7 @@ Phase 7 is split: **7a (this)** reads Google Ads into Ads Manager; **7b** (AI-wr
 |---|---|---|
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | yes | from step 3 |
 | `GOOGLE_ADS_OAUTH_REDIRECT_URI` | recommended | `https://curvelead.com/api/ads/google/callback` (default is `$API_URL/api/ads/google/callback`) |
-| `GOOGLE_ADS_API_VERSION` | no | default `v22`; set to the current version from Google's release notes (old versions are switched off about a year after release) |
+| `GOOGLE_ADS_API_VERSION` | no | default `v25` since Phase 7b (v22 is switched off in October 2026); set to the current version from Google's release notes (old versions are switched off about a year after release) |
 
 5. Deploy backend, then frontend; `pm2 restart curvelead-api`. Ads Manager → Google Ads → Connect with Google.
 

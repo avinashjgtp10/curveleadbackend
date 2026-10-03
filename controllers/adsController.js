@@ -4,6 +4,7 @@ const queues = require('../jobs/queues');
 const { exchangeForLongLived, inspectToken, saveToken, syncAccountsForToken } = require('../services/metaAds/client');
 const metaLeads = require('../services/metaLeads');
 const controls = require('../services/metaAds/controls');
+const googleControls = require('../services/googleAds/controls');
 const aiCampaign = require('../services/metaAds/aiCampaign');
 
 // Ads module API (Phase 1: accounts, drill-down, daily insights, CPL dashboard).
@@ -116,7 +117,7 @@ const listCampaigns = async (req, res) => {
     const accountId = await resolveAccountId(req.tenantId, req.query.account_id, providerOf(req.query));
     const { rows } = await query(
       `SELECT c.id, c.external_id, c.campaign_id AS crm_campaign_id, c.name, c.objective, c.status, c.effective_status,
-              c.daily_budget_paise, c.lifetime_budget_paise, c.special_ad_categories, c.start_time, c.stop_time, ${totals}
+              c.daily_budget_paise, c.lifetime_budget_paise, c.budget_shared, c.special_ad_categories, c.start_time, c.stop_time, ${totals}
        FROM ad_campaigns c
        LEFT JOIN ad_insights_daily i ON i.tenant_id = c.tenant_id AND i.entity_type = 'campaign' AND i.entity_id = c.external_id AND i.date BETWEEN $3 AND $4
        WHERE c.tenant_id = $1 AND c.ad_account_id = $2
@@ -261,11 +262,21 @@ const updateLeadSettings = async (req, res) => {
   } catch (e) { fail('Update lead settings')(e, res); }
 };
 
+// Which platform a campaign / ad set (Google: ad group) belongs to.
+const entityProvider = async (tenantId, entityType, id) => (await query(
+  entityType === 'campaign'
+    ? `SELECT a.provider FROM ad_campaigns c JOIN ad_accounts a ON a.id = c.ad_account_id AND a.tenant_id = c.tenant_id WHERE c.tenant_id = $1 AND c.id = $2`
+    : `SELECT a.provider FROM ad_adsets s JOIN ad_campaigns c ON c.id = s.ad_campaign_id AND c.tenant_id = s.tenant_id
+       JOIN ad_accounts a ON a.id = c.ad_account_id AND a.tenant_id = c.tenant_id WHERE s.tenant_id = $1 AND s.id = $2`,
+  [tenantId, id])).rows[0]?.provider || 'meta';
+
 // POST /api/ads/{campaigns|adsets}/:id/{pause|resume}, PATCH …/:id/budget { daily_budget_paise }
+// Meta or Google, depending on the campaign's ad account.
 const changeEntity = (entityType, action) => async (req, res) => {
   try {
     if (!UUID.test(req.params.id)) return bad(res, 'Invalid id.');
-    const result = await controls.changeEntity({
+    const provider = await entityProvider(req.tenantId, entityType, req.params.id);
+    const result = await (provider === 'google' ? googleControls : controls).changeEntity({
       tenantId: req.tenantId, userId: req.user.id, entityType, id: req.params.id, action,
       dailyBudgetPaise: action === 'update_budget' ? Number(req.body?.daily_budget_paise) : undefined,
     });
@@ -273,19 +284,21 @@ const changeEntity = (entityType, action) => async (req, res) => {
   } catch (e) { fail(`${action} ${entityType}`)(e, res); }
 };
 
-// GET /api/ads/audit?entity_type&entity_id&limit — newest first.
+// GET /api/ads/audit?provider&entity_type&entity_id&limit — newest first.
 const listAudit = async (req, res) => {
   try {
     const { entity_type, entity_id } = req.query;
     if (entity_type && !['campaign', 'adset', 'ad'].includes(entity_type)) return bad(res, 'Invalid entity_type.');
     if (entity_id && !/^\d{1,30}$/.test(entity_id)) return bad(res, 'Invalid entity_id.');
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const provider = PROVIDERS.includes(req.query.provider) ? req.query.provider : null;
     const { rows } = await query(
       `SELECT a.id, a.entity_type, a.entity_id, a.entity_name, a.action, a.old_value, a.new_value, a.success, a.error, a.created_at, u.name AS user_name
        FROM ad_audit_log a LEFT JOIN users u ON u.id = a.user_id
        WHERE a.tenant_id = $1 AND ($2::text IS NULL OR a.entity_type = $2) AND ($3::text IS NULL OR a.entity_id = $3)
+         AND ($5::text IS NULL OR a.provider = $5)
        ORDER BY a.created_at DESC LIMIT $4`,
-      [req.tenantId, entity_type || null, entity_id || null, limit]
+      [req.tenantId, entity_type || null, entity_id || null, limit, provider]
     );
     res.json({ entries: rows });
   } catch (e) { fail('List ad audit log')(e, res); }

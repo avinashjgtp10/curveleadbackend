@@ -12,6 +12,13 @@ router.use(authenticate, tenantContext, requirePermission('ads.manage'));
 router.get('/google/status', google.status);
 router.get('/google/connect', google.connectUrl);
 router.post('/google/refresh', google.refresh);
+// AI search ads (Phase 7b) — created with the campaign PAUSED; activation is separate.
+router.get('/google/ai/drafts', google.aiListDrafts);
+router.post('/google/ai/drafts', google.aiCreateDraft);
+router.get('/google/ai/drafts/:id', google.aiGetDraft);
+router.put('/google/ai/drafts/:id', google.aiUpdateDraft);
+router.post('/google/ai/drafts/:id/create', google.aiCreate);
+router.post('/google/ai/drafts/:id/activate', google.aiActivate);
 
 router.get('/accounts', ctrl.listAccounts);
 router.post('/accounts/connect', ctrl.connectAccounts);
