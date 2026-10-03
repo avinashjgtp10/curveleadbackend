@@ -5,12 +5,16 @@ const { sendEmail } = require('../utils/email');
 const { substituteVars } = require('../utils/templateVars');
 const { isSessionOpen } = require('../utils/sessionWindow');
 const { generateFollowUpMessage } = require('../services/groqService');
+const { localeFromSettings, zonedParts, wallTimeToUtc } = require('../utils/workspaceLocale');
 
-// v1 limitation: business hours are compared against server time, not a
-// per-tenant timezone — documented, not solved, until tenants can set a timezone.
+// Business hours are the workspace's local time (settings.timezone).
+const localHHMM = (settings, now) => {
+  const { minutes } = zonedParts(now, localeFromSettings(settings).timezone);
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+};
 const isWithinBusinessHours = (settings, now) => {
   if (!settings.automation_business_hours_enabled) return true;
-  const hhmm = now.toISOString().slice(11, 16);
+  const hhmm = localHHMM(settings, now);
   const start = settings.automation_business_hours_start || '09:00';
   const end = settings.automation_business_hours_end || '20:00';
   return hhmm >= start && hhmm < end;
@@ -19,11 +23,15 @@ const isWithinBusinessHours = (settings, now) => {
 const nextBusinessWindowStart = (settings, now) => {
   const start = settings.automation_business_hours_start || '09:00';
   const end = settings.automation_business_hours_end || '20:00';
-  const hhmm = now.toISOString().slice(11, 16);
-  const [h, m] = start.split(':').map(Number);
-  const next = new Date(now);
-  next.setUTCHours(h, m, 0, 0);
-  if (hhmm >= end) next.setUTCDate(next.getUTCDate() + 1);
+  const { timezone } = localeFromSettings(settings);
+  const hhmm = localHHMM(settings, now);
+  const today = zonedParts(now, timezone).date;
+  const next = wallTimeToUtc(`${today}T${start}`, timezone);
+  // After today's window has closed, the next start is tomorrow (local calendar).
+  if (hhmm >= end) {
+    const tomorrow = zonedParts(new Date(next.getTime() + 26 * 60 * 60 * 1000), timezone).date;
+    return wallTimeToUtc(`${tomorrow}T${start}`, timezone);
+  }
   return next;
 };
 
@@ -271,4 +279,4 @@ const runAutomationSequences = async () => {
   }
 };
 
-module.exports = { runAutomationSequences };
+module.exports = { runAutomationSequences, isWithinBusinessHours, nextBusinessWindowStart };

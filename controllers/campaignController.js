@@ -20,7 +20,10 @@ const getCampaigns = async (req, res) => {
 
     const result = await query(
       `SELECT c.*,
-              u.name as created_by_name
+              u.name as created_by_name,
+              -- Meta campaigns: budget and lifetime spend are in the ad account's currency.
+              (SELECT a.currency FROM ad_campaigns ac JOIN ad_accounts a ON a.id = ac.ad_account_id
+               WHERE ac.tenant_id = c.tenant_id AND ac.campaign_id = c.id AND a.currency IS NOT NULL LIMIT 1) AS account_currency
        FROM campaigns c
        LEFT JOIN users u ON c.created_by = u.id
        ${where}
@@ -67,7 +70,10 @@ const campaignRows = async (req, campaigns) => {
 const getCampaign = async (req, res) => {
   try {
     const result = await query(
-      `SELECT c.*, u.name as created_by_name FROM campaigns c
+      `SELECT c.*, u.name as created_by_name,
+              (SELECT a.currency FROM ad_campaigns ac JOIN ad_accounts a ON a.id = ac.ad_account_id
+               WHERE ac.tenant_id = c.tenant_id AND ac.campaign_id = c.id AND a.currency IS NOT NULL LIMIT 1) AS account_currency
+       FROM campaigns c
        LEFT JOIN users u ON c.created_by = u.id
        WHERE c.id = $1 AND c.tenant_id = $2`,
       [req.params.id, req.tenantId]

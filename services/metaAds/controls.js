@@ -1,4 +1,5 @@
 const { query, transaction } = require('../../config/db');
+const { formatMoney } = require('../../utils/workspaceLocale');
 const { graphRequest } = require('../../utils/metaGraph');
 const { getAccountWithToken } = require('./client');
 const { parseBudgetPaise } = require('./parseInsights');
@@ -8,7 +9,8 @@ const { parseBudgetPaise } = require('./parseInsights');
 // write to Meta, then update our cache and the audit log in one transaction.
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
-const rupees = (paise) => `₹${(Number(paise) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+// Meta budgets are in the ad account's currency, in minor units (cents/paise/fils).
+const money = (minor, currency) => formatMoney(Number(minor) / 100, { currency: currency || 'INR' });
 
 const ENTITY = {
   campaign: {
@@ -97,7 +99,7 @@ const changeEntity = async ({ tenantId, userId, entityType, id, action, dailyBud
   if (action === 'pause') change = { status: 'PAUSED' };
   else if (action === 'resume') change = { status: 'ACTIVE' };
   else if (action === 'update_budget') {
-    if (!Number.isInteger(dailyBudgetPaise) || dailyBudgetPaise < 100) throw fail(422, 'Enter a daily budget of at least ₹1.');
+    if (!Number.isInteger(dailyBudgetPaise) || dailyBudgetPaise < 100) throw fail(422, `Enter a daily budget of at least ${money(100, account.currency)}.`);
     if (oldValue.lifetime_budget_paise) throw fail(422, 'This uses a lifetime budget. Change it in Meta Ads Manager.');
     if (entityType === 'adset' && (current.campaign?.daily_budget || current.campaign?.lifetime_budget)) {
       throw fail(422, 'This campaign uses Advantage campaign budget, so the budget is set on the campaign, not its ad sets.');
@@ -118,7 +120,7 @@ const changeEntity = async ({ tenantId, userId, entityType, id, action, dailyBud
     const before = dailyBudgetTotal(campaigns, adsets, base);
     const after = dailyBudgetTotal(campaigns, adsets, { [entity.external_id]: { ...base[entity.external_id], ...change } });
     if (after > cap && after > before) {
-      throw fail(422, `This would raise your total daily ad budget to ${rupees(after)}, above your cap of ${rupees(cap)}. Lower another budget or raise the cap in Ads Manager settings.`);
+      throw fail(422, `This would raise your total daily ad budget to ${money(after, account.currency)}, above your cap of ${money(cap, account.currency)}. Lower another budget or raise the cap in Ads Manager settings.`);
     }
   }
 

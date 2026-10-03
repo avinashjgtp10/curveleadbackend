@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const { createNotification } = require('../controllers/notificationController');
+const { localeFromSettings, formatWhen } = require('../utils/workspaceLocale');
 
 const runFollowupReminder = async () => {
   try {
@@ -13,9 +14,11 @@ const runFollowupReminder = async () => {
         f.followup_type,
         f.next_followup_at,
         l.name AS lead_name,
-        COALESCE(l.assigned_to, f.created_by) AS notify_user_id
+        COALESCE(l.assigned_to, f.created_by) AS notify_user_id,
+        t.settings AS tenant_settings
       FROM lead_followups f
       JOIN leads l ON f.lead_id = l.id
+      JOIN tenants t ON t.id = f.tenant_id
       WHERE ${require('../services/followupSummary').active}
         AND f.next_followup_at <= NOW() + INTERVAL '30 minutes'
         AND COALESCE(l.assigned_to, f.created_by) IS NOT NULL
@@ -38,8 +41,8 @@ const runFollowupReminder = async () => {
       const title   = isOverdue
         ? `${label} overdue — ${f.lead_name}`
         : `${label} due soon — ${f.lead_name}`;
-      const message = new Date(f.next_followup_at).toLocaleString('en-IN', {
-        dateStyle: 'medium', timeStyle: 'short',
+      const message = formatWhen(f.next_followup_at, localeFromSettings(f.tenant_settings || {}), {
+        dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short',
       });
 
       await createNotification(

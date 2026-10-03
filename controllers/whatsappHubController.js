@@ -2,7 +2,7 @@ const path = require('path');
 const axios = require('axios');
 const { query } = require('../config/db');
 const { normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
-const { getWorkspaceLocale } = require('../utils/workspaceLocale');
+const { getWorkspaceLocale, localeFromSettings } = require('../utils/workspaceLocale');
 const { uploadToS3 } = require('../config/s3');
 const { fetchWebsiteText } = require('../utils/websiteFetcher');
 const { generateAiAgentKnowledge } = require('../services/groqService');
@@ -317,7 +317,7 @@ const getAutoMessages = async (req, res) => {
       welcome_message: s.whatsapp_auto_responder_message || '',
       away_enabled: !!s.whatsapp_away_enabled,
       away_message: s.whatsapp_away_message || '',
-      business_hours: s.whatsapp_business_hours || { start: '10:00', end: '19:00', days: [1, 2, 3, 4, 5, 6], timezone: 'Asia/Kolkata' },
+      business_hours: { ...(s.whatsapp_business_hours || { start: '10:00', end: '19:00', days: [1, 2, 3, 4, 5, 6] }), timezone: localeFromSettings(s).timezone },
     });
   } catch (e) { console.error('getAutoMessages:', e.message); res.status(500).json({ error: 'Failed.' }); }
 };
@@ -337,7 +337,7 @@ const updateAutoMessages = async (req, res) => {
       patch.whatsapp_business_hours = {
         start: business_hours.start, end: business_hours.end,
         days: business_hours.days.map(Number).filter(d => d >= 0 && d <= 6),
-        timezone: business_hours.timezone || 'Asia/Kolkata',
+        timezone: (await getWorkspaceLocale(req.tenantId)).timezone,
       };
     }
     if (patch.whatsapp_away_enabled && !(patch.whatsapp_away_message || (await getSettings(req.tenantId)).whatsapp_away_message)) {
@@ -367,7 +367,7 @@ const getBookingMessages = async (req, res) => {
       ...bookingSettings(t.settings),
       business_name: t.name || '',
       business_address: [t.address, t.city].filter(Boolean).join(', '),
-      timezone: t.settings?.timezone || 'Asia/Kolkata',
+      timezone: localeFromSettings(t.settings || {}).timezone,
       recent,
     });
   } catch (e) { console.error('getBookingMessages:', e.message); res.status(500).json({ error: 'Failed.' }); }

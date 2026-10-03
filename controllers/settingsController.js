@@ -2,6 +2,15 @@ const path = require('path');
 const { query } = require('../config/db');
 const { stageFlagError, checkStageUpdate } = require('../utils/stageRules');
 const { uploadToS3 } = require('../config/s3');
+const { localeFromSettings, validTimezone, validCurrency } = require('../utils/workspaceLocale');
+
+// Money already recorded in the workspace currency. Changing the currency never converts
+// it, so the owner confirms once they know old amounts keep their numbers.
+const hasMoneyData = async (tenantId) => (await query(
+  `SELECT EXISTS (SELECT 1 FROM leads WHERE tenant_id = $1 AND COALESCE(deal_value, 0) <> 0)
+       OR EXISTS (SELECT 1 FROM quotations WHERE tenant_id = $1)
+       OR EXISTS (SELECT 1 FROM campaigns WHERE tenant_id = $1 AND (COALESCE(budget, 0) <> 0 OR COALESCE(actual_spend, 0) <> 0)) AS has`,
+  [tenantId])).rows[0]?.has;
 
 // Surfaces a few settings-JSONB fields at the top level for frontend convenience.
 const withExtras = (row) => ({
@@ -17,6 +26,7 @@ const withExtras = (row) => ({
   automation_business_hours_end: row?.settings?.automation_business_hours_end || '20:00',
   automation_daily_cap_enabled: !!row?.settings?.automation_daily_cap_enabled,
   automation_daily_cap: row?.settings?.automation_daily_cap || 1,
+  ...localeFromSettings(row?.settings),
 });
 
 // GET /api/settings
@@ -66,6 +76,29 @@ const updateSettings = async (req, res) => {
 
     // Store bank_details / report / email / automation preferences inside the settings JSONB column
     const settingsPatch = {};
+    const { country, currency, timezone, confirm_currency_change } = req.body;
+    if (country !== undefined) {
+      if (!/^[A-Z]{2}$/.test(country || '')) return res.status(422).json({ error: 'Pick a country.' });
+      settingsPatch.country = country;
+    }
+    if (timezone !== undefined) {
+      if (!validTimezone(timezone)) return res.status(422).json({ error: 'Pick a valid timezone.' });
+      settingsPatch.timezone = timezone;
+    }
+    if (currency !== undefined) {
+      if (!validCurrency(currency)) return res.status(422).json({ error: 'Pick a valid currency.' });
+      const current = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings || {};
+      const from = localeFromSettings(current).currency;
+      if (currency !== from) {
+        if (!confirm_currency_change && await hasMoneyData(req.tenantId)) {
+          return res.status(409).json({ code: 'CURRENCY_CHANGE_CONFIRM', from, to: currency,
+            error: `Amounts you've already recorded (deal values, quotations, budgets) stay as they are — they won't be converted from ${from} to ${currency}. Existing quotations keep ${from}; new amounts will be in ${currency}.` });
+        }
+        settingsPatch.currency = currency;
+        settingsPatch.currency_history = [...(Array.isArray(current.currency_history) ? current.currency_history : []),
+          { from, to: currency, at: new Date().toISOString(), by: req.user?.id || null }];
+      }
+    }
     if (req.body.dedupe_mode !== undefined) {
       if (!['phone','phone_or_email','off'].includes(req.body.dedupe_mode)) return res.status(422).json({ error: 'Invalid dedupe mode.' });
       settingsPatch.dedupe_mode = req.body.dedupe_mode;

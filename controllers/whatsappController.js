@@ -1,6 +1,6 @@
 const { ingestLead } = require('../services/leadIngestion');
 const { normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
-const { getWorkspaceLocale } = require('../utils/workspaceLocale');
+const { getWorkspaceLocale, localeFromSettings, wallTimeToUtc, formatWhen } = require('../utils/workspaceLocale');
 const axios = require('axios');
 const { query } = require('../config/db');
 const { uploadToS3 } = require('../config/s3');
@@ -563,7 +563,7 @@ const handleWebhook = async (req, res) => {
       let awaySent = await require('../services/inboundReplies').replyToInbound({lead,text:messageText,messageId:waMessageId,settings:tenant?.settings || {}});
       await query("INSERT INTO integration_health(tenant_id,provider,last_lead_received_at,token_valid) VALUES($1,'whatsapp',now(),true) ON CONFLICT(tenant_id,provider) DO UPDATE SET last_lead_received_at=now(),token_valid=true",[lead.tenant_id]);
       if (!awaySent && !lead.ai_paused && tenant?.settings?.whatsapp_away_enabled && tenant.settings.whatsapp_away_message && !lead.opted_out
-          && !isWithinBusinessHours(tenant.settings.whatsapp_business_hours)) {
+          && !isWithinBusinessHours(tenant.settings.whatsapp_business_hours, new Date(), localeFromSettings(tenant.settings).timezone)) {
         try {
           const recent = await query(
             `SELECT 1 FROM whatsapp_messages WHERE lead_id = $1 AND direction = 'outbound' AND is_automated = true
@@ -607,6 +607,7 @@ const handleWebhook = async (req, res) => {
               business_name: tenant.name, description: tenant.settings?.business_description,
               knowledge: tenant.settings?.ai_knowledge,
               lead_source: [lead.source, lead.source_detail].filter(Boolean).join(' — ') || null,
+              timezone: localeFromSettings(tenant.settings || {}).timezone,
             }
           );
 
@@ -647,7 +648,9 @@ const handleWebhook = async (req, res) => {
           // automatically instead of leaving it sitting in the chat transcript, and
           // let the team know it's confirmed. Sanity-checked against a plausible
           // window so a hallucinated date/time can't create garbage appointments.
-          const bookingAt = aiResponse.booking?.ready && aiResponse.booking?.date_time_iso ? new Date(aiResponse.booking.date_time_iso) : null;
+          // The AI gives wall-clock time in the workspace timezone; turn it into a real instant.
+          const workspace = localeFromSettings(tenant.settings || {});
+          const bookingAt = aiResponse.booking?.ready && aiResponse.booking?.date_time_iso ? wallTimeToUtc(aiResponse.booking.date_time_iso, workspace.timezone) : null;
           const bookingIsPlausible = bookingAt && !isNaN(bookingAt.getTime())
             && bookingAt.getTime() > Date.now() - 60 * 60 * 1000
             && bookingAt.getTime() < Date.now() + 365 * 24 * 60 * 60 * 1000;
@@ -665,9 +668,9 @@ const handleWebhook = async (req, res) => {
             await query(
               `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at)
                VALUES ($1, $2, $3, 'demo', $4)`,
-              [lead.tenant_id, lead.id, aiResponse.booking.summary || 'Booked automatically by AI Auto-reply.', aiResponse.booking.date_time_iso]
+              [lead.tenant_id, lead.id, aiResponse.booking.summary || 'Booked automatically by AI Auto-reply.', bookingAt.toISOString()]
             );
-            const demoTime = bookingAt.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+            const demoTime = formatWhen(bookingAt, workspace, { dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short' });
             await query(
               `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
                VALUES ($1, $2, 'demo_scheduled', 'Demo Scheduled', $3)`,

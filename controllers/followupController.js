@@ -2,6 +2,7 @@ const { query } = require('../config/db');
 const followupSummary = require('../services/followupSummary');
 const { transaction } = require('../config/db');
 const { recordFirstResponse } = require('../utils/leadResponse');
+const { getWorkspaceLocale, formatWhen } = require('../utils/workspaceLocale');
 
 // GET /api/followups - Get all followups with pagination
 const getFollowups = async (req, res) => {
@@ -139,7 +140,7 @@ const deleteFollowup = async (req, res) => {
       [req.tenantId, f.lead_id,
        isDemo ? 'demo_cancelled' : 'followup_cancelled',
        isDemo ? 'Demo Cancelled' : 'Follow-up Cancelled',
-       `Was scheduled for ${new Date(f.next_followup_at).toLocaleString('en-IN')}`,
+       `Was scheduled for ${formatWhen(f.next_followup_at, await getWorkspaceLocale(req.tenantId), { dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short' })}`,
        req.user.id]
     ).catch(() => {});
 

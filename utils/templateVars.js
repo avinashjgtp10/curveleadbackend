@@ -1,3 +1,5 @@
+const { localeFromSettings, formatMoney } = require('./workspaceLocale');
+
 // Substitutes {{name}}/{{phone}}/{{email}}/{{city}}/{{source}} placeholders with lead fields.
 const substituteVars = (message, lead) => message
   .replace(/\{\{name\}\}/gi, lead.name || '')
@@ -11,7 +13,7 @@ const substituteVars = (message, lead) => message
 // {business} {business_phone} — course fields come from the lead's linked
 // course, business fields from the tenant.
 const substituteTemplateVars = (message, lead = {}, tenant = {}) => {
-  const courseFee = lead.fee_amount != null ? `₹${Number(lead.fee_amount).toLocaleString('en-IN')}` : '';
+  const courseFee = lead.fee_amount != null ? formatMoney(lead.fee_amount, localeFromSettings(tenant.settings || {})) : '';
   const courseDuration = lead.duration_value ? `${lead.duration_value} ${lead.duration_unit || ''}`.trim() : '';
   return message
     .replace(/\{name\}/gi, lead.name || '')

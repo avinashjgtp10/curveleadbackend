@@ -1,5 +1,11 @@
 const { metricScope, getMetrics, getBreakdown, WON } = require('../services/metrics');
 const { query } = require('../config/db');
+const { getWorkspaceLocale } = require('../utils/workspaceLocale');
+
+// Start of the workspace-local day/week/month containing a UTC timestamp column, returned
+// as a UTC timestamp so the frontend can show it in the workspace timezone.
+const bucket = (unit, col, tzParam) =>
+  `(DATE_TRUNC('${unit}', ${col} AT TIME ZONE 'UTC' AT TIME ZONE ${tzParam}) AT TIME ZONE ${tzParam} AT TIME ZONE 'UTC')`;
 const { MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 
 // Resolves the ReportsPage ?period= selector (today|this_week|this_month|last_month|this_year)
@@ -298,11 +304,12 @@ const getFollowupTrend = async (req, res) => {
     const { period = 'daily', days = 30 } = req.query;
     const truncFormat = period === 'monthly' ? 'month' : period === 'weekly' ? 'week' : 'day';
     const isStaff = req.user.role === 'staff';
-    const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
-    const sc = isStaff ? ' AND l.assigned_to = $2' : '';
+    const { timezone } = await getWorkspaceLocale(req.tenantId);
+    const params = isStaff ? [req.tenantId, timezone, req.user.id] : [req.tenantId, timezone];
+    const sc = isStaff ? ' AND l.assigned_to = $3' : '';
 
     const result = await query(
-      `SELECT DATE_TRUNC('${truncFormat}', lf.created_at) as period,
+      `SELECT ${bucket(truncFormat, 'lf.created_at', '$2')} as period,
               COUNT(*) as scheduled,
               COUNT(*) FILTER (WHERE lf.is_completed = true) as completed
        FROM lead_followups lf
@@ -331,14 +338,15 @@ const getTimeline = async (req, res) => {
     const { period = 'daily', days = 30 } = req.query;
     const truncFormat = period === 'monthly' ? 'month' : period === 'weekly' ? 'week' : 'day';
     const isStaff = req.user.role === 'staff';
-    const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
-    const sc = isStaff ? ' AND assigned_to = $2' : '';
+    const { timezone } = await getWorkspaceLocale(req.tenantId);
+    const params = isStaff ? [req.tenantId, timezone, req.user.id] : [req.tenantId, timezone];
+    const sc = isStaff ? ' AND assigned_to = $3' : '';
 
     // Leads-created and revenue-won are bucketed separately (a lead created in one period can
     // be won in a later one) and merged by period, rather than both grouped by created_at.
     const result = await query(
       `WITH created_buckets AS (
-         SELECT DATE_TRUNC('${truncFormat}', created_at) as period,
+         SELECT ${bucket(truncFormat, 'created_at', '$2::text')} as period,
                 COUNT(*) as total_leads,
                 ROUND(AVG(response_time_seconds) FILTER (WHERE response_time_seconds IS NOT NULL)) as avg_response_seconds,
                 COUNT(*) FILTER (WHERE response_time_seconds IS NOT NULL) as responded_count
@@ -347,7 +355,7 @@ const getTimeline = async (req, res) => {
          GROUP BY period
        ),
        won_buckets AS (
-         SELECT DATE_TRUNC('${truncFormat}', won_at) as period,
+         SELECT ${bucket(truncFormat, 'won_at', '$2::text')} as period,
                 COUNT(*) as won,
                 COALESCE(SUM(deal_value), 0) as revenue
          FROM leads l
@@ -433,8 +441,6 @@ const getDashboardSummary = async (req, res) => {
           COUNT(*) as total_leads,
           COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3) as leads_in_period,
           COUNT(*) FILTER (WHERE created_at >= $4 AND created_at < $5) as leads_prev_period,
-          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW())) as leads_today,
-          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW()) AND first_response_at IS NOT NULL) as leads_today_contacted,
           COUNT(*) FILTER (WHERE lead_score = 'hot') as hot_leads,
           COUNT(*) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as total_won,
@@ -517,10 +523,10 @@ const getDashboardSummary = async (req, res) => {
 
       // Daily lead-creation trend across the selected period
       query(`
-        SELECT DATE_TRUNC('day', created_at) as day, COUNT(*) as count
+        SELECT ${bucket('day', 'created_at', '$5::text')} as day, COUNT(*) as count
         FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at >= $2 AND created_at < $3${rsc}
         GROUP BY day ORDER BY day ASC
-      `, rangeParams),
+      `, [...rangeParams, scope.tz]),
 
       // Unassigned leads (admin only) — always live
       isStaff

@@ -1,6 +1,6 @@
 const { buildLeadSearch } = require('../utils/leadSearch');
 const { duplicateGroups } = require('../services/duplicates');
-const { getWorkspaceLocale } = require('../utils/workspaceLocale');
+const { getWorkspaceLocale, formatWhen } = require('../utils/workspaceLocale');
 const { applyMerge } = require('../services/leadMerge');
 const { ingestLead } = require('../services/leadIngestion');
 const { normalizePhone, normalizeSource, normalizeLead, statusChangeTitle } = require('../utils/dataQuality');
@@ -649,7 +649,7 @@ const addNote = async (req, res) => {
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
          VALUES ($1, $2, 'followup_scheduled', 'Follow-up Scheduled', $3, $4)`,
-        [req.tenantId, req.params.id, `Next follow-up on ${new Date(next_followup_at).toLocaleString('en-IN')}`, req.user.id]
+        [req.tenantId, req.params.id, `Next follow-up on ${formatWhen(next_followup_at, await getWorkspaceLocale(req.tenantId), { dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short' })}`, req.user.id]
       );
     }
 

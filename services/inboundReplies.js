@@ -1,5 +1,6 @@
 const { query } = require("../config/db");
 const { isWithinBusinessHours } = require("../utils/businessHours");
+const { localeFromSettings } = require("../utils/workspaceLocale");
 const { isSessionOpen } = require("../utils/sessionWindow");
 const { resolveWhatsAppCredentials } = require("../utils/whatsappCredentials");
 const {
@@ -33,7 +34,7 @@ async function replyToInbound({ lead, text, messageId, settings }) {
   const rule = matchReply(settings.inbound_reply_rules, {
     text,
     first,
-    outside: !isWithinBusinessHours(settings.whatsapp_business_hours),
+    outside: !isWithinBusinessHours(settings.whatsapp_business_hours, new Date(), localeFromSettings(settings).timezone),
   });
   if (!rule) return false;
   if (rule.type === "text" && !(await isSessionOpen(lead.id))) return false;
