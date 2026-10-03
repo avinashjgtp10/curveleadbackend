@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { checkTemplateConsent } = require('../services/whatsappConsent');
 const { sendTextMessage, sendTemplate, listMessageTemplates } = require('../services/whatsappService');
 const { sendEmail } = require('../utils/email');
 const { substituteVars } = require('../utils/templateVars');
@@ -166,6 +167,16 @@ const runAutomationSequences = async () => {
             const headerMedia = media.rows[0]
               ? { type: media.rows[0].media_type.toLowerCase(), link: media.rows[0].media_url }
               : null;
+            // Consent: marketing templates need an opt-in; an unknown template counts as marketing.
+            const consent = await checkTemplateConsent({ tenantId: row.tenant_id, leadId: row.lead_id, template: matchedTemplate });
+            if (!consent.allowed) {
+              await query(
+                `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+                 VALUES ($1,$2,'automation_skipped','Automated template not sent',$3)`,
+                [row.tenant_id, row.lead_id, consent.reason]
+              ).catch(() => {});
+              continue;
+            }
             const sendResult = await sendTemplate(row.phone, step.approved_template_name, language, parameters, credentials, headerMedia);
             // The actual rendered text (body with the lead's name filled in), same as a
             // manual broadcast send stores — not the bare "[Template: name]" placeholder,

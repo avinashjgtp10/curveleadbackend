@@ -3,7 +3,7 @@ const { transaction } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { normalizeLead, normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
 const { localeFromSettings } = require('../utils/workspaceLocale');
-const COLUMNS = new Set(['product','is_test_lead','gclid','lead_submit_time','google_custom_answers','google_ads_integration_id','name','phone','email','location','business_name','address','city','custom_fields','source','source_detail','campaign_id','stage','assigned_to','notes','deal_value','expected_close_date','tags','lead_date','meta_lead_id','meta_ad_id','meta_adset_id','meta_form_id','created_at','google_lead_id','google_form_id','google_campaign_id','google_adgroup_id','google_creative_id','google_asset_group_id','google_gcl_id','google_is_test','google_integration_id']);
+const COLUMNS = new Set(['product','is_test_lead','gclid','lead_submit_time','google_custom_answers','google_ads_integration_id','name','phone','email','location','business_name','address','city','custom_fields','source','source_detail','campaign_id','stage','assigned_to','notes','deal_value','expected_close_date','tags','lead_date','meta_lead_id','meta_ad_id','meta_adset_id','meta_form_id','whatsapp_opt_in_at','whatsapp_opt_in_source','created_at','google_lead_id','google_form_id','google_campaign_id','google_adgroup_id','google_creative_id','google_asset_group_id','google_gcl_id','google_is_test','google_integration_id']);
 // Columns added by later migrations: written only once the column exists, so lead capture
 // keeps working if the code is deployed before the migration (checked every 5 minutes).
 const OPTIONAL_COLUMNS = ['meta_form_id'];

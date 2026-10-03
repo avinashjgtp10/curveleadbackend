@@ -1100,6 +1100,7 @@ const importLeads = async (req, res) => {
       deal_value: ['deal_value','value','amount','deal_amount','price','budget','revenue','quoted_price','quote','quoted_amount','deal_value_inr'],
       city:       ['city','location','area','region'],
       lead_date:  ['lead_date','lead_datetime','lead_time','date','created_date','enquiry_date'],
+      whatsapp_opt_in: ['whatsapp_opt_in','whatsapp_optin','whatsapp_consent','opt_in','optin','consent','marketing_consent'],
     };
 
     const keyMap = {}; // header → field, auto-detected
@@ -1189,8 +1190,12 @@ const importLeads = async (req, res) => {
 
 
       try {
+        // A consent column (yes / true / 1 / y) records a WhatsApp opt-in with source "import".
+        const { whatsapp_opt_in: consentCell, ...leadFields } = lead;
+        const consent = /^(y|yes|true|1|opted[ _-]?in|agreed)$/i.test(String(consentCell ?? '').trim());
         const result = await ingestLead(req.tenantId, {
-          ...lead, source: lead.source || 'import', location: lead.city || null,
+          ...leadFields, source: lead.source || 'import', location: lead.city || null,
+          ...(consent ? { whatsapp_opt_in_at: new Date(), whatsapp_opt_in_source: 'import' } : {}),
           lead_date: lead.lead_date || new Date(), deal_value: lead.deal_value || 0,
         }, { actorId: req.user.id });
         if (!result.duplicate) inserted++;

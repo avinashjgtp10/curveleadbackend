@@ -8,6 +8,7 @@ const {
   listMessageTemplates,
 } = require("./whatsappService");
 const { substituteVars } = require("../utils/templateVars");
+const { checkTemplateConsent } = require("./whatsappConsent");
 function matchReply(rules, { text, first, outside }) {
   return (rules || []).find(
     (r) =>
@@ -66,6 +67,8 @@ async function replyToInbound({ lead, text, messageId, settings }) {
     )
       return false;
     body = raw;
+    const consent = await checkTemplateConsent({ tenantId: lead.tenant_id, leadId: lead.id, template });
+    if (!consent.allowed) return false;
     result = await sendTemplate(
       lead.phone,
       rule.value,

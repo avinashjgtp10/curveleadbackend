@@ -420,9 +420,9 @@ test("broadcast rejects opt-outs and quota exhaustion, sends authoritative body 
       if (sql.includes("SELECT l.id, l.name"))
         return {
           rows: [
-            { id: "a", name: "$& literal", phone: "1" },
+            { id: "a", name: "$& literal", phone: "1", source: "meta_ads" },
             { id: "b", name: "Opted out", phone: "2", opted_out: true },
-            { id: "c", name: "Over quota", phone: "3" },
+            { id: "c", name: "Over quota", phone: "3", source: "meta_ads" },
           ],
         };
       if (sql.includes("count(*)::int n"))
@@ -435,6 +435,7 @@ test("broadcast rejects opt-outs and quota exhaustion, sends authoritative body 
   };
   db.transaction = (fn) => fn(db);
   const ctrl = load("controllers/whatsappBroadcastController.js", {
+    "../services/whatsappConsent": require("../services/whatsappConsent"),
     "../utils/messagingLimit": { messagingLimit: async () => 1 },
     "../config/db": db,
     "../utils/whatsappCredentials": {
@@ -447,6 +448,7 @@ test("broadcast rejects opt-outs and quota exhaustion, sends authoritative body 
             name: "hello",
             language: "en_US",
             status: "APPROVED",
+            category: "UTILITY",
             components: [{ type: "BODY", text: "Hello {{1}}" }],
           },
         ],
@@ -614,7 +616,7 @@ test("broadcast skips leads who already received the template unless resending i
           return { rows: [{ settings: { whatsapp_business_account_id: "w", whatsapp_access_token: "token", whatsapp_messaging_limit: 100 } }] };
         if (sql.includes("INSERT INTO whatsapp_broadcast_reports")) return { rows: [{ id: "report" }] };
         if (sql.includes("SELECT l.id, l.name"))
-          return { rows: [{ id: "a", name: "Got it", phone: "1" }, { id: "b", name: "New", phone: "2" }] };
+          return { rows: [{ id: "a", name: "Got it", phone: "1", source: "meta_ads" }, { id: "b", name: "New", phone: "2", source: "meta_ads" }] };
         if (sql.includes("m.template_name=$3")) {
           priorChecked = true;
           assert.equal(p[2], "hello");
@@ -626,11 +628,12 @@ test("broadcast skips leads who already received the template unless resending i
     };
     db.transaction = (fn) => fn(db);
     const ctrl = load("controllers/whatsappBroadcastController.js", {
+    "../services/whatsappConsent": require("../services/whatsappConsent"),
       "../utils/messagingLimit": { messagingLimit: async () => 100 },
       "../config/db": db,
       "../utils/whatsappCredentials": { resolveWhatsAppCredentials: async () => ({}) },
       "../services/whatsappService": {
-        listMessageTemplates: async () => ({ templates: [{ name: "hello", language: "en_US", status: "APPROVED", components: [{ type: "BODY", text: "Hi" }] }] }),
+        listMessageTemplates: async () => ({ templates: [{ name: "hello", language: "en_US", status: "APPROVED", category: "UTILITY", components: [{ type: "BODY", text: "Hi" }] }] }),
         sendTemplate: async () => { sends++; return { success: true, wa_message_id: "wa" }; },
       },
     });

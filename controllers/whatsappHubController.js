@@ -1,6 +1,8 @@
 const path = require('path');
 const axios = require('axios');
 const { query } = require('../config/db');
+const { normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
+const { getWorkspaceLocale } = require('../utils/workspaceLocale');
 const { uploadToS3 } = require('../config/s3');
 const { fetchWebsiteText } = require('../utils/websiteFetcher');
 const { generateAiAgentKnowledge } = require('../services/groqService');
@@ -142,7 +144,8 @@ const getBroadcastHistory = async (req, res) => {
 const getOptIns = async (req, res) => {
   try {
     const settings = await getSettings(req.tenantId);
-    const base = { require_opt_in: !!settings.whatsapp_require_opt_in };
+    // Consent is always enforced now (services/whatsappConsent.js) — no per-workspace switch.
+    const base = { policy: { marketing: 'opt_in_required', utility: 'opt_in_or_requested_contact' } };
 
     const optedOut = await query(
       `SELECT id, name, phone, opted_out_at FROM leads
@@ -187,12 +190,15 @@ const updateOptIns = async (req, res) => {
     if (!['opt_in', 'opt_out'].includes(action)) return res.status(400).json({ error: 'action must be opt_in or opt_out.' });
 
     const ids = Array.isArray(lead_ids) ? lead_ids : [];
-    const phoneList = (Array.isArray(phones) ? phones : []).map(p => String(p).replace(/\D/g, '')).filter(Boolean).slice(0, 2000);
-    if (!ids.length && !phoneList.length) return res.status(400).json({ error: 'Provide lead_ids or phones.' });
+    // Every stored format of each number (E.164, national, 0-prefixed), read in the workspace's country.
+    const { country } = await getWorkspaceLocale(req.tenantId);
+    const phoneList = [...new Set((Array.isArray(phones) ? phones : []).slice(0, 2000).flatMap(p => {
+      try { return phoneDigitVariants(normalizePhone(p, country)); } catch { return []; }
+    }))];
+    if (!ids.length && !phoneList.length) return res.status(400).json({ error: 'Provide lead_ids or valid phone numbers.' });
 
-    const match = `tenant_id = $1 AND (id = ANY($2::uuid[]) OR regexp_replace(phone, '\\D', '', 'g') = ANY($3::text[])
-                   OR RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = ANY($3::text[]))`;
-    const params = [req.tenantId, ids, phoneList.map(p => (p.length > 10 ? p.slice(-10) : p))];
+    const match = `tenant_id = $1 AND merged_into_id IS NULL AND (id = ANY($2::uuid[]) OR regexp_replace(phone, '\\D', '', 'g') = ANY($3::text[]))`;
+    const params = [req.tenantId, ids, phoneList];
 
     let result;
     try {
@@ -209,12 +215,10 @@ const updateOptIns = async (req, res) => {
   } catch (e) { console.error('updateOptIns:', e.message); res.status(500).json({ error: 'Failed to update opt-ins.' }); }
 };
 
-// ── PUT /hub/optin-settings { require_opt_in } ──────────────────────────────
+// ── PUT /hub/optin-settings (retired) ───────────────────────────────────────
+// The old "require opt-in" switch: consent rules now always apply, so this only explains that.
 const updateOptInSettings = async (req, res) => {
-  try {
-    await saveSettings(req.tenantId, { whatsapp_require_opt_in: !!req.body.require_opt_in });
-    res.json({ require_opt_in: !!req.body.require_opt_in });
-  } catch (e) { console.error('updateOptInSettings:', e.message); res.status(500).json({ error: 'Failed to save.' }); }
+  res.status(410).json({ error: 'Opt-in is always required for marketing templates now; utility templates also reach leads who asked to be contacted.' });
 };
 
 // ── GET /hub/numbers ────────────────────────────────────────────────────────
