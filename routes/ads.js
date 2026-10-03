@@ -3,10 +3,15 @@ const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 const { requirePermission } = require('../utils/permissions');
 const ctrl = require('../controllers/adsController');
+const google = require('../controllers/googleAdsController');
 
 // Ad spend, budgets and account connections are workspace-level, so the whole
 // module needs ads.manage (admins always have it; staff only if granted).
 router.use(authenticate, tenantContext, requirePermission('ads.manage'));
+
+router.get('/google/status', google.status);
+router.get('/google/connect', google.connectUrl);
+router.post('/google/refresh', google.refresh);
 
 router.get('/accounts', ctrl.listAccounts);
 router.post('/accounts/connect', ctrl.connectAccounts);

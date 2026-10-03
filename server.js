@@ -151,6 +151,8 @@ app.use('/api/automations', apiLimiter, require('./routes/automations'));
 app.use('/api/teams', apiLimiter, require('./routes/teams'));
 app.use('/api/features', apiLimiter, require('./routes/features'));
 app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
+// Google redirects the browser here after consent, so it can't require our login.
+app.get('/api/ads/google/callback', apiLimiter, require('./controllers/googleAdsController').callback);
 app.use('/api/ads', apiLimiter, require('./routes/ads'));
 app.use('/api/social', apiLimiter, require('./routes/social'));
 

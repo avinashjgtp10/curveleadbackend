@@ -1,6 +1,6 @@
 # Ads + Social module — implementation plan
 
-Status: **Phase 0 + 1 built** (see `docs/ads-phase-1.md`); migration applied to production 2026-10-03. **Phase 1b built** (see `docs/ads-phase-1b.md`). **Phase 2 built** (see `docs/ads-phase-2.md`; D5 = score on ingest, rule-based, no Groq). **Phase 3 built** (see `docs/ads-phase-3.md`). **Phase 4 built** (see `docs/ads-phase-4.md`). **Phase 5 built** (see `docs/ads-phase-5.md`). **Phase 6 built** (see `docs/ads-phase-6.md`). Phase 7 (Google Ads) not started. Decisions taken: D1 BullMQ with in-process fallback when `REDIS_URL` is unset; D2 many accounts + one primary; D3 versioned keys; D4 paise/rupees as described; **D8 Campaigns vs Ads Manager (below) — Phase 1b runs before Phase 2.** D5–D7 apply to later phases.
+Status: **Phase 0 + 1 built** (see `docs/ads-phase-1.md`); migration applied to production 2026-10-03. **Phase 1b built** (see `docs/ads-phase-1b.md`). **Phase 2 built** (see `docs/ads-phase-2.md`; D5 = score on ingest, rule-based, no Groq). **Phase 3 built** (see `docs/ads-phase-3.md`). **Phase 4 built** (see `docs/ads-phase-4.md`). **Phase 5 built** (see `docs/ads-phase-5.md`). **Phase 6 built** (see `docs/ads-phase-6.md`). **Phase 7a built** (Google Ads read; see `docs/ads-phase-7.md`); 7b (AI search ads, created paused) after review. Decisions taken: D1 BullMQ with in-process fallback when `REDIS_URL` is unset; D2 many accounts + one primary; D3 versioned keys; D4 paise/rupees as described; **D8 Campaigns vs Ads Manager (below) — Phase 1b runs before Phase 2.** D5–D7 apply to later phases.
 
 ## D8 — Overlap with the existing Campaigns section (decided 2026-10-03)
 
@@ -161,7 +161,12 @@ Builds on the existing `meta_capi_queue` + trigger rather than adding a parallel
 
 **API**: `GET/POST /api/social/accounts` (connect from Pages/IG linked to the FB Login), `POST /api/social/media` (S3 upload), `GET/POST/PUT/DELETE /api/social/posts`, `POST /api/social/posts/:id/publish-now`, `GET /api/social/calendar?from&to` (posts grouped by day with per-platform status).
 
-## 10. Phase 7 (later) — Google Ads
+## 10. Phase 7 — Google Ads
+
+**7a (built)** — read only. REST API via axios (no `google-ads-api` SDK: one less native dependency, same calls). Connect with Google (`adwords` scope, own callback `/api/ads/google/callback`), accounts incl. MCC clients (`ad_accounts.login_customer_id`), sync campaigns / ad groups / ads and daily metrics into the same `ad_*` tables with `provider='google'`, CRM campaigns via `campaigns.google_campaign_id` (and lead-form leads linked to them), Google Ads tab in Ads Manager. Details: `docs/ads-phase-7.md`.
+
+**7b (next)** — the original plan below: AI RSA generator + create paused, plus pause/resume/budget for Google. Needs Basic Access on the developer token.
+
 
 `google-ads-api` (Opteo) with MCC `login_customer_id` + developer token; per-tenant customer id + encrypted refresh token (new OAuth scope `adwords`, separate from GBP). Read campaigns/insights via GAQL into the same `ad_*` tables with `provider='google'`. AI RSA generator (15 headlines ≤ 30, 4 descriptions ≤ 90, keywords) validated with Zod; created paused. Detailed plan when Phase 6 is done.
 

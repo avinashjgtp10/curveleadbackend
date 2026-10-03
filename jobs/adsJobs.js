@@ -1,6 +1,7 @@
 const { query } = require('../config/db');
 const queues = require('./queues');
 const { syncAdAccount } = require('../services/metaAds/sync');
+const { syncGoogleAccount } = require('../services/googleAds/sync');
 const { inspectToken, exchangeForLongLived, saveToken, markToken } = require('../services/metaAds/client');
 const { decryptToken } = require('../utils/cryptoSecrets');
 const { createNotification } = require('../controllers/notificationController');
@@ -8,13 +9,13 @@ const { createNotification } = require('../controllers/notificationController');
 const SYNC_EVERY_MS = Number(process.env.ADS_INSIGHTS_SYNC_MINUTES || 240) * 60 * 1000;
 const TOKEN_REFRESH_WINDOW_MS = 10 * 864e5;
 
-// Fans out one sync job per active Meta ad account with a usable token.
+// Fans out one sync job per active Meta / Google Ads account with a usable token.
 const syncAll = async () => {
   const { rows } = await query(
     `SELECT a.tenant_id, a.id FROM ad_accounts a
      JOIN ad_oauth_tokens t ON t.id = a.token_id AND t.tenant_id = a.tenant_id AND t.status = 'active'
      JOIN tenants tn ON tn.id = a.tenant_id AND tn.subscription_status IN ('active','trial')
-     WHERE a.provider = 'meta' AND a.is_active`
+     WHERE a.is_active`
   );
   for (const r of rows) await queues.enqueue('ads:sync-account', { tenantId: r.tenant_id, adAccountId: r.id }, { jobId: `sync-${r.id}` });
   return rows.length;
@@ -57,12 +58,19 @@ const refreshTokens = async () => {
   }
 };
 
+// One job name for both providers, so "Sync now" and the 4-hourly fan-out work the same.
+const syncAccount = async (data) => {
+  const { rows } = await query('SELECT provider FROM ad_accounts WHERE tenant_id = $1 AND id = $2', [data.tenantId, data.adAccountId]);
+  if (!rows[0]) return { skipped: 'not_found' };
+  return rows[0].provider === 'google' ? syncGoogleAccount(data) : syncAdAccount(data);
+};
+
 const registerAdsJobs = () => {
   queues.register('ads:sync-all', () => syncAll(), { attempts: 1 });
-  queues.register('ads:sync-account', (data) => syncAdAccount(data), { attempts: 5, backoffMs: 30000, concurrency: 2 });
+  queues.register('ads:sync-account', (data) => syncAccount(data), { attempts: 5, backoffMs: 30000, concurrency: 2 });
   queues.register('ads:refresh-tokens', () => refreshTokens(), { attempts: 3, backoffMs: 60000 });
   queues.repeat('ads:sync-all', SYNC_EVERY_MS, {}, 90 * 1000);
   queues.repeat('ads:refresh-tokens', 24 * 60 * 60 * 1000, {}, 5 * 60 * 1000);
 };
 
-module.exports = { registerAdsJobs, syncAll, refreshTokens };
+module.exports = { registerAdsJobs, syncAll, syncAccount, refreshTokens };

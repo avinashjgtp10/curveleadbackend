@@ -29,15 +29,19 @@ const dateRange = (q) => {
   return { from, to };
 };
 
-// The requested ad account, or the tenant's primary one.
-const resolveAccountId = async (tenantId, accountId) => {
+const PROVIDERS = ['meta', 'google'];
+const providerOf = (q) => (PROVIDERS.includes(q?.provider) ? q.provider : 'meta');
+
+// The requested ad account, or the tenant's primary one for the provider (?provider=meta|google).
+// An explicit account_id is accepted for either provider.
+const resolveAccountId = async (tenantId, accountId, provider = 'meta') => {
   if (accountId && !UUID.test(accountId)) throw Object.assign(new Error('Invalid account_id.'), { status: 422 });
   const { rows } = await query(
-    `SELECT id FROM ad_accounts WHERE tenant_id = $1 AND provider = 'meta' AND ($2::uuid IS NULL OR id = $2::uuid)
+    `SELECT id FROM ad_accounts WHERE tenant_id = $1 AND ($2::uuid IS NOT NULL OR provider = $3) AND ($2::uuid IS NULL OR id = $2::uuid)
      ORDER BY is_primary DESC, created_at LIMIT 1`,
-    [tenantId, accountId || null]
+    [tenantId, accountId || null, provider]
   );
-  if (!rows[0]) throw Object.assign(new Error(accountId ? 'Ad account not found.' : 'Connect a Meta ad account first.'), { status: 404 });
+  if (!rows[0]) throw Object.assign(new Error(accountId ? 'Ad account not found.' : `Connect a ${provider === 'google' ? 'Google Ads' : 'Meta ad'} account first.`), { status: 404 });
   return rows[0].id;
 };
 
@@ -55,8 +59,8 @@ const listAccounts = async (req, res) => {
               a.last_synced_at, a.insights_synced_through, a.sync_error,
               t.status AS token_status, t.expires_at AS token_expires_at
        FROM ad_accounts a LEFT JOIN ad_oauth_tokens t ON t.id = a.token_id AND t.tenant_id = a.tenant_id
-       WHERE a.tenant_id = $1 AND a.provider = 'meta' ORDER BY a.is_primary DESC, a.name`,
-      [req.tenantId]
+       WHERE a.tenant_id = $1 AND a.provider = $2 ORDER BY a.is_primary DESC, a.name`,
+      [req.tenantId, providerOf(req.query)]
     );
     res.json({ accounts: rows });
   } catch (e) { fail('List ad accounts')(e, res); }
@@ -87,9 +91,9 @@ const connectAccounts = async (req, res) => {
 const setPrimary = async (req, res) => {
   try {
     if (!UUID.test(req.params.id)) return bad(res, 'Invalid id.');
-    const { rows } = await query('SELECT id FROM ad_accounts WHERE tenant_id = $1 AND id = $2', [req.tenantId, req.params.id]);
+    const { rows } = await query('SELECT id, provider FROM ad_accounts WHERE tenant_id = $1 AND id = $2', [req.tenantId, req.params.id]);
     if (!rows[0]) return bad(res, 'Ad account not found.', 404);
-    await query(`UPDATE ad_accounts SET is_primary = (id = $2), updated_at = now() WHERE tenant_id = $1 AND provider = 'meta' AND (is_primary OR id = $2)`, [req.tenantId, req.params.id]);
+    await query(`UPDATE ad_accounts SET is_primary = (id = $2), updated_at = now() WHERE tenant_id = $1 AND provider = $3 AND (is_primary OR id = $2)`, [req.tenantId, req.params.id, rows[0].provider]);
     res.json({ primary: req.params.id });
   } catch (e) { fail('Set primary ad account')(e, res); }
 };
@@ -109,7 +113,7 @@ const syncNow = async (req, res) => {
 const listCampaigns = async (req, res) => {
   try {
     const { from, to } = dateRange(req.query);
-    const accountId = await resolveAccountId(req.tenantId, req.query.account_id);
+    const accountId = await resolveAccountId(req.tenantId, req.query.account_id, providerOf(req.query));
     const { rows } = await query(
       `SELECT c.id, c.external_id, c.campaign_id AS crm_campaign_id, c.name, c.objective, c.status, c.effective_status,
               c.daily_budget_paise, c.lifetime_budget_paise, c.special_ad_categories, c.start_time, c.stop_time, ${totals}
@@ -185,7 +189,7 @@ const dailyInsights = async (req, res) => {
 const dashboard = async (req, res) => {
   try {
     const { from, to } = dateRange(req.query);
-    const accountId = await resolveAccountId(req.tenantId, req.query.account_id);
+    const accountId = await resolveAccountId(req.tenantId, req.query.account_id, providerOf(req.query));
     const account = (await query('SELECT currency, timezone_name FROM ad_accounts WHERE tenant_id = $1 AND id = $2', [req.tenantId, accountId])).rows[0] || {};
     const ad = await query(
       `SELECT ac.id, ac.external_id, ac.campaign_id AS crm_campaign_id, ac.name, ac.effective_status,

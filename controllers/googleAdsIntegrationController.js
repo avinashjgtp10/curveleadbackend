@@ -249,8 +249,13 @@ const receiveGoogleAdsLead = async (req, res) => {
     const assignedTo = is_test ? null : await resolveAssignee(tenantId, integration);
     const tags = integration.default_group ? [integration.default_group] : null;
 
+    // The CRM campaign for this Google campaign, once a Google Ads sync has seen it
+    // (the sync also links earlier leads). Never blocks the lead if the lookup fails.
+    const crmCampaignId = campaign_id ? (await query('SELECT id FROM campaigns WHERE tenant_id = $1 AND google_campaign_id = $2', [tenantId, String(campaign_id)])
+      .catch(() => ({ rows: [] }))).rows[0]?.id || null : null;
+
     const ingestion = await ingestLead(tenantId, {
-      name, phone, email, source: 'google_ads', source_detail: `Google Ads — form ${form_id || 'unknown'}`,
+      name, phone, email, source: 'google_ads', ...(crmCampaignId ? { campaign_id: crmCampaignId } : {}), source_detail: `Google Ads — form ${form_id || 'unknown'}`,
       stage, assigned_to: assignedTo, tags, product: integration.product || null, is_test_lead: !!is_test,
       google_lead_id: lead_id || null, gclid: gcl_id || null, google_campaign_id: campaign_id ? String(campaign_id) : null,
       google_form_id: form_id ? String(form_id) : null, google_adgroup_id: adgroup_id ? String(adgroup_id) : null,
