@@ -13,8 +13,9 @@ const { accountsFromCustomers, discoverGoogleAccounts } = require('../services/g
 
 test('campaign rows: budget micros → paise, status → the Ads screens’ vocabulary', () => {
   const c = parseCampaign({ campaign: { id: '123', name: 'Search – Pune', status: 'ENABLED', servingStatus: 'SERVING', advertisingChannelType: 'SEARCH' },
-    campaignBudget: { amountMicros: '500000000', period: 'DAILY' } });
-  assert.deepEqual(c, { external_id: '123', name: 'Search – Pune', objective: 'SEARCH', status: 'ENABLED', effective_status: 'ACTIVE', daily_budget_paise: 50000, lifetime_budget_paise: null });
+    campaignBudget: { resourceName: 'customers/1/campaignBudgets/7', amountMicros: '500000000', period: 'DAILY' } });
+  assert.deepEqual(c, { external_id: '123', name: 'Search – Pune', objective: 'SEARCH', status: 'ENABLED', effective_status: 'ACTIVE', daily_budget_paise: 50000, lifetime_budget_paise: null,
+    budget_resource: 'customers/1/campaignBudgets/7', budget_shared: false });
   const total = parseCampaign({ campaign: { id: '9', status: 'ENABLED', servingStatus: 'ENDED' }, campaignBudget: { totalAmountMicros: '20000000000', period: 'CUSTOM_PERIOD' } });
   assert.equal(total.lifetime_budget_paise, 2000000);
   assert.equal(total.daily_budget_paise, null);

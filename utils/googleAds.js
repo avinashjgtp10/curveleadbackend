@@ -6,14 +6,16 @@ const { encryptSecret, decryptSecret } = require('./cryptoSecrets');
 // access token with the adwords scope. Accounts reached through a manager account
 // also need its id as login-customer-id.
 
-const API_VERSION = () => process.env.GOOGLE_ADS_API_VERSION || 'v22';
+// v22 is switched off in October 2026; v25 runs until about August 2027.
+const API_VERSION = () => process.env.GOOGLE_ADS_API_VERSION || 'v25';
 const API = () => `https://googleads.googleapis.com/${API_VERSION()}`;
 const SCOPES = ['https://www.googleapis.com/auth/adwords', 'openid', 'email'];
 const STATE_MAX_AGE_MS = 10 * 60 * 1000;
 
 class GoogleAdsError extends Error {
-  constructor(message, { status, code, retryable = false, auth = false } = {}) {
+  constructor(message, { status, code, retryable = false, auth = false, errors = [] } = {}) {
     super(message); this.name = 'GoogleAdsError'; this.status = status; this.code = code; this.retryable = retryable; this.auth = auth;
+    this.errors = errors; // every error Google listed: { code, message, trigger, path: [{ field, index }] }
   }
 }
 
@@ -69,6 +71,11 @@ const ERROR_TEXT = {
   OAUTH_TOKEN_REVOKED: 'The Google Ads connection was revoked — reconnect Google Ads.',
   OAUTH_TOKEN_EXPIRED: 'The Google Ads connection has expired — reconnect Google Ads.',
 };
+const errorList = (body) => (body?.error?.details || []).flatMap(d => d.errors || []).map(e => ({
+  code: String(Object.values(e.errorCode || {})[0] || ''), message: e.message || '',
+  trigger: e.trigger ? Object.values(e.trigger)[0] : null,
+  path: (e.location?.fieldPathElements || []).map(f => ({ field: f.fieldName, index: f.index ?? null })),
+}));
 const errorCodeOf = (body) => {
   for (const d of body?.error?.details || []) {
     for (const e of d.errors || []) {
@@ -83,7 +90,8 @@ const toError = (e) => {
   const status = e.response?.status;
   const { code, message } = errorCodeOf(e.response?.data);
   const retryable = !status || status === 429 || status >= 500 || code === 'RESOURCE_EXHAUSTED' || code === 'RESOURCE_TEMPORARILY_EXHAUSTED';
-  return new GoogleAdsError(ERROR_TEXT[code] || `Google Ads: ${message || e.message}`, { status, code, retryable, auth: status === 401 || /OAUTH_TOKEN/.test(code || '') });
+  return new GoogleAdsError(ERROR_TEXT[code] || `Google Ads: ${message || e.message}`,
+    { status, code, retryable, auth: status === 401 || /OAUTH_TOKEN/.test(code || ''), errors: errorList(e.response?.data) });
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -121,8 +129,15 @@ const search = async ({ customerId, gaql, accessToken: token, loginCustomerId, h
   return rows;
 };
 
+// Several creates/updates in one atomic request: all succeed or nothing changes. Creates
+// can refer to each other through temporary ids (customers/1/campaigns/-2). Never retried
+// automatically — a write that timed out may still have gone through.
+const mutate = async ({ customerId, operations, accessToken: token, loginCustomerId, validateOnly = false, http }) =>
+  call({ method: 'POST', path: `/customers/${digits(customerId)}/googleAds:mutate`, retries: 0,
+    data: { mutateOperations: operations, ...(validateOnly ? { validateOnly: true } : {}) }, accessToken: token, loginCustomerId, http });
+
 const listAccessibleCustomers = async ({ accessToken: token, http }) =>
   ((await call({ path: '/customers:listAccessibleCustomers', accessToken: token, http })).resourceNames || []).map(n => digits(n));
 
-module.exports = { configured, redirectUri, authUrl, parseState, exchangeCode, accessToken, call, search, listAccessibleCustomers,
+module.exports = { configured, redirectUri, authUrl, parseState, exchangeCode, accessToken, call, search, mutate, listAccessibleCustomers,
   toError, GoogleAdsError, digits, API_VERSION, SCOPES };

@@ -28,6 +28,7 @@ const topAds = async (tenantId) => (await query(
   `SELECT ad.name, ad.creative->>'title' AS title, ad.creative->>'body' AS body,
           sum(i.leads)::int AS leads, round(sum(i.spend) / NULLIF(sum(i.leads), 0), 2)::float AS cpl
    FROM ad_insights_daily i JOIN ad_ads ad ON ad.tenant_id = i.tenant_id AND ad.external_id = i.entity_id
+   JOIN ad_accounts a ON a.id = i.ad_account_id AND a.tenant_id = i.tenant_id AND a.provider = 'meta'
    WHERE i.tenant_id = $1 AND i.entity_type = 'ad' AND i.date >= current_date - 90
    GROUP BY ad.id HAVING sum(i.leads) >= 10 ORDER BY cpl ASC NULLS LAST LIMIT 5`, [tenantId]
 )).rows;
@@ -112,14 +113,14 @@ const generateDraft = async ({ tenantId, userId, brief: rawBrief }) => {
 };
 
 const getDraft = async (tenantId, id) => {
-  const { rows } = await query('SELECT * FROM ad_ai_drafts WHERE tenant_id = $1 AND id = $2', [tenantId, id]);
+  const { rows } = await query("SELECT * FROM ad_ai_drafts WHERE tenant_id = $1 AND id = $2 AND provider = 'meta'", [tenantId, id]);
   if (!rows[0]) throw fail(404, 'Draft not found.');
   return rows[0];
 };
 
 const listDrafts = async (tenantId) => (await query(
   `SELECT id, status, brief, edited, validation_errors, meta_ids, error, created_at, updated_at
-   FROM ad_ai_drafts WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 30`, [tenantId]
+   FROM ad_ai_drafts WHERE tenant_id = $1 AND provider = 'meta' ORDER BY created_at DESC LIMIT 30`, [tenantId]
 )).rows.map(r => ({ id: r.id, status: r.status, campaign_name: r.edited?.campaign_name, brief: r.brief,
   daily_budget_inr: r.edited?.daily_budget_inr, error_count: (r.validation_errors || []).length, meta_ids: r.meta_ids, error: r.error, created_at: r.created_at }));
 
@@ -183,7 +184,7 @@ const linkDataFor = (d, image, formId) => ({
 // continues where it stopped instead of creating duplicates.
 const createOnMeta = async ({ tenantId, userId, id, now = Date.now() }) => {
   const claimed = await query(
-    "UPDATE ad_ai_drafts SET status = 'creating', error = NULL, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND status IN ('draft','failed') RETURNING *",
+    "UPDATE ad_ai_drafts SET status = 'creating', error = NULL, updated_at = now() WHERE tenant_id = $1 AND id = $2 AND provider = 'meta' AND status IN ('draft','failed') RETURNING *",
     [tenantId, id]
   );
   if (!claimed.rows[0]) { await getDraft(tenantId, id); throw fail(409, 'This campaign is already being created or is on Meta.'); }

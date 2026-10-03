@@ -26,7 +26,7 @@ const ymd = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(d);
 const fakeGoogle = (days) => async ({ gaql }) => {
   if (/segments.date/.test(gaql)) return daily(gaql, days);
   if (/FROM campaign WHERE campaign.status/.test(gaql)) return [
-    { campaign: { id: '9001', name: 'Search – Hair Spa Pune', status: 'ENABLED', servingStatus: 'SERVING', advertisingChannelType: 'SEARCH' }, campaignBudget: { amountMicros: '800000000', period: 'DAILY' } },
+    { campaign: { id: '9001', name: 'Search – Hair Spa Pune', status: 'ENABLED', servingStatus: 'SERVING', advertisingChannelType: 'SEARCH' }, campaignBudget: { resourceName: 'customers/1234567890/campaignBudgets/31', amountMicros: '800000000', period: 'DAILY' } },
     { campaign: { id: '9002', name: 'PMax – Bridal', status: 'PAUSED', servingStatus: 'SERVING', advertisingChannelType: 'PERFORMANCE_MAX' }, campaignBudget: { amountMicros: '500000000', period: 'DAILY' } },
   ];
   if (/FROM ad_group WHERE/.test(gaql)) return [{ adGroup: { id: '55', name: 'Hair spa', status: 'ENABLED', type: 'SEARCH_STANDARD' }, campaign: { id: '9001' } }];
@@ -100,10 +100,17 @@ test('a Google Ads sync fills the ad tables, links CRM campaigns and leads, and 
     const row = (await getBreakdown(scope, 'campaign_id', { campaignIds: [crm[0].id] }))[0];
     assert.equal(row.spend, 1200);
 
-    // Meta's pause/budget controls refuse Google entities.
+    // The campaign's budget is recorded (7b), Meta's controls refuse Google entities, and the
+    // shared pause endpoint sends a Google campaign to the Google controls.
+    const stored = (await db.query('SELECT id, budget_resource, budget_shared FROM ad_campaigns WHERE tenant_id = $1 AND external_id = $2', [t, '9001'])).rows[0];
+    assert.deepEqual([stored.budget_resource, stored.budget_shared], ['customers/1234567890/campaignBudgets/31', false]);
     const { changeEntity } = require('../services/metaAds/controls');
-    const adCampaign = (await db.query('SELECT id FROM ad_campaigns WHERE tenant_id = $1 AND external_id = $2', [t, '9001'])).rows[0].id;
-    await assert.rejects(changeEntity({ tenantId: t, entityType: 'campaign', id: adCampaign, action: 'pause' }), /Change Google Ads campaigns in Google Ads/);
+    await assert.rejects(changeEntity({ tenantId: t, entityType: 'campaign', id: stored.id, action: 'pause' }), /not a Meta campaign/);
+    await db.query("UPDATE ad_oauth_tokens SET status = 'expired' WHERE tenant_id = $1", [t]); // stop before any call to Google
+    const paused = res();
+    await require('../controllers/adsController').pauseCampaign({ tenantId: t, user: { id: null }, params: { id: stored.id }, body: {} }, paused);
+    assert.equal(paused.code, 400);
+    assert.match(paused.data.error, /Google Ads access has expired/, 'routed to the Google controls');
 
     // The shared job sends Google accounts to the Google sync.
     const { syncAccount } = require('../jobs/adsJobs');

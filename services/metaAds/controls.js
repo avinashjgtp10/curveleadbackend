@@ -28,29 +28,35 @@ const ENTITY = {
   },
 };
 
-// Total daily budget (paise) that is set to spend, the way Meta spends it: a campaign with
-// its own budget (Advantage campaign budget / CBO) counts once; otherwise each active ad set
-// counts. Uses the configured status, so a paused campaign or ad set counts nothing.
+// Total daily budget (paise) that is set to spend across Meta and Google, the way each
+// spends it: a campaign with its own budget (Meta Advantage campaign budget / CBO, every
+// Google campaign) counts once; otherwise each active Meta ad set counts. A Google budget
+// shared by several campaigns counts once. Uses the configured status (Meta ACTIVE, Google
+// ENABLED), so a paused campaign or ad set counts nothing.
 // `overrides` maps external id → { status?, daily_budget_paise? } to price a proposed change.
+const isOn = (status) => status === 'ACTIVE' || status === 'ENABLED';
 const dailyBudgetTotal = (campaigns, adsets, overrides = {}) => {
   const view = (row) => ({ ...row, ...(overrides[row.external_id] || {}) });
   const byCampaign = new Map();
+  const sharedSeen = new Set();
   let total = 0;
   for (const c of campaigns.map(view)) {
     const cbo = c.daily_budget_paise != null || c.lifetime_budget_paise != null;
-    byCampaign.set(c.external_id, { active: c.status === 'ACTIVE', cbo });
-    if (c.status === 'ACTIVE' && c.daily_budget_paise) total += Number(c.daily_budget_paise);
+    byCampaign.set(c.external_id, { active: isOn(c.status), cbo });
+    if (!isOn(c.status) || !c.daily_budget_paise) continue;
+    if (c.budget_resource) { if (sharedSeen.has(c.budget_resource)) continue; sharedSeen.add(c.budget_resource); }
+    total += Number(c.daily_budget_paise);
   }
   for (const s of adsets.map(view)) {
     const c = byCampaign.get(s.campaign_external_id);
-    if (c?.active && !c.cbo && s.status === 'ACTIVE' && s.daily_budget_paise) total += Number(s.daily_budget_paise);
+    if (c?.active && !c.cbo && isOn(s.status) && s.daily_budget_paise) total += Number(s.daily_budget_paise);
   }
   return total;
 };
 
 const workspaceBudgets = async (tenantId) => {
   const [campaigns, adsets] = await Promise.all([
-    query("SELECT external_id, status, daily_budget_paise, lifetime_budget_paise FROM ad_campaigns WHERE tenant_id = $1", [tenantId]),
+    query("SELECT external_id, status, daily_budget_paise, lifetime_budget_paise, budget_resource FROM ad_campaigns WHERE tenant_id = $1", [tenantId]),
     query(`SELECT s.external_id, s.status, s.daily_budget_paise, ac.external_id AS campaign_external_id
            FROM ad_adsets s JOIN ad_campaigns ac ON ac.id = s.ad_campaign_id AND ac.tenant_id = s.tenant_id WHERE s.tenant_id = $1`, [tenantId]),
   ]);
@@ -64,11 +70,11 @@ const budgetCap = async (tenantId) => {
 };
 
 const audit = (db, row) => db.query(
-  `INSERT INTO ad_audit_log (tenant_id, user_id, ad_account_id, entity_type, entity_id, entity_name, action, old_value, new_value, request, response, success, error)
-   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+  `INSERT INTO ad_audit_log (tenant_id, user_id, ad_account_id, entity_type, entity_id, entity_name, action, old_value, new_value, request, response, success, error, provider)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
   [row.tenantId, row.userId || null, row.adAccountId, row.entityType, row.entityId, row.entityName || null, row.action,
     JSON.stringify(row.oldValue || null), JSON.stringify(row.newValue || null), JSON.stringify(row.request || null),
-    JSON.stringify(row.response || null), row.success, row.error || null]
+    JSON.stringify(row.response || null), row.success, row.error || null, row.provider || 'meta']
 );
 
 const snapshot = (meta) => ({
@@ -84,7 +90,7 @@ const changeEntity = async ({ tenantId, userId, entityType, id, action, dailyBud
   if (!entity) throw fail(404, `${entityType === 'adset' ? 'Ad set' : 'Campaign'} not found.`);
 
   const found = await getAccountWithToken(tenantId, entity.ad_account_id);
-  if (found?.account?.provider && found.account.provider !== 'meta') throw fail(422, 'Change Google Ads campaigns in Google Ads — CurveLead only reads them for now.');
+  if (found?.account?.provider && found.account.provider !== 'meta') throw fail(422, 'This is not a Meta campaign.');
   if (!found?.token || found.account.token_status !== 'active') throw fail(400, 'Facebook access has expired — click Reconnect in Ads Manager → Meta Ads.');
   const { account, token } = found;
   const scopes = (await query('SELECT scopes FROM ad_oauth_tokens WHERE tenant_id = $1 AND id = $2', [tenantId, account.token_row_id])).rows[0]?.scopes || [];
@@ -153,4 +159,4 @@ const changeEntity = async ({ tenantId, userId, entityType, id, action, dailyBud
   return { old_value: oldValue, new_value: after };
 };
 
-module.exports = { changeEntity, dailyBudgetTotal, workspaceBudgets, budgetCap, audit };
+module.exports = { changeEntity, dailyBudgetTotal, workspaceBudgets, budgetCap, audit, money };
