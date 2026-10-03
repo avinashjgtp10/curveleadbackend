@@ -249,7 +249,9 @@ test("in-process job runner retries failures with backoff and de-duplicates by j
   queues.register("t:flaky", async () => { runs++; if (runs < 2) throw new Error("boom"); }, { attempts: 3, backoffMs: 5 });
   await queues.enqueue("t:flaky", {}, { jobId: "x" });
   await queues.enqueue("t:flaky", {}, { jobId: "x" }); // duplicate while pending → ignored
-  await new Promise((r) => setTimeout(r, 60));
+  // Wait for the retry rather than a fixed delay: the full suite runs files in parallel.
+  for (let waited = 0; runs < 2 && waited < 2000; waited += 10) await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => setTimeout(r, 30)); // a duplicate run would show up here
   assert.equal(runs, 2);
   await assert.rejects(() => queues.enqueue("t:missing"), /No job handler/);
 });

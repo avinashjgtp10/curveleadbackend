@@ -64,7 +64,8 @@ const saveHierarchy = async ({ tenantId, adAccountId, campaigns }) => {
       // Keep the CRM campaign's status/budget in step, as the legacy sync did.
       if (crmIds.get(c.id)) {
         await client.query(
-          `UPDATE campaigns SET status = $3, daily_budget = COALESCE($4, daily_budget), lifetime_budget = COALESCE($5, lifetime_budget), updated_at = now()
+          `UPDATE campaigns SET status = $3, daily_budget = COALESCE($4, daily_budget), lifetime_budget = COALESCE($5, lifetime_budget),
+                  budget = COALESCE(NULLIF($5::numeric, 0), $4::numeric, budget), updated_at = now()
            WHERE tenant_id = $1 AND id = $2`,
           [tenantId, crmIds.get(c.id), c.effective_status === 'ACTIVE' ? 'active' : 'paused',
             c.daily_budget ? Number(c.daily_budget) / 100 : null, c.lifetime_budget ? Number(c.lifetime_budget) / 100 : null]

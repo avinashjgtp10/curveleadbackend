@@ -19,4 +19,23 @@ router.get('/adsets/:id/ads', ctrl.listAds);
 router.get('/insights/daily', ctrl.dailyInsights);
 router.get('/dashboard', ctrl.dashboard);
 
+// Lead Ads (Phase 2)
+router.get('/forms', ctrl.listLeadForms);
+router.post('/forms/:id/backfill', ctrl.backfillLeadForm);
+router.put('/lead-settings', ctrl.updateLeadSettings);
+
+// Controls + audit (Phase 3)
+router.post('/campaigns/:id/pause', ctrl.pauseCampaign);
+router.post('/campaigns/:id/resume', ctrl.resumeCampaign);
+router.patch('/campaigns/:id/budget', ctrl.updateCampaignBudget);
+router.post('/adsets/:id/pause', ctrl.pauseAdset);
+router.post('/adsets/:id/resume', ctrl.resumeAdset);
+router.patch('/adsets/:id/budget', ctrl.updateAdsetBudget);
+router.get('/audit', ctrl.listAudit);
+router.get('/settings', ctrl.getAdsSettings);
+router.put('/settings', ctrl.updateAdsSettings);
+
+// Conversions API feedback (Phase 4)
+router.get('/capi/events', ctrl.listCapiEvents);
+
 module.exports = router;

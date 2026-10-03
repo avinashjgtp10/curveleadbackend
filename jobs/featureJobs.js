@@ -102,6 +102,11 @@ async function checkHealth() {
     }
   }
 }
+// Drains meta_capi_queue (filled by the phase4_lead_events trigger on stage changes).
+// Errors retry with exponential backoff (2, 4, 8 … minutes, 6 attempts); a workspace with
+// CAPI on but no dataset id / token fails at once with a clear reason instead of retrying.
+const CAPI_MAX_ATTEMPTS = 6;
+const CAPI_NOT_CONFIGURED = "Conversions API is on, but the dataset ID or access token is missing (Integrations → Meta Conversions API).";
 async function runCapi() {
   for (let i = 0; i < 50; i++) {
     const event = (
@@ -110,29 +115,28 @@ async function runCapi() {
       )
     ).rows[0];
     if (!event) break;
-    let status = "error";
+    let status = "error", error = null;
     try {
       status = await require("../utils/metaCapi").sendLeadConversionEvent({
         tenantId: event.tenant_id,
         lead: event.lead_snapshot,
         eventName: event.event_name,
-        eventId: event.id,
         eventTime: event.created_at,
       });
     } catch (e) {
+      error = e.message;
       console.error("CAPI delivery:", e.message);
     }
+    const next =
+      status === "error" ? (event.attempts >= CAPI_MAX_ATTEMPTS ? "failed" : "pending")
+      : status === "not_configured" ? "failed"
+      : status;
     await query(
-      `UPDATE meta_capi_queue SET status=$2,next_attempt_at=now()+($3::int*interval '1 minute') WHERE id=$1`,
-      [
-        event.id,
-        status === "error"
-          ? event.attempts >= 5
-            ? "failed"
-            : "pending"
-          : status,
-        2 ** event.attempts,
-      ],
+      `UPDATE meta_capi_queue SET status=$2, next_attempt_at=now()+($3::int*interval '1 minute'), last_error=$4,
+         sent_at=CASE WHEN $2='success' THEN now() ELSE sent_at END
+       WHERE id=$1`,
+      [event.id, next, 2 ** event.attempts,
+        status === "not_configured" ? CAPI_NOT_CONFIGURED : status === "error" ? (error || "Meta rejected the event — see meta_capi_events.") : null],
     );
   }
 }

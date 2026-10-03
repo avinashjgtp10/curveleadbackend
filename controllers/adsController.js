@@ -1,6 +1,8 @@
 const { query } = require('../config/db');
 const queues = require('../jobs/queues');
 const { exchangeForLongLived, inspectToken, saveToken, syncAccountsForToken } = require('../services/metaAds/client');
+const metaLeads = require('../services/metaLeads');
+const controls = require('../services/metaAds/controls');
 
 // Ads module API (Phase 1: accounts, drill-down, daily insights, CPL dashboard).
 // Every query is scoped to req.tenantId.
@@ -198,7 +200,7 @@ const dashboard = async (req, res) => {
          WHERE ac.tenant_id = $1 AND ac.ad_account_id = $2 AND l.created_at >= $3::date AND l.created_at < $4::date + 1
          GROUP BY ac.external_id
        )
-       SELECT ac.id, ac.external_id, ac.name, ac.effective_status,
+       SELECT ac.id, ac.external_id, ac.campaign_id AS crm_campaign_id, ac.name, ac.effective_status,
               COALESCE(sp.spend, 0)::float AS spend, COALESCE(sp.meta_leads, 0)::int AS meta_leads,
               CASE WHEN sp.meta_leads > 0 THEN round(sp.spend / sp.meta_leads, 2)::float END AS meta_cpl,
               COALESCE(c.crm_leads, 0)::int AS crm_leads,
@@ -227,4 +229,116 @@ const dashboard = async (req, res) => {
   } catch (e) { fail('Ads dashboard')(e, res); }
 };
 
-module.exports = { listAccounts, connectAccounts, setPrimary, syncNow, listCampaigns, listAdsets, listAds, dailyInsights, dashboard, dateRange };
+// GET /api/ads/forms — lead forms on the connected Facebook Page (refreshed from Meta).
+const listLeadForms = async (req, res) => {
+  try { res.json(await metaLeads.listForms(req.tenantId)); }
+  catch (e) {
+    if (e.code === 'NO_PAGE') return bad(res, 'Connect your Facebook Page in Integrations to see its lead forms.', 400);
+    if (e.name === 'MetaGraphError') return bad(res, `Facebook: ${e.message}`, 400);
+    fail('List lead forms')(e, res);
+  }
+};
+
+// POST /api/ads/forms/:id/backfill { since?: 'YYYY-MM-DD' } — import every lead of a form.
+// Leads already in the CRM are skipped; old leads are not messaged.
+const backfillLeadForm = async (req, res) => {
+  try {
+    if (!UUID.test(req.params.id)) return bad(res, 'Invalid id.');
+    const since = req.body?.since || null;
+    if (since && !DATE.test(since)) return bad(res, 'since must be YYYY-MM-DD.');
+    const { rows } = await query('SELECT id FROM ad_lead_forms WHERE tenant_id = $1 AND id = $2', [req.tenantId, req.params.id]);
+    if (!rows[0]) return bad(res, 'Lead form not found.', 404);
+    await queues.enqueue('leads:backfill-form', { tenantId: req.tenantId, formId: rows[0].id, since }, { jobId: `backfill-${rows[0].id}` });
+    res.status(202).json({ queued: true });
+  } catch (e) { fail('Queue lead form backfill')(e, res); }
+};
+
+// PUT /api/ads/lead-settings { score_on_ingest } — score new Meta leads as they arrive.
+const updateLeadSettings = async (req, res) => {
+  try {
+    if (typeof req.body?.score_on_ingest !== 'boolean') return bad(res, 'score_on_ingest must be true or false.');
+    await query(`UPDATE tenants SET settings = COALESCE(settings, '{}'::jsonb) || jsonb_build_object('meta_lead_score_on_ingest', $2::boolean) WHERE id = $1`,
+      [req.tenantId, req.body.score_on_ingest]);
+    res.json({ score_on_ingest: req.body.score_on_ingest });
+  } catch (e) { fail('Update lead settings')(e, res); }
+};
+
+// POST /api/ads/{campaigns|adsets}/:id/{pause|resume}, PATCH …/:id/budget { daily_budget_paise }
+const changeEntity = (entityType, action) => async (req, res) => {
+  try {
+    if (!UUID.test(req.params.id)) return bad(res, 'Invalid id.');
+    const result = await controls.changeEntity({
+      tenantId: req.tenantId, userId: req.user.id, entityType, id: req.params.id, action,
+      dailyBudgetPaise: action === 'update_budget' ? Number(req.body?.daily_budget_paise) : undefined,
+    });
+    res.json(result);
+  } catch (e) { fail(`${action} ${entityType}`)(e, res); }
+};
+
+// GET /api/ads/audit?entity_type&entity_id&limit — newest first.
+const listAudit = async (req, res) => {
+  try {
+    const { entity_type, entity_id } = req.query;
+    if (entity_type && !['campaign', 'adset', 'ad'].includes(entity_type)) return bad(res, 'Invalid entity_type.');
+    if (entity_id && !/^\d{1,30}$/.test(entity_id)) return bad(res, 'Invalid entity_id.');
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const { rows } = await query(
+      `SELECT a.id, a.entity_type, a.entity_id, a.entity_name, a.action, a.old_value, a.new_value, a.success, a.error, a.created_at, u.name AS user_name
+       FROM ad_audit_log a LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.tenant_id = $1 AND ($2::text IS NULL OR a.entity_type = $2) AND ($3::text IS NULL OR a.entity_id = $3)
+       ORDER BY a.created_at DESC LIMIT $4`,
+      [req.tenantId, entity_type || null, entity_id || null, limit]
+    );
+    res.json({ entries: rows });
+  } catch (e) { fail('List ad audit log')(e, res); }
+};
+
+// GET /api/ads/settings — daily budget cap and what's currently set to spend per day.
+const getAdsSettings = async (req, res) => {
+  try {
+    const { campaigns, adsets } = await controls.workspaceBudgets(req.tenantId);
+    res.json({ daily_budget_cap_paise: await controls.budgetCap(req.tenantId), active_daily_budget_paise: controls.dailyBudgetTotal(campaigns, adsets) });
+  } catch (e) { fail('Get ads settings')(e, res); }
+};
+
+// PUT /api/ads/settings { daily_budget_cap_paise: int | null } — admins only.
+const updateAdsSettings = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return bad(res, 'Only admins can change the budget cap.', 403);
+    const cap = req.body?.daily_budget_cap_paise;
+    if (cap !== null && (!Number.isInteger(cap) || cap < 100)) return bad(res, 'daily_budget_cap_paise must be a whole number of paise (at least 100) or null.');
+    await query(
+      cap === null
+        ? `UPDATE tenants SET settings = COALESCE(settings, '{}'::jsonb) - 'ads_daily_budget_cap_paise' WHERE id = $1`
+        : `UPDATE tenants SET settings = COALESCE(settings, '{}'::jsonb) || jsonb_build_object('ads_daily_budget_cap_paise', $2::bigint) WHERE id = $1`,
+      cap === null ? [req.tenantId] : [req.tenantId, cap]
+    );
+    res.json({ daily_budget_cap_paise: cap });
+  } catch (e) { fail('Update ads settings')(e, res); }
+};
+
+// GET /api/ads/capi/events — Conversions API setup state + the latest queued events.
+const listCapiEvents = async (req, res) => {
+  try {
+    const t = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings || {};
+    const { rows } = await query(
+      `SELECT q.id, q.event_name, q.status, q.attempts, q.last_error, q.created_at, q.sent_at, l.id AS lead_id, l.name AS lead_name, l.stage
+       FROM meta_capi_queue q LEFT JOIN leads l ON l.id = q.lead_id AND l.tenant_id = q.tenant_id
+       WHERE q.tenant_id = $1 ORDER BY q.created_at DESC LIMIT 50`, [req.tenantId]
+    );
+    res.json({
+      enabled: !!t.meta_capi_enabled,
+      configured: !!(t.meta_dataset_id && t.meta_capi_access_token),
+      qualified_event: t.meta_qualified_event || 'QualifiedLead',
+      converted_event: t.meta_won_event || 'ConvertedLead',
+      events: rows,
+    });
+  } catch (e) { fail('List CAPI events')(e, res); }
+};
+
+module.exports = {
+  listCapiEvents,
+  pauseCampaign: changeEntity('campaign', 'pause'), resumeCampaign: changeEntity('campaign', 'resume'), updateCampaignBudget: changeEntity('campaign', 'update_budget'),
+  pauseAdset: changeEntity('adset', 'pause'), resumeAdset: changeEntity('adset', 'resume'), updateAdsetBudget: changeEntity('adset', 'update_budget'),
+  listAudit, getAdsSettings, updateAdsSettings,
+  listLeadForms, backfillLeadForm, updateLeadSettings, listAccounts, connectAccounts, setPrimary, syncNow, listCampaigns, listAdsets, listAds, dailyInsights, dashboard, dateRange };

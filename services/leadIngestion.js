@@ -2,7 +2,7 @@ const { assignInTransaction } = require('../utils/leadAssignment');
 const { transaction } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { normalizeLead, normalizePhone } = require('../utils/dataQuality');
-const COLUMNS = new Set(['product','is_test_lead','gclid','lead_submit_time','google_custom_answers','google_ads_integration_id','name','phone','email','location','business_name','address','city','custom_fields','source','source_detail','campaign_id','stage','assigned_to','notes','deal_value','expected_close_date','tags','lead_date','meta_lead_id','meta_ad_id','meta_adset_id','created_at','google_lead_id','google_form_id','google_campaign_id','google_adgroup_id','google_creative_id','google_asset_group_id','google_gcl_id','google_is_test','google_integration_id']);
+const COLUMNS = new Set(['product','is_test_lead','gclid','lead_submit_time','google_custom_answers','google_ads_integration_id','name','phone','email','location','business_name','address','city','custom_fields','source','source_detail','campaign_id','stage','assigned_to','notes','deal_value','expected_close_date','tags','lead_date','meta_lead_id','meta_ad_id','meta_adset_id','meta_form_id','created_at','google_lead_id','google_form_id','google_campaign_id','google_adgroup_id','google_creative_id','google_asset_group_id','google_gcl_id','google_is_test','google_integration_id']);
 async function ingestLead(tenantId, input, { submissionKey = input.meta_lead_id ? `meta:${input.meta_lead_id}` : null, actorId = null } = {}) {
   const data = normalizeLead(input);
   return transaction(async client => {

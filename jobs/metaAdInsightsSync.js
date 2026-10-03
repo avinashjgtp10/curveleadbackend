@@ -4,7 +4,9 @@ const { syncTenantAdInsights } = require('../utils/metaAdInsights');
 const runMetaAdInsightsSync = async () => {
   try {
     const tenants = await query(
-      `SELECT id FROM tenants WHERE settings->>'meta_ad_account_id' IS NOT NULL AND settings->>'meta_ad_account_id' != ''`
+      `SELECT id FROM tenants t WHERE settings->>'meta_ad_account_id' IS NOT NULL AND settings->>'meta_ad_account_id' != ''
+         -- Workspaces connected in Ads Manager are synced by jobs/adsJobs.js instead.
+         AND NOT EXISTS (SELECT 1 FROM ad_accounts a WHERE a.tenant_id = t.id AND a.provider = 'meta' AND a.is_active)`
     );
 
     let synced = 0, failed = 0;
