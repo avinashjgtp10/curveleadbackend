@@ -353,6 +353,7 @@ test("import preview normalizes phones and identifies database and within-file d
   let writes = 0;
   const quality = require("../utils/dataQuality");
   const ctrl = load("controllers/leadController.js", {
+    "../utils/workspaceLocale": { getWorkspaceLocale: async () => ({ country: "IN" }) },
     "../config/db": {
       query: async (sql) => {
         if (!sql.startsWith("SELECT")) writes++;

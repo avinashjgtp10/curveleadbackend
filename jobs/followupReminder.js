@@ -109,7 +109,7 @@ const runFollowupReminder = async () => {
       SELECT l.id AS lead_id, l.tenant_id, l.name AS lead_name, l.assigned_to
       FROM leads l
       LEFT JOIN lead_stages ls ON LOWER(ls.name) = LOWER(l.stage) AND ls.tenant_id = l.tenant_id
-      WHERE COALESCE(ls.is_won, false) = false AND COALESCE(ls.is_lost, false) = false
+      WHERE l.merged_into_id IS NULL AND COALESCE(ls.is_won, false) = false AND COALESCE(ls.is_lost, false) = false
         AND l.updated_at < NOW() - INTERVAL '${NO_FOLLOWUP_AFTER_HOURS} hours'
         AND NOT EXISTS (SELECT 1 FROM lead_followups f WHERE f.lead_id = l.id AND f.is_completed = false)
         AND NOT EXISTS (

@@ -26,8 +26,8 @@ const getStaff = async (req, res) => {
     const result = await query(
       `SELECT u.id, u.name, u.email, u.phone, u.role, u.is_active, u.last_login, u.created_at,
               u.team_id, t.name as team_name,
-              (SELECT COUNT(*) FROM leads WHERE assigned_to = u.id) as assigned_leads,
-              (SELECT COUNT(*) FROM leads WHERE assigned_to = u.id AND stage = 'won') as won_leads
+              (SELECT COUNT(*) FROM leads WHERE assigned_to = u.id AND merged_into_id IS NULL) as assigned_leads,
+              (SELECT COUNT(*) FROM leads WHERE assigned_to = u.id AND merged_into_id IS NULL AND stage = 'won') as won_leads
        FROM users u
        LEFT JOIN teams t ON t.id = u.team_id
        WHERE u.tenant_id = $1 ORDER BY u.created_at DESC`,

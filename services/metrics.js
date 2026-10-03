@@ -33,7 +33,7 @@ const wonPredicate = (from,to) => `(EXISTS (SELECT 1 FROM lead_stage_history h W
 const BASE = `WITH scoped AS (
  SELECT l.*, (l.created_at >= $2 AND l.created_at < $3) AS in_period,
  ${wonPredicate('$2','$3')} AS won_in_period
- FROM leads l WHERE l.tenant_id=$1 AND ($4::uuid IS NULL OR l.assigned_to=$4)
+ FROM leads l WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND ($4::uuid IS NULL OR l.assigned_to=$4)
 )`;
 const COUNTS = `COUNT(*) FILTER (WHERE in_period)::int AS total_leads,
  COUNT(*) FILTER (WHERE won_in_period)::int AS won,

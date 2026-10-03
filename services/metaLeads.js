@@ -89,7 +89,7 @@ const processMetaLead = async (ctx, lead, { formName } = {}) => {
 const processLeads = async (ctx, leads, opts) => {
   const counts = { created: 0, duplicate: 0, skipped: 0 };
   if (!leads.length) return counts;
-  const { rows } = await query('SELECT meta_lead_id FROM leads WHERE tenant_id = $1 AND meta_lead_id = ANY($2::text[])', [ctx.tenantId, leads.map(l => String(l.id))]);
+  const { rows } = await query('SELECT meta_lead_id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND meta_lead_id = ANY($2::text[])', [ctx.tenantId, leads.map(l => String(l.id))]);
   const known = new Set(rows.map(r => r.meta_lead_id));
   for (const lead of leads) {
     if (known.has(String(lead.id))) { counts.duplicate++; continue; }
@@ -103,7 +103,7 @@ const ingestWebhookLead = async ({ pageId, leadgenId }) => {
   const tenantId = await tenantForPage(pageId);
   if (!tenantId) return { skipped: 'unknown_page' };
   const ctx = await pageContext(tenantId);
-  const { rows } = await query('SELECT id FROM leads WHERE tenant_id = $1 AND meta_lead_id = $2', [tenantId, String(leadgenId)]);
+  const { rows } = await query('SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND meta_lead_id = $2', [tenantId, String(leadgenId)]);
   if (rows[0]) return { result: 'duplicate' };
   const lead = await graphRequest({ path: `/${leadgenId}`, token: ctx.pageToken, gateKey: `page:${ctx.pageId}`, params: { fields: LEAD_FIELDS }, retries: 3 });
   return { result: await processMetaLead(ctx, lead) };
@@ -136,7 +136,7 @@ const listForms = async (tenantId) => {
   }
   const { rows } = await query(
     `SELECT f.id, f.external_id, f.name, f.status, f.leads_count, f.created_time, f.last_backfilled_at, f.last_backfill_count, f.last_backfill_error,
-            (SELECT count(*)::int FROM leads l WHERE l.tenant_id = f.tenant_id AND l.meta_form_id = f.external_id) AS crm_leads
+            (SELECT count(*)::int FROM leads l WHERE l.tenant_id = f.tenant_id AND l.merged_into_id IS NULL AND l.meta_form_id = f.external_id) AS crm_leads
      FROM ad_lead_forms f WHERE f.tenant_id = $1 AND f.page_id = $2 ORDER BY f.created_time DESC NULLS LAST, f.name`,
     [tenantId, ctx.pageId]
   );

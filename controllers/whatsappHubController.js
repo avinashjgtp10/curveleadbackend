@@ -150,7 +150,7 @@ const getOptIns = async (req, res) => {
       [req.tenantId]
     );
     const counts = await query(
-      `SELECT COUNT(*) FILTER (WHERE opted_out) AS opted_out, COUNT(*) AS total FROM leads WHERE tenant_id = $1`,
+      `SELECT COUNT(*) FILTER (WHERE opted_out) AS opted_out, COUNT(*) AS total FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL`,
       [req.tenantId]
     );
 
@@ -164,7 +164,7 @@ const getOptIns = async (req, res) => {
       );
       optedIn = r.rows;
       optInCount = (await query(
-        'SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND whatsapp_opt_in_at IS NOT NULL AND opted_out = false',
+        'SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND whatsapp_opt_in_at IS NOT NULL AND opted_out = false',
         [req.tenantId]
       )).rows[0].count;
     } catch (e) {
@@ -261,7 +261,7 @@ const getClickToWhatsApp = async (req, res) => {
         `SELECT COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE campaign_id IS NULL) AS unattributed,
                 COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW())) AS today
-         FROM leads WHERE tenant_id = $1 AND source = 'whatsapp' AND meta_ad_id IS NOT NULL
+         FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND source = 'whatsapp' AND meta_ad_id IS NOT NULL
            AND created_at >= NOW() - ($2 || ' days')::interval`,
         [req.tenantId, String(days)]
       ),
@@ -271,7 +271,7 @@ const getClickToWhatsApp = async (req, res) => {
                 COUNT(l.id) FILTER (WHERE l.stage IN (SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) AS won,
                 c.actual_spend
          FROM leads l LEFT JOIN campaigns c ON c.id = l.campaign_id
-         WHERE l.tenant_id = $1 AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
+         WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
            AND l.created_at >= NOW() - ($2 || ' days')::interval
          GROUP BY c.id, c.name, c.actual_spend ORDER BY leads DESC LIMIT 50`,
         [req.tenantId, String(days)]
@@ -279,7 +279,7 @@ const getClickToWhatsApp = async (req, res) => {
       query(
         `SELECT l.id, l.name, l.phone, l.stage, l.created_at, l.source_detail, c.name AS campaign_name
          FROM leads l LEFT JOIN campaigns c ON c.id = l.campaign_id
-         WHERE l.tenant_id = $1 AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
+         WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
          ORDER BY l.created_at DESC LIMIT 25`,
         [req.tenantId]
       ),

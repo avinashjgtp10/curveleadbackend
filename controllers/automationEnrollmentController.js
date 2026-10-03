@@ -60,7 +60,7 @@ const enrollBulk = async (req, res) => {
 
     const isStaff = req.user.role === 'staff';
     const leads = await query(
-      `SELECT id FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[])${isStaff ? ' AND assigned_to = $3' : ''}`,
+      `SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND id = ANY($2::uuid[])${isStaff ? ' AND assigned_to = $3' : ''}`,
       isStaff ? [req.tenantId, lead_ids, req.user.id] : [req.tenantId, lead_ids]
     );
 
@@ -78,7 +78,7 @@ const getAutomationLeads = async (req, res) => {
     const page = Number(req.query.page ?? 1), limit = Number(req.query.limit ?? 25);
     if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100) return res.status(422).json({ error: 'Invalid pagination.' });
     const params = [req.tenantId];
-    let scope = 'l.tenant_id = $1';
+    let scope = 'l.tenant_id = $1 AND l.merged_into_id IS NULL';
     if (req.user.role === 'staff') { params.push(req.user.id); scope += ' AND l.assigned_to = $2'; }
     const base = `WITH scoped AS (
       SELECT l.id, l.name, l.phone, l.won_at, l.lost_at, l.opted_out, e.enrollment,

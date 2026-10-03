@@ -22,7 +22,7 @@ const getPlatformStats = async (req, res) => {
         (SELECT COUNT(*) FROM tenants WHERE subscription_status = 'trial') as trial_tenants,
         (SELECT COUNT(*) FROM tenants WHERE subscription_status = 'active') as active_tenants,
         (SELECT COUNT(*) FROM users) as total_users,
-        (SELECT COUNT(*) FROM leads) as total_leads,
+        (SELECT COUNT(*) FROM leads WHERE merged_into_id IS NULL) as total_leads,
         (SELECT COUNT(*) FROM whatsapp_messages) as total_messages,
         (SELECT COALESCE(SUM(actual_spend), 0) FROM campaigns) as total_campaign_spend,
         (SELECT COUNT(*) FROM invitations WHERE accepted_at IS NULL AND expires_at > NOW()) as pending_invitations
@@ -43,7 +43,7 @@ const getTenants = async (req, res) => {
     const result = await query(`
       SELECT t.*, p.name as plan_name, p.price,
              (SELECT COUNT(*) FROM users WHERE tenant_id = t.id) as user_count,
-             (SELECT COUNT(*) FROM leads WHERE tenant_id = t.id) as lead_count,
+             (SELECT COUNT(*) FROM leads WHERE tenant_id = t.id AND merged_into_id IS NULL) as lead_count,
              (SELECT u.name FROM users u WHERE u.tenant_id = t.id AND u.role = 'admin' ORDER BY u.created_at ASC LIMIT 1) as owner_name,
              (SELECT u.email FROM users u WHERE u.tenant_id = t.id AND u.role = 'admin' ORDER BY u.created_at ASC LIMIT 1) as owner_email,
              (SELECT u.phone FROM users u WHERE u.tenant_id = t.id AND u.role = 'admin' ORDER BY u.created_at ASC LIMIT 1) as owner_phone
@@ -200,7 +200,8 @@ const getCrossTenantLeads = async (req, res) => {
     if (stage) { conditions.push(`l.stage = $${i}`); params.push(stage); i++; }
     if (score) { conditions.push(`l.lead_score = $${i}`); params.push(score); i++; }
 
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    conditions.push('l.merged_into_id IS NULL');
+    const where = `WHERE ${conditions.join(' AND ')}`;
     const offset = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(limit, 10);
 
     const result = await query(
@@ -318,7 +319,7 @@ const getLeadsTrendData = async (req, res) => {
     const result = await query(`
       SELECT day_start, to_char(day_start, 'DD Mon') as day, COUNT(l.id) as leads
       FROM generate_series(date_trunc('day', NOW()) - interval '6 days', date_trunc('day', NOW()), interval '1 day') day_start
-      LEFT JOIN leads l ON date_trunc('day', l.created_at) = day_start
+      LEFT JOIN leads l ON date_trunc('day', l.created_at) = day_start AND l.merged_into_id IS NULL
       GROUP BY day_start ORDER BY day_start
     `);
     res.json({ trend: result.rows.map(r => ({ day: r.day, leads: parseInt(r.leads, 10) })) });
@@ -381,10 +382,10 @@ const getCrossTenantCampaigns = async (req, res) => {
       `SELECT c.id, c.name, c.status, c.source, c.budget, c.actual_spend, c.impressions, c.clicks,
               c.meta_campaign_id, c.start_date, c.end_date, c.created_at,
               t.id as tenant_id, t.name as tenant_name,
-              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads,
-              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND merged_into_id IS NULL) as total_leads,
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND merged_into_id IS NULL
                  AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_won = true)) as won_leads,
-              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id
+              (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND merged_into_id IS NULL
                  AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = c.tenant_id AND is_lost = true)) as lost_leads
        FROM campaigns c
        LEFT JOIN tenants t ON c.tenant_id = t.id

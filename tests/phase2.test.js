@@ -59,7 +59,7 @@ test('Meta budgets convert paise and distinguish absent budget from zero', () =>
  assert.deepEqual(parseBudgets({}),{daily_budget:null,lifetime_budget:null});
 });
 test('invalid create and import phones return 422 before writes', async () => {
- const controller=load('controllers/leadController.js',{'../utils/dataQuality':quality,'../services/leadIngestion':{ingestLead:async (id, data)=>quality.normalizeLead(data)},'../config/db':{query:async()=>({rows:[]})},xlsx:require('xlsx')});
+ const controller=load('controllers/leadController.js',{'../utils/dataQuality':quality,'../utils/workspaceLocale':{getWorkspaceLocale:async()=>({country:'IN'}),localeFromSettings:()=>({country:'IN'})},'../services/leadIngestion':{ingestLead:async (id, data)=>quality.normalizeLead(data)},'../config/db':{query:async()=>({rows:[]})},xlsx:require('xlsx')});
  const req={tenantId:'t',user:{id:'u',role:'admin'},body:{name:'Test',phone:'+99917935110'}};
  let res=response();await controller.createLead(req,res);assert.equal(res.code,422);
  res=response();await controller.importLeads({...req,file:{originalname:'leads.csv',buffer:Buffer.from('name,phone\nTest,+99917935110')}},res);assert.equal(res.code,422);

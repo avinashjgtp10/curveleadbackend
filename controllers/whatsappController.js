@@ -1,5 +1,6 @@
 const { ingestLead } = require('../services/leadIngestion');
-const { normalizePhone } = require('../utils/dataQuality');
+const { normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
+const { getWorkspaceLocale } = require('../utils/workspaceLocale');
 const axios = require('axios');
 const { query } = require('../config/db');
 const { uploadToS3 } = require('../config/s3');
@@ -116,7 +117,7 @@ const deleteConversations = async (req, res) => {
     const params = [req.tenantId, leadIds];
     let scope = '';
     if (req.user.role === 'staff') {
-      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $3)';
+      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND assigned_to = $3)';
       params.push(req.user.id);
     }
     const result = await query(
@@ -141,7 +142,7 @@ const markConversationsRead = async (req, res) => {
     const params = [req.tenantId, leadIds];
     let scope = '';
     if (req.user.role === 'staff') {
-      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $3)';
+      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND assigned_to = $3)';
       params.push(req.user.id);
     }
     await query(
@@ -359,7 +360,7 @@ const setConversationAi = async (req, res) => {
 // the normal /send or template flow once this returns the lead_id.
 const startChat = async (req, res) => {
   try {
-    const phone = normalizePhone(req.body.phone);
+    const phone = normalizePhone(req.body.phone, (await getWorkspaceLocale(req.tenantId)).country);
     const ingestion = await ingestLead(req.tenantId, { name: req.body.name || 'Unknown', phone, source: 'manual', stage: 'new', assigned_to: req.user.role === 'staff' ? req.user.id : null });
     const lead = ingestion.lead;
     if (req.user.role === 'staff' && lead.assigned_to !== req.user.id) return res.status(403).json({ error: 'This contact is assigned to another team member.' });
@@ -473,9 +474,15 @@ const handleWebhook = async (req, res) => {
       // A receiving number identifies the workspace before looking up any sender.
       const receivingTenantId=numberOwner?.tenant_id || await findTenantBySharedNumber(receivingNumberId);
       if(!receivingTenantId)continue;
+      // WhatsApp sends the full international number without "+": match every stored format of
+      // it (E.164, national, 0-prefixed), skip merged duplicates, always the oldest lead — so one
+      // contact never splits into two conversation threads.
+      let digits = [String(fromPhone).replace(/\D/g, '')];
+      try { digits = phoneDigitVariants(normalizePhone(`+${fromPhone}`)); } catch {}
       const leadResult=await query(
-        'SELECT id,tenant_id,name,assigned_to,ai_paused,opted_out,source,source_detail,phone FROM leads WHERE tenant_id=$1 AND (phone=$2 OR phone=$3 OR phone=chr(43)||$2) LIMIT 1',
-        [receivingTenantId,fromPhone,fromPhone.replace(/^91/,'')]
+        `SELECT id,tenant_id,name,assigned_to,ai_paused,opted_out,source,source_detail,phone FROM leads
+         WHERE tenant_id=$1 AND merged_into_id IS NULL AND phone_digits = ANY($2::text[]) ORDER BY created_at, id LIMIT 1`,
+        [receivingTenantId, digits]
       );
 
       let lead = leadResult.rows[0] || null;

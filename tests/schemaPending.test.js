@@ -61,7 +61,8 @@ test('lead ingestion leaves out meta_form_id until that column exists', async ()
       '../config/db': { transaction: (fn) => fn(client) },
       '../utils/leadAssignment': { assignInTransaction: async (c, t, lead) => lead },
       '../utils/leadNumber': { nextLeadNumber: async () => 1 },
-      '../utils/dataQuality': { normalizeLead: (d) => ({ ...d, phone: '+919876543210' }), normalizePhone: (p) => p },
+      '../utils/dataQuality': { normalizeLead: (d) => ({ ...d, phone: '+919876543210' }), normalizePhone: (p) => p, phoneDigitVariants: () => [] },
+      '../utils/workspaceLocale': { localeFromSettings: () => ({ country: 'IN' }) },
     });
     await ingestion.ingestLead('t', { name: 'A', phone: '9876543210', source: 'meta_ads', meta_lead_id: 'L1', meta_form_id: 'F1' }, { submissionKey: null });
     return insertSql;

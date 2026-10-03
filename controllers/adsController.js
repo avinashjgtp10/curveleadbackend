@@ -195,7 +195,7 @@ const dashboard = async (req, res) => {
          SELECT ac.external_id, count(*) AS crm_leads,
                 count(*) FILTER (WHERE f.qualified) AS qualified, count(*) FILTER (WHERE f.converted) AS converted
          FROM ad_campaigns ac
-         JOIN leads l ON l.tenant_id = ac.tenant_id AND l.campaign_id = ac.campaign_id
+         JOIN leads l ON l.tenant_id = ac.tenant_id AND l.campaign_id = ac.campaign_id AND l.merged_into_id IS NULL
          CROSS JOIN LATERAL (
            SELECT bool_or(s.is_qualified OR COALESCE(s.is_won, false)) AS qualified, bool_or(COALESCE(s.is_won, false)) AS converted
            FROM lead_stages s

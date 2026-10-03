@@ -1,5 +1,7 @@
 const { buildLeadSearch } = require('../utils/leadSearch');
 const { duplicateGroups } = require('../services/duplicates');
+const { getWorkspaceLocale } = require('../utils/workspaceLocale');
+const { applyMerge } = require('../services/leadMerge');
 const { ingestLead } = require('../services/leadIngestion');
 const { normalizePhone, normalizeSource, normalizeLead, statusChangeTitle } = require('../utils/dataQuality');
 const { query, transaction } = require('../config/db');
@@ -33,7 +35,7 @@ const getLeads = async (req, res) => {
     const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
 
-    let whereClause = 'WHERE l.tenant_id = $1';
+    let whereClause = 'WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL';
     const params = [req.tenantId];
     let i = 2;
 
@@ -202,6 +204,10 @@ const getLead = async (req, res) => {
     ]);
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Lead not found.' });
+    // A merged (soft-deleted) duplicate: point the app at the lead it was merged into.
+    if (result.rows[0].merged_into_id) {
+      return res.status(409).json({ error: 'This lead was merged into another lead.', code: 'LEAD_MERGED', merged_into_id: result.rows[0].merged_into_id });
+    }
 
     const pendingFollowup = followups.rows.find(f => !f.is_completed) || null;
 
@@ -268,7 +274,7 @@ const createLead = async (req, res) => {
 // PUT /api/leads/:id
 const updateLead = async (req, res) => {
   try {
-    if (req.body.phone !== undefined) req.body.phone = normalizePhone(req.body.phone);
+    if (req.body.phone !== undefined) req.body.phone = normalizePhone(req.body.phone, (await getWorkspaceLocale(req.tenantId)).country);
     if (req.body.source !== undefined) req.body.source = normalizeSource(req.body.source);
     if (req.body.name !== undefined) req.body.name = String(req.body.name).normalize('NFKC');
     const allowedFields = [
@@ -661,40 +667,40 @@ const getLeadStats = async (req, res) => {
     const baseParams = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
     const staffClause = isStaff ? ' AND assigned_to = $2' : '';
     const staffFollowupClause = isStaff
-      ? ` AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2)`
+      ? ` AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND assigned_to = $2)`
       : '';
     // Exclude follow-ups on leads currently sitting in a "lost" stage — they're dead, not overdue
     const notLostClause = ` AND lead_id NOT IN (
        SELECT l.id FROM leads l
        JOIN lead_stages ls ON ls.tenant_id = l.tenant_id AND LOWER(ls.name) = LOWER(l.stage)
-       WHERE l.tenant_id = $1 AND ls.is_lost = true
+       WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND ls.is_lost = true
      )`;
 
     // Leads by stage
     const byStage = await query(
       `SELECT stage, COUNT(*) as count FROM leads
-       WHERE tenant_id = $1${staffClause} GROUP BY stage`,
+       WHERE tenant_id = $1 AND merged_into_id IS NULL${staffClause} GROUP BY stage`,
       baseParams
     );
 
     // Leads by source
     const bySource = await query(
       `SELECT source, COUNT(*) as count FROM leads
-       WHERE tenant_id = $1${staffClause} GROUP BY source`,
+       WHERE tenant_id = $1 AND merged_into_id IS NULL${staffClause} GROUP BY source`,
       baseParams
     );
 
     // This month's leads
     const thisMonth = await query(
       `SELECT COUNT(*) FROM leads
-       WHERE tenant_id = $1${staffClause} AND created_at >= date_trunc('month', CURRENT_DATE)`,
+       WHERE tenant_id = $1 AND merged_into_id IS NULL${staffClause} AND created_at >= date_trunc('month', CURRENT_DATE)`,
       baseParams
     );
 
     // Conversion rate (enrolled / total)
-    const totalLeads = await query(`SELECT COUNT(*) FROM leads WHERE tenant_id = $1${staffClause}`, baseParams);
+    const totalLeads = await query(`SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL${staffClause}`, baseParams);
     const enrolledLeads = await query(
-      `SELECT COUNT(*) FROM leads WHERE tenant_id = $1${staffClause} AND stage = 'enrolled'`,
+      `SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL${staffClause} AND stage = 'enrolled'`,
       baseParams
     );
 
@@ -723,7 +729,7 @@ const getLeadStats = async (req, res) => {
       `SELECT
         TO_CHAR(created_at, 'YYYY-MM') as month,
         COUNT(*) as count
-       FROM leads WHERE tenant_id = $1${staffClause}
+       FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL${staffClause}
        AND created_at >= CURRENT_DATE - INTERVAL '6 months'
        GROUP BY TO_CHAR(created_at, 'YYYY-MM')
        ORDER BY month`,
@@ -898,7 +904,7 @@ const bulkUpdate = async (req, res) => {
     sets.push('updated_at = NOW()');
     params.push(ids);
 
-    const previous = stage !== undefined ? await query('SELECT id,stage FROM leads WHERE tenant_id=$1 AND id=ANY($2::uuid[])', [req.tenantId,ids]) : { rows: [] };
+    const previous = stage !== undefined ? await query('SELECT id,stage FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND id=ANY($2::uuid[])', [req.tenantId,ids]) : { rows: [] };
     const result = await query(
       `UPDATE leads SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = ANY($${i}::uuid[]) RETURNING id`,
       params
@@ -928,7 +934,7 @@ const bulkDelete = async (req, res) => {
     if (!ids?.length) return res.status(400).json({ error: 'No lead IDs provided.' });
 
     const result = await query(
-      'DELETE FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[]) RETURNING id, meta_lead_id',
+      'DELETE FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND id = ANY($2::uuid[]) RETURNING id, meta_lead_id',
       [req.tenantId, ids]
     );
     for (const row of result.rows) {
@@ -946,9 +952,10 @@ const bulkDelete = async (req, res) => {
 // and other formatting, so e.g. "9876543210" and "+91 98765 43210" are one group.
 const getDuplicateLeads = async (req, res) => {
   try {
-    const result = await query('SELECT id,lead_number,name,phone,email,source,stage,created_at FROM leads WHERE tenant_id=$1 ORDER BY created_at,id', [req.tenantId]);
+    const result = await query('SELECT id,lead_number,name,phone,email,source,stage,created_at FROM leads WHERE tenant_id=$1 AND merged_into_id IS NULL ORDER BY created_at,id', [req.tenantId]);
     const settings = await query('SELECT settings FROM tenants WHERE id=$1', [req.tenantId]);
-    res.json({ groups: duplicateGroups(result.rows, settings.rows[0]?.settings?.dedupe_mode) });
+    const { country } = await getWorkspaceLocale(req.tenantId);
+    res.json({ groups: duplicateGroups(result.rows, settings.rows[0]?.settings?.dedupe_mode, country) });
   } catch (error) {
     console.error('getDuplicateLeads error:', error);
     res.status(500).json({ error: 'Failed to find duplicate leads.' });
@@ -957,12 +964,6 @@ const getDuplicateLeads = async (req, res) => {
 
 // Nullable scalar columns on the lead itself worth carrying over from a removed
 // duplicate when the kept lead's own value is blank.
-const DUPLICATE_LEAD_FILL_COLUMNS = [
-  'city', 'email', 'location', 'meta_lead_id', 'source_detail', 'business_name', 'address',
-  'lead_status', 'intent_score', 'suggested_action', 'won_lost_reason', 'lost_reason',
-  'expected_close_date', 'score_reason', 'course_interest_id',
-];
-
 // POST /api/leads/duplicates/merge - fold remove_ids into keep_id
 const mergeDuplicateLeads = async (req, res) => {
   try {
@@ -976,77 +977,15 @@ const mergeDuplicateLeads = async (req, res) => {
 
     await transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`lead-ingestion:${req.tenantId}`]);
-      const owned = await client.query('SELECT * FROM leads WHERE tenant_id=$1 AND id=ANY($2::uuid[]) ORDER BY created_at,id FOR UPDATE', [req.tenantId, [keep_id, ...remove_ids]]);
+      const owned = await client.query('SELECT * FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND id=ANY($2::uuid[]) AND merged_into_id IS NULL ORDER BY created_at,id FOR UPDATE', [req.tenantId, [keep_id, ...remove_ids]]);
       if (owned.rows.length !== remove_ids.length + 1) throw Object.assign(new Error('One or more leads not found.'), { status: 404 });
       if (owned.rows[0].id !== keep_id) throw Object.assign(new Error('Keep the oldest lead in the preview.'), { status: 422 });
       const settings = await client.query('SELECT settings FROM tenants WHERE id=$1', [req.tenantId]);
-      const groups = duplicateGroups(owned.rows, settings.rows[0]?.settings?.dedupe_mode);
+      const { country } = await getWorkspaceLocale(req.tenantId, client);
+      const groups = duplicateGroups(owned.rows, settings.rows[0]?.settings?.dedupe_mode, country);
       if (groups.length !== 1 || groups[0].leads.length !== owned.rows.length) throw Object.assign(new Error('Selected leads no longer form a duplicate group. Refresh the preview.'), { status: 409 });
-      // Keep a recoverable snapshot of every removed lead, including custom fields.
-      await client.query(`INSERT INTO lead_activities (tenant_id,lead_id,activity_type,title,metadata,created_by)
-        VALUES ($1,$2,'merge','Duplicate leads merged',$3,$4)`, [req.tenantId, keep_id, JSON.stringify({ removed_leads: owned.rows.slice(1) }), req.user.id]);
-      const children = await client.query(`SELECT DISTINCT ns.nspname AS schema, cl.relname AS table_name, a.attname AS column_name
-        FROM pg_constraint c JOIN pg_class cl ON cl.oid=c.conrelid JOIN pg_namespace ns ON ns.oid=cl.relnamespace
-        JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1]
-        WHERE c.contype='f' AND c.confrelid='leads'::regclass AND array_length(c.conkey,1)=1`);
-      const quote = name => '"' + name.replace(/"/g, '""') + '"';
-      // Preserve colliding sequence state in the merge activity, then retain the oldest enrollment.
-      if (children.rows.some(c => c.table_name === 'automation_enrollments')) {
-        const enrollments = await client.query('SELECT * FROM automation_enrollments WHERE tenant_id=$1 AND lead_id=ANY($2::uuid[]) ORDER BY enrolled_at,id FOR UPDATE', [req.tenantId, [keep_id,...remove_ids]]);
-        const seen = new Set();
-        for (const enrollment of enrollments.rows) {
-          if (!seen.has(enrollment.sequence_id)) { seen.add(enrollment.sequence_id); continue; }
-          await client.query(`INSERT INTO lead_activities (tenant_id,lead_id,activity_type,title,metadata) VALUES ($1,$2,'merge','Duplicate sequence enrollment archived',$3)`, [req.tenantId,keep_id,JSON.stringify({ enrollment })]);
-          await client.query('DELETE FROM automation_enrollments WHERE id=$1', [enrollment.id]);
-        }
-      }
-      for (const child of children.rows) {
-        await client.query(`UPDATE ${quote(child.schema)}.${quote(child.table_name)} SET ${quote(child.column_name)}=$1 WHERE ${quote(child.column_name)}=ANY($2::uuid[])`, [keep_id,remove_ids]);
-      }
-      const columns = await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='leads'");
-      const available = new Set(columns.rows.map(c => c.column_name));
-      // Fill in any blanks on the kept lead — for each column, pull the most recent
-      // non-null value among the duplicates being removed.
-      const fillSet = DUPLICATE_LEAD_FILL_COLUMNS.filter(col => available.has(col)).map(col =>
-        `${col} = COALESCE(k.${col}, (SELECT ${col} FROM leads WHERE id = ANY($2::uuid[]) AND ${col} IS NOT NULL ORDER BY created_at DESC LIMIT 1))`
-      ).join(',\n           ');
-      await client.query(
-        `UPDATE leads k SET
-           ${fillSet},
-           deal_value = GREATEST(k.deal_value, (SELECT COALESCE(MAX(deal_value), 0) FROM leads WHERE id = ANY($2::uuid[]))),
-           advance_received = GREATEST(k.advance_received, (SELECT COALESCE(MAX(advance_received), 0) FROM leads WHERE id = ANY($2::uuid[])))
-         WHERE k.id = $1`,
-        [keep_id, remove_ids]
-      );
-
-      // Append the removed duplicates' notes onto the kept lead rather than losing them
-      await client.query(
-        `UPDATE leads k SET
-           notes = NULLIF(TRIM(BOTH E'\n' FROM CONCAT_WS(E'\n', NULLIF(TRIM(k.notes), ''), agg.notes)), '')
-         FROM (
-           SELECT string_agg(NULLIF(TRIM(notes), ''), E'\n') AS notes
-           FROM leads WHERE id = ANY($2::uuid[])
-         ) agg
-         WHERE k.id = $1 AND agg.notes IS NOT NULL`,
-        [keep_id, remove_ids]
-      );
-
-      await client.query(`UPDATE leads k SET custom_fields = agg.fields || COALESCE(k.custom_fields, '{}') FROM (SELECT COALESCE(jsonb_object_agg(key,value), '{}') AS fields FROM leads l, jsonb_each(l.custom_fields) WHERE l.id=ANY($2::uuid[])) agg WHERE k.id=$1`, [keep_id,remove_ids]);
-
-      // Union tags from the removed duplicates onto the kept lead
-      await client.query(
-        `UPDATE leads k SET tags = agg.tags
-         FROM (
-           SELECT ARRAY(SELECT DISTINCT unnest(tags) FROM leads WHERE id = ANY($1::uuid[])) AS tags
-         ) agg
-         WHERE k.id = $2 AND agg.tags IS NOT NULL AND array_length(agg.tags, 1) > 0`,
-        [[keep_id, ...remove_ids], keep_id]
-      );
-
-      await client.query(
-        'DELETE FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
-        [req.tenantId, remove_ids]
-      );
+      // Soft merge (services/leadMerge.js): the duplicates stay in the table, pointing at the kept lead.
+      await applyMerge(client, { tenantId: req.tenantId, leads: owned.rows, reason: 'manual', userId: req.user.id });
     });
 
     res.json({ merged: remove_ids.length, kept: keep_id });
@@ -1127,6 +1066,7 @@ const getImportTemplate = async (req, res) => {
 const importLeads = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+    const { country } = await getWorkspaceLocale(req.tenantId);   // phones without a country code
 
     const XLSX = require('xlsx');
     const workbook = /\.csv$/i.test(req.file.originalname)
@@ -1185,22 +1125,22 @@ const importLeads = async (req, res) => {
     // Dry run never writes to the DB — it just reports what WOULD happen, including
     // which rows are duplicates of already-saved leads (by phone).
     const existingPhones = dryRun
-      ? new Set((await query('SELECT phone FROM leads WHERE tenant_id = $1', [req.tenantId])).rows.map(r => r.phone))
+      ? new Set((await query('SELECT phone FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL', [req.tenantId])).rows.map(r => r.phone))
       : null;
 
     const invalidPhones = rows.flatMap((row, index) => {
       const phoneKey = Object.keys(keyMap).find(k => keyMap[k] === 'phone');
-      try { normalizePhone(String(row[phoneKey]??'').replace(/^'(?=\+?\d)/,'')); return []; }
+      try { normalizePhone(String(row[phoneKey]??'').replace(/^'(?=\+?\d)/,''), country); return []; }
       catch (error) { return [{ row: index + 2, error: error.message }]; }
     });
     if(req.body.dry_run==='true') {
       const mode=(await query('SELECT settings FROM tenants WHERE id=$1',[req.tenantId])).rows[0]?.settings?.dedupe_mode || 'phone';
-      const existing=(await query('SELECT phone,email FROM leads WHERE tenant_id=$1',[req.tenantId])).rows;
+      const existing=(await query('SELECT phone,email FROM leads WHERE tenant_id=$1 AND merged_into_id IS NULL',[req.tenantId])).rows;
       const phones=new Set(),emails=new Set();
-      for(const r of existing) {try {phones.add(normalizePhone(r.phone));}catch {} if(r.email)emails.add(r.email.trim().toLowerCase());}
+      for(const r of existing) {try {phones.add(normalizePhone(r.phone, country));}catch {} if(r.email)emails.add(r.email.trim().toLowerCase());}
       const preview=rows.map((row,index)=>{
         const lead=Object.fromEntries(Object.entries(keyMap).map(([k,f])=>[f,String(row[k]??'').trim()]));
-        let error=null;try {lead.phone=normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,''));}catch(e){error=e.message;}
+        let error=null;try {lead.phone=normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,''), country);}catch(e){error=e.message;}
         if(!lead.name)error='Name is required.';
         const duplicate=!error&&mode!=='off'&&(phones.has(lead.phone)||(mode==='phone_or_email'&&lead.email&&emails.has(lead.email.toLowerCase())));
         if(!error) {phones.add(lead.phone);if(lead.email)emails.add(lead.email.toLowerCase());}
@@ -1235,7 +1175,7 @@ const importLeads = async (req, res) => {
         continue;
       }
 
-      try { lead.phone = normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,'')); }
+      try { lead.phone = normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,''), country); }
       catch (error) { errors.push({ row: rowNumber, error: error.message }); addSkip(rowNumber, lead.name, error.message); continue; }
 
       // Validate/default stage — matched case-insensitively, stored with the

@@ -32,12 +32,12 @@ const gatherDigest = async ({ tenantId, since, assignedTo }) => {
   const [bySource, hot, followups, slaBreaches, won] = await Promise.all([
     query(
       `SELECT source, COUNT(*) as count FROM leads l
-       WHERE l.tenant_id = $1 AND l.created_at >= $2 ${scope}
+       WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.created_at >= $2 ${scope}
        GROUP BY source ORDER BY count DESC`,
       scopeParams
     ),
     query(
-      `SELECT COUNT(*) as count FROM leads l WHERE l.tenant_id = $1 AND l.lead_score = 'hot' ${assignedTo ? 'AND l.assigned_to = $2' : ''}`,
+      `SELECT COUNT(*) as count FROM leads l WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.lead_score = 'hot' ${assignedTo ? 'AND l.assigned_to = $2' : ''}`,
       assignedTo ? [tenantId, assignedTo] : [tenantId]
     ),
     query(
@@ -52,14 +52,14 @@ const gatherDigest = async ({ tenantId, since, assignedTo }) => {
     ),
     query(
       `SELECT COUNT(*) as count FROM leads l
-       WHERE l.tenant_id = $1 AND l.first_response_at IS NULL
+       WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.first_response_at IS NULL
          AND EXTRACT(EPOCH FROM (NOW() - l.created_at)) / 60 >= $2
          ${assignedTo ? 'AND l.assigned_to = $3' : ''}`,
       assignedTo ? [tenantId, ESCALATION_AFTER_MINUTES, assignedTo] : [tenantId, ESCALATION_AFTER_MINUTES]
     ),
     query(
       `SELECT COUNT(*) as count, COALESCE(SUM(l.deal_value), 0) as revenue FROM leads l
-       WHERE l.tenant_id = $1 AND l.won_at >= $2 ${scope}`,
+       WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.won_at >= $2 ${scope}`,
       scopeParams
     ),
   ]);
@@ -81,7 +81,7 @@ const gatherCampaignSnapshot = async (tenantId) => {
     `SELECT c.name, c.actual_spend,
             COUNT(l.id) as total_leads
      FROM campaigns c
-     LEFT JOIN leads l ON l.campaign_id = c.id
+     LEFT JOIN leads l ON l.campaign_id = c.id AND l.merged_into_id IS NULL
      WHERE c.tenant_id = $1 AND c.status = 'active'
      GROUP BY c.id
      ORDER BY c.actual_spend DESC NULLS LAST

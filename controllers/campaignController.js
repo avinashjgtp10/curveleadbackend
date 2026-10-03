@@ -96,7 +96,7 @@ const getCampaign = async (req, res) => {
     // Get leads in this campaign grouped by stage
     const stageBreakdown = await query(
       `SELECT stage, COUNT(*) as count, COALESCE(SUM(deal_value), 0) as total_value
-       FROM leads WHERE campaign_id = $1 AND tenant_id = $2 GROUP BY stage`,
+       FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL GROUP BY stage`,
       [req.params.id, req.tenantId]
     );
 
@@ -124,17 +124,17 @@ const getCampaign = async (req, res) => {
     const [wonStats, lostStats, scoreStats] = await Promise.all([
       query(
         `SELECT COUNT(*) as won_leads, COALESCE(SUM(deal_value), 0) as revenue
-         FROM leads WHERE campaign_id = $1 AND tenant_id = $2
+         FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL
            AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_won = true)`,
         [req.params.id, req.tenantId]
       ),
       query(
         `SELECT COUNT(*) as lost_leads
-         FROM leads WHERE campaign_id = $1 AND tenant_id = $2
+         FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL
            AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_lost = true)`,
         [req.params.id, req.tenantId]
       ),
-      query(`SELECT COUNT(*) as hot_leads FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND lead_score = 'hot'`,
+      query(`SELECT COUNT(*) as hot_leads FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL AND lead_score = 'hot'`,
         [req.params.id, req.tenantId]),
     ]);
 
@@ -196,8 +196,8 @@ const getCampaignAds = async (req, res) => {
               COALESCE(sum(i.spend), 0)::float AS spend, COALESCE(sum(i.impressions), 0)::bigint AS impressions,
               COALESCE(sum(i.clicks), 0)::bigint AS clicks, COALESCE(sum(i.leads), 0)::int AS meta_leads,
               min(i.date) AS from_date,
-              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = ad.external_id AND tenant_id = ad.tenant_id) AS total_leads,
-              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = ad.external_id AND tenant_id = ad.tenant_id
+              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = ad.external_id AND tenant_id = ad.tenant_id AND merged_into_id IS NULL) AS total_leads,
+              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = ad.external_id AND tenant_id = ad.tenant_id AND merged_into_id IS NULL
                  AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = ad.tenant_id AND is_won = true)) AS won_leads
        FROM ad_campaigns ac
        JOIN ad_adsets s ON s.ad_campaign_id = ac.id AND s.tenant_id = ac.tenant_id
@@ -210,8 +210,8 @@ const getCampaignAds = async (req, res) => {
 
     const result = modern.rows.length ? modern : await query(
       `SELECT a.*,
-              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = a.meta_ad_id AND tenant_id = a.tenant_id) as total_leads,
-              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = a.meta_ad_id AND tenant_id = a.tenant_id
+              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = a.meta_ad_id AND tenant_id = a.tenant_id AND merged_into_id IS NULL) as total_leads,
+              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = a.meta_ad_id AND tenant_id = a.tenant_id AND merged_into_id IS NULL
                  AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = a.tenant_id AND is_won = true)) as won_leads
        FROM meta_ads a
        WHERE a.campaign_id = $1 AND a.tenant_id = $2
@@ -323,7 +323,7 @@ const getCampaignStats = async (req, res) => {
         COUNT(*) as leads_from_campaigns,
         COUNT(*) FILTER (WHERE stage = 'won') as won_from_campaigns,
         COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as revenue_from_campaigns
-       FROM leads WHERE campaign_id IS NOT NULL AND tenant_id = $1`,
+       FROM leads WHERE campaign_id IS NOT NULL AND tenant_id = $1 AND merged_into_id IS NULL`,
       [req.tenantId]
     );
 
