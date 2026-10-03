@@ -38,4 +38,14 @@ router.put('/settings', ctrl.updateAdsSettings);
 // Conversions API feedback (Phase 4)
 router.get('/capi/events', ctrl.listCapiEvents);
 
+// AI campaign creation (Phase 5) — everything is created PAUSED; activation is separate.
+const imageUpload = require('multer')({ storage: require('multer').memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+router.get('/ai/drafts', ctrl.aiListDrafts);
+router.post('/ai/drafts', ctrl.aiCreateDraft);
+router.get('/ai/drafts/:id', ctrl.aiGetDraft);
+router.put('/ai/drafts/:id', ctrl.aiUpdateDraft);
+router.post('/ai/drafts/:id/image', imageUpload.single('file'), ctrl.aiUploadImage);
+router.post('/ai/drafts/:id/create', ctrl.aiCreateOnMeta);
+router.post('/ai/drafts/:id/activate', ctrl.aiActivate);
+
 module.exports = router;

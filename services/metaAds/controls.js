@@ -150,4 +150,4 @@ const changeEntity = async ({ tenantId, userId, entityType, id, action, dailyBud
   return { old_value: oldValue, new_value: after };
 };
 
-module.exports = { changeEntity, dailyBudgetTotal, workspaceBudgets, budgetCap };
+module.exports = { changeEntity, dailyBudgetTotal, workspaceBudgets, budgetCap, audit };

@@ -3,6 +3,7 @@ const queues = require('../jobs/queues');
 const { exchangeForLongLived, inspectToken, saveToken, syncAccountsForToken } = require('../services/metaAds/client');
 const metaLeads = require('../services/metaLeads');
 const controls = require('../services/metaAds/controls');
+const aiCampaign = require('../services/metaAds/aiCampaign');
 
 // Ads module API (Phase 1: accounts, drill-down, daily insights, CPL dashboard).
 // Every query is scoped to req.tenantId.
@@ -336,7 +337,23 @@ const listCapiEvents = async (req, res) => {
   } catch (e) { fail('List CAPI events')(e, res); }
 };
 
+// ── AI campaign creation (Phase 5) ─────────────────────────────────────────
+const aiRoute = (label, fn) => async (req, res) => {
+  try {
+    if (req.params.id && !UUID.test(req.params.id)) return bad(res, 'Invalid id.');
+    res.json(await fn(req));
+  } catch (e) { fail(label)(e, res); }
+};
+const aiCreateDraft = aiRoute('AI campaign draft', (req) => aiCampaign.generateDraft({ tenantId: req.tenantId, userId: req.user.id, brief: req.body?.brief }));
+const aiListDrafts = aiRoute('List AI drafts', async (req) => ({ drafts: await aiCampaign.listDrafts(req.tenantId) }));
+const aiGetDraft = aiRoute('Get AI draft', (req) => aiCampaign.getDraft(req.tenantId, req.params.id));
+const aiUpdateDraft = aiRoute('Update AI draft', (req) => aiCampaign.updateDraft({ tenantId: req.tenantId, id: req.params.id, draft: req.body?.draft }));
+const aiUploadImage = aiRoute('Upload ad image', async (req) => ({ image: await aiCampaign.uploadImage({ tenantId: req.tenantId, id: req.params.id, file: req.file }) }));
+const aiCreateOnMeta = aiRoute('Create AI campaign on Meta', (req) => aiCampaign.createOnMeta({ tenantId: req.tenantId, userId: req.user.id, id: req.params.id }));
+const aiActivate = aiRoute('Activate AI campaign', (req) => aiCampaign.activate({ tenantId: req.tenantId, userId: req.user.id, id: req.params.id, confirm: req.body?.confirm }));
+
 module.exports = {
+  aiCreateDraft, aiListDrafts, aiGetDraft, aiUpdateDraft, aiUploadImage, aiCreateOnMeta, aiActivate,
   listCapiEvents,
   pauseCampaign: changeEntity('campaign', 'pause'), resumeCampaign: changeEntity('campaign', 'resume'), updateCampaignBudget: changeEntity('campaign', 'update_budget'),
   pauseAdset: changeEntity('adset', 'pause'), resumeAdset: changeEntity('adset', 'resume'), updateAdsetBudget: changeEntity('adset', 'update_budget'),
