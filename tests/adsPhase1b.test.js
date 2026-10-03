@@ -106,3 +106,13 @@ test('lifetime campaign totals are written to the CRM campaigns by Meta campaign
   assert.match(updates[0][0], /WHERE tenant_id = \$1 AND meta_campaign_id = \$2/);
   assert.deepEqual(Array.from(updates[0][1]), ['t', '120', 1500.5, 20000, 310]);
 });
+
+test('sync range accepts the DATE column as pg returns it (a Date), not only as text', () => {
+  const { syncRange } = require('../services/metaAds/sync');
+  const now = new Date('2026-10-03T06:00:00Z');
+  const asDate = syncRange({ insights_synced_through: new Date(2026, 9, 3) }, now);   // local midnight, like pg
+  const asText = syncRange({ insights_synced_through: '2026-10-03' }, now);
+  assert.deepEqual(asDate, { since: '2026-10-01', until: '2026-10-03' });
+  assert.deepEqual(asText, asDate);
+  assert.equal(syncRange({ insights_synced_through: 'garbage' }, now).since, '2026-07-05'); // falls back to the 90-day backfill
+});

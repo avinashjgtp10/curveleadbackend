@@ -1,6 +1,6 @@
 # Ads + Social module — implementation plan
 
-Status: **Phase 0 + 1 built** (see `docs/ads-phase-1.md`); migration applied to production 2026-10-03. **Phase 1b built** (see `docs/ads-phase-1b.md`). **Phase 2 built** (see `docs/ads-phase-2.md`; D5 = score on ingest, rule-based, no Groq). **Phase 3 built** (see `docs/ads-phase-3.md`). **Phase 4 built** (see `docs/ads-phase-4.md`). Decisions taken: D1 BullMQ with in-process fallback when `REDIS_URL` is unset; D2 many accounts + one primary; D3 versioned keys; D4 paise/rupees as described; **D8 Campaigns vs Ads Manager (below) — Phase 1b runs before Phase 2.** D5–D7 apply to later phases.
+Status: **Phase 0 + 1 built** (see `docs/ads-phase-1.md`); migration applied to production 2026-10-03. **Phase 1b built** (see `docs/ads-phase-1b.md`). **Phase 2 built** (see `docs/ads-phase-2.md`; D5 = score on ingest, rule-based, no Groq). **Phase 3 built** (see `docs/ads-phase-3.md`). **Phase 4 built** (see `docs/ads-phase-4.md`). **Phase 5 built** (see `docs/ads-phase-5.md`). Phases 6 (social posting) and 7 (Google Ads) not started. Decisions taken: D1 BullMQ with in-process fallback when `REDIS_URL` is unset; D2 many accounts + one primary; D3 versioned keys; D4 paise/rupees as described; **D8 Campaigns vs Ads Manager (below) — Phase 1b runs before Phase 2.** D5–D7 apply to later phases.
 
 ## D8 — Overlap with the existing Campaigns section (decided 2026-10-03)
 
