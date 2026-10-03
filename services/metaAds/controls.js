@@ -84,6 +84,7 @@ const changeEntity = async ({ tenantId, userId, entityType, id, action, dailyBud
   if (!entity) throw fail(404, `${entityType === 'adset' ? 'Ad set' : 'Campaign'} not found.`);
 
   const found = await getAccountWithToken(tenantId, entity.ad_account_id);
+  if (found?.account?.provider && found.account.provider !== 'meta') throw fail(422, 'Change Google Ads campaigns in Google Ads — CurveLead only reads them for now.');
   if (!found?.token || found.account.token_status !== 'active') throw fail(400, 'Facebook access has expired — click Reconnect in Ads Manager → Meta Ads.');
   const { account, token } = found;
   const scopes = (await query('SELECT scopes FROM ad_oauth_tokens WHERE tenant_id = $1 AND id = $2', [tenantId, account.token_row_id])).rows[0]?.scopes || [];
