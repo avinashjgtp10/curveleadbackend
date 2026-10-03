@@ -49,7 +49,7 @@ test('real SQL: migration reruns, period wins/sources/scoping, ingestion and mer
  await query(`INSERT INTO lead_notes(lead_id,note) VALUES($1,'note');`,[extra.lead.id]);
  await query(`INSERT INTO whatsapp_messages(lead_id,message) VALUES($1,'chat');`,[extra.lead.id]);
  await query(`INSERT INTO automation_enrollments(tenant_id,lead_id,sequence_id) VALUES($1,$2,$4),($1,$3,$4)`,[tid,ids[0].id,extra.lead.id,staff]);
- const controller=load('controllers/leadController.js',{'../config/db':db,'../services/duplicates':require('../services/duplicates'),'../utils/dataQuality':quality});
+ const controller=load('controllers/leadController.js',{'../config/db':db,'../utils/workspaceLocale':{getWorkspaceLocale:async()=>({country:'IN'}),localeFromSettings:()=>({country:'IN'})},'../services/duplicates':require('../services/duplicates'),'../utils/dataQuality':quality});
  const res={code:200,status(c){this.code=c;return this;},json(d){this.data=d;}};
  await controller.mergeDuplicateLeads({tenantId:tid,user:{id:staff},body:{keep_id:ids[0].id,remove_ids:[extra.lead.id]}},res);
  assert.equal(res.code,200,JSON.stringify(res.data));

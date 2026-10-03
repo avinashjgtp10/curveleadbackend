@@ -5,19 +5,32 @@ function normalizeSource(value) {
   const aliases = { facebook: 'meta_ads', facebook_ads: 'meta_ads', meta: 'meta_ads', google: 'google_ads', walk_in: 'walkin' };
   return SOURCES.includes(aliases[key] || key) ? aliases[key] || key : 'other';
 }
-function normalizePhone(value) {
-  let input = String(value ?? '').trim();
-  if (/^91[6-9]\d{9}$/.test(input.replace(/[\s()-]/g, ''))) input = '+' + input;
-  const parsed = parsePhoneNumberFromString(input, { defaultCountry: 'IN', extract: false });
-  if (!parsed?.isValid() || parsed.ext) {
-    const error = new Error('Enter a valid phone number, including country code for numbers outside India.');
-    error.status = 422;
-    throw error;
+// E.164 (+<country><number>). Numbers without a country code are read in the workspace's
+// country (defaultCountry, ISO 3166 alpha-2); digits that already carry a country code
+// without "+" (e.g. WhatsApp's 919876543210) are tried as international next.
+function normalizePhone(value, defaultCountry = 'IN') {
+  const compact = String(value ?? '').trim().replace(/[\s().-]/g, '');
+  const country = /^[A-Z]{2}$/.test(String(defaultCountry || '').toUpperCase()) ? String(defaultCountry).toUpperCase() : 'IN';
+  const attempts = compact.startsWith('+') ? [[compact]]
+    : compact.startsWith('00') ? [['+' + compact.slice(2)]]
+    : [[compact, country], ...(/^\d{11,15}$/.test(compact) ? [['+' + compact]] : [])];
+  for (const [input, defaultCountry] of attempts) {
+    const parsed = parsePhoneNumberFromString(input, { ...(defaultCountry ? { defaultCountry } : {}), extract: false });
+    if (parsed?.isValid() && !parsed.ext) return parsed.number;
   }
-  return parsed.number;
+  const error = new Error('Enter a valid phone number, including the country code for numbers from another country.');
+  error.status = 422;
+  throw error;
 }
-function normalizeLead(data) {
-  return { ...data, phone: normalizePhone(data.phone), source: normalizeSource(data.source),
+// Digit strings a legacy (pre-E.164) row could hold for this number: full international
+// digits, the national number, and the national number with a trunk 0.
+function phoneDigitVariants(e164) {
+  const parsed = parsePhoneNumberFromString(e164);
+  const all = e164.replace(/\D/g, '');
+  return parsed ? [...new Set([all, parsed.nationalNumber, `0${parsed.nationalNumber}`])] : [all];
+}
+function normalizeLead(data, defaultCountry = 'IN') {
+  return { ...data, phone: normalizePhone(data.phone, defaultCountry), source: normalizeSource(data.source),
     name: String(data.name || 'Unknown').normalize('NFKC').trim(),
     email: data.email ? String(data.email).trim().toLowerCase() : null };
 }
@@ -37,4 +50,4 @@ function repairMojibake(value) {
     catch { return run; }
   });
 }
-module.exports = { SOURCES, normalizeSource, normalizePhone, normalizeLead, statusChangeTitle, repairMojibake };
+module.exports = { SOURCES, normalizeSource, normalizePhone, phoneDigitVariants, normalizeLead, statusChangeTitle, repairMojibake };

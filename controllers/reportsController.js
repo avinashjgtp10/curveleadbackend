@@ -1,5 +1,11 @@
-const { metricScope, getMetrics, getBreakdown } = require('../services/metrics');
+const { metricScope, getMetrics, getBreakdown, WON } = require('../services/metrics');
 const { query } = require('../config/db');
+const { getWorkspaceLocale } = require('../utils/workspaceLocale');
+
+// Start of the workspace-local day/week/month containing a UTC timestamp column, returned
+// as a UTC timestamp so the frontend can show it in the workspace timezone.
+const bucket = (unit, col, tzParam) =>
+  `(DATE_TRUNC('${unit}', ${col} AT TIME ZONE 'UTC' AT TIME ZONE ${tzParam}) AT TIME ZONE ${tzParam} AT TIME ZONE 'UTC')`;
 const { MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 
 // Resolves the ReportsPage ?period= selector (today|this_week|this_month|last_month|this_year)
@@ -38,14 +44,12 @@ const getConversionReport = async (req, res) => {
 
     const stages = await query(
       `SELECT stage, COUNT(*) as count, COALESCE(SUM(deal_value), 0) as value
-       FROM leads WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${sc}
+       FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at >= $2 AND created_at < $3${sc}
        GROUP BY stage ORDER BY count DESC`,
       params
     );
 
     const total = stages.rows.reduce((sum, s) => sum + parseInt(s.count), 0);
-    const won = stages.rows.find(s => s.stage === 'won')?.count || 0;
-    const lost = stages.rows.find(s => s.stage === 'lost')?.count || 0;
 
     res.json({
       ...metrics,
@@ -83,10 +87,6 @@ const getReportByStaff = async (req, res) => {
 
     const result = await query(
       `SELECT u.id, u.name, u.email,
-              COUNT(l.id) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3) as total_leads,
-              COUNT(l.id) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3) as won,
-              COUNT(l.id) FILTER (WHERE l.stage = 'lost' AND l.created_at >= $2 AND l.created_at < $3) as lost,
-              COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3), 0) as revenue,
               ROUND(AVG(l.response_time_seconds) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3 AND l.response_time_seconds IS NOT NULL)) as avg_response_seconds,
               (SELECT COUNT(*) FROM lead_followups lf JOIN leads l2 ON l2.id = lf.lead_id
                 WHERE l2.tenant_id = u.tenant_id AND l2.assigned_to = u.id AND lf.is_completed = false AND lf.dismissed_at IS NULL) as pending_followups,
@@ -101,7 +101,7 @@ const getReportByStaff = async (req, res) => {
                   WHERE lead_id = l4.id AND is_completed = false AND dismissed_at IS NULL
                   ORDER BY next_followup_at ASC LIMIT 1
                 ) pf4 ON true
-                WHERE l4.tenant_id = u.tenant_id AND l4.assigned_to = u.id
+                WHERE l4.tenant_id = u.tenant_id AND l4.merged_into_id IS NULL AND l4.assigned_to = u.id
                   AND COALESCE(ls4.is_won, false) = false AND COALESCE(ls4.is_lost, false) = false
                   AND (pf4.next_followup_at IS NULL OR pf4.next_followup_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours')
                   AND l4.updated_at < NOW() - INTERVAL '${CRITICAL_AFTER_HOURS} hours'
@@ -114,86 +114,52 @@ const getReportByStaff = async (req, res) => {
                 WHERE l3.tenant_id = u.tenant_id AND l3.assigned_to = u.id AND wm.direction = 'outbound'
                   AND wm.is_ai_generated = false AND wm.sent_at >= $2 AND wm.sent_at < $3) as manual_sent
        FROM users u
-       LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = u.tenant_id
+       LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = u.tenant_id AND l.merged_into_id IS NULL
          AND ((l.created_at >= $2 AND l.created_at < $3) OR (l.won_at >= $2 AND l.won_at < $3))
        WHERE u.tenant_id = $1 AND u.is_active = true${userFilter}
-       GROUP BY u.id, u.name, u.email, u.tenant_id
-       ORDER BY revenue DESC`,
+       GROUP BY u.id, u.name, u.email, u.tenant_id`,
       params
     );
 
+    // Lead / won / conversion counts: the shared metrics (services/metrics.js); activity here.
     const staff = result.rows.map(s => ({
       ...s,
-      total_leads: parseInt(s.total_leads),
-      won: parseInt(s.won),
-      lost: parseInt(s.lost),
       avg_response_seconds: s.avg_response_seconds !== null ? parseInt(s.avg_response_seconds) : null,
       pending_followups: parseInt(s.pending_followups),
       completed_followups: parseInt(s.completed_followups),
       stalled_leads: parseInt(s.stalled_leads),
       ai_sent: parseInt(s.ai_sent),
       manual_sent: parseInt(s.manual_sent),
-      conversion_rate: s.total_leads > 0 ? ((s.won / s.total_leads) * 100).toFixed(1) : 0,
     }));
 
     const breakdown = await getBreakdown(scope, 'assigned_to');
-    for (const row of staff) {
-      const m = breakdown.find(m => m.assigned_to === row.id) || { total_leads: 0, won: 0, lost: 0, revenue: 0, conversion_rate: 0 };
-      Object.assign(row, m);
-    }
+    const empty = { crm_leads: 0, total_leads: 0, won: 0, converted: 0, qualified: 0, lost: 0, revenue: 0, conversion_rate: 0 };
+    for (const row of staff) Object.assign(row, empty, breakdown.find(m => m.assigned_to === row.id) || {});
+    staff.sort((a, b) => b.revenue - a.revenue || b.crm_leads - a.crm_leads);
     res.json({ staff });
   } catch (error) {
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
-// GET /api/reports/by-campaign - Campaign ROI
+// GET /api/reports/by-campaign - Campaign ROI, from the shared metrics (services/metrics.js):
+// leads, conversion and cost per lead / customer for the selected range. lifetime_spend is
+// the campaign's running total, shown separately.
 const getReportByCampaign = async (req, res) => {
   try {
     const scope = await metricScope(req);
-    const { from: start, to: end } = scope;
-    const isStaff = req.user.role === 'staff';
-    const params = isStaff ? [req.tenantId, start, end, req.user.id] : [req.tenantId, start, end];
-    const staffJoin = isStaff ? ' AND l.assigned_to = $4' : '';
-
     const result = await query(
-      `SELECT c.id, c.name, c.source, c.budget, c.actual_spend, c.status,
-              COUNT(l.id) FILTER (WHERE l.created_at >= $2 AND l.created_at < $3) as total_leads,
-              COUNT(l.id) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3) as won,
-              COALESCE(SUM(l.deal_value) FILTER (WHERE l.stage = 'won' AND l.won_at >= $2 AND l.won_at < $3), 0) as revenue
-       FROM campaigns c
-       LEFT JOIN leads l ON l.campaign_id = c.id
-         AND ((l.created_at >= $2 AND l.created_at < $3) OR (l.won_at >= $2 AND l.won_at < $3))${staffJoin}
-       WHERE c.tenant_id = $1
-       GROUP BY c.id
-       ORDER BY revenue DESC`,
-      params
-    );
-
+      `SELECT c.id, c.name, c.source, c.budget, c.actual_spend AS lifetime_spend, c.status, c.meta_campaign_id
+       FROM campaigns c WHERE c.tenant_id = $1 ORDER BY c.created_at DESC`, [req.tenantId]);
+    const breakdown = await getBreakdown(scope, 'campaign_id', { campaignIds: result.rows.map(c => c.id) });
+    const empty = { crm_leads: 0, total_leads: 0, won: 0, converted: 0, qualified: 0, lost: 0, revenue: 0, conversion_rate: 0,
+      spend: null, spend_basis: 'not_measured', platform_leads: null, cpl: null, cost_per_customer: null, platform_cpl: null };
     const campaigns = result.rows.map(c => {
-      const total = parseInt(c.total_leads);
-      const won = parseInt(c.won);
-      const spend = parseFloat(c.actual_spend) || 0;
-      const revenue = parseFloat(c.revenue) || 0;
-      return {
-        ...c,
-        total_leads: total,
-        won,
-        conversion_rate: total > 0 ? ((won / total) * 100).toFixed(1) : 0,
-        cpl: total > 0 ? (spend / total).toFixed(2) : 0,
-        roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
-      };
+      const m = { ...empty, ...(breakdown.find(b => b.campaign_id === c.id) || {}) };
+      return { ...c, ...m, id: c.id, roi: m.spend ? Number((((m.revenue - m.spend) / m.spend) * 100).toFixed(1)) : null };
     });
-
-    const breakdown = await getBreakdown(scope, 'campaign_id');
-    const lifetime = await getBreakdown({ ...scope, from: new Date(0), to: new Date() }, 'campaign_id');
-    for (const row of campaigns) {
-      const m = breakdown.find(m => m.campaign_id === row.id) || { total_leads: 0, won: 0, lost: 0, revenue: 0, conversion_rate: 0 };
-      const all = lifetime.find(m => m.campaign_id === row.id) || { total_leads: 0, revenue: 0 };
-      const spend = Number(row.actual_spend) || 0;
-      Object.assign(row, m, { cpl: all.total_leads ? (spend/all.total_leads).toFixed(2) : 0, roi: spend ? ((all.revenue-spend)/spend*100).toFixed(1) : 0 });
-    }
-    res.json({ campaigns });
+    campaigns.sort((a, b) => b.revenue - a.revenue || b.crm_leads - a.crm_leads);
+    res.json({ campaigns, active_campaigns: result.rows.filter(c => String(c.status).toLowerCase() === 'active').length });
   } catch (error) {
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
@@ -213,7 +179,7 @@ const getFunnelReport = async (req, res) => {
 
     const [stagesRes, leaksRes, terminalRes] = await Promise.all([
       query(
-        `WITH cohort AS (SELECT id,stage FROM leads WHERE tenant_id=$1 AND created_at>=$2 AND created_at<$3${cohortSc}),
+        `WITH cohort AS (SELECT id,stage FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at>=$2 AND created_at<$3${cohortSc}),
  all_stages AS (SELECT id,name,is_won,is_lost,row_number() OVER(ORDER BY is_won,pos,id) pos FROM lead_stages
  WHERE tenant_id=$1 AND is_active=true AND is_lost=false AND lower(trim(name)) NOT IN ('lost','unqualified','disqualified')),
  lead_max_pos AS (SELECT c.id lead_id,GREATEST(
@@ -236,7 +202,7 @@ const getFunnelReport = async (req, res) => {
         params
       ),
       query(`SELECT s.name, s.is_lost, count(l.id)::int AS count FROM lead_stages s
- LEFT JOIN leads l ON l.tenant_id=s.tenant_id AND lower(l.stage)=lower(s.name) AND l.created_at>=$2 AND l.created_at<$3${leaksSc}
+ LEFT JOIN leads l ON l.tenant_id=s.tenant_id AND l.merged_into_id IS NULL AND lower(l.stage)=lower(s.name) AND l.created_at>=$2 AND l.created_at<$3${leaksSc}
  WHERE s.tenant_id=$1 AND s.is_active=true AND (s.is_lost=true OR lower(trim(s.name)) IN ('lost','unqualified','disqualified'))
  GROUP BY s.id,s.name,s.is_lost,s.pos ORDER BY s.pos`,params),
     ]);
@@ -278,7 +244,7 @@ const getTimeInStageReport = async (req, res) => {
     const result = await query(
       `WITH cohort AS (
          SELECT id, stage, created_at FROM leads
-         WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${cohortSc}
+         WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at >= $2 AND created_at < $3${cohortSc}
        ),
        initial_stage AS (
          SELECT c.id AS lead_id, c.created_at AS entered_at,
@@ -338,11 +304,12 @@ const getFollowupTrend = async (req, res) => {
     const { period = 'daily', days = 30 } = req.query;
     const truncFormat = period === 'monthly' ? 'month' : period === 'weekly' ? 'week' : 'day';
     const isStaff = req.user.role === 'staff';
-    const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
-    const sc = isStaff ? ' AND l.assigned_to = $2' : '';
+    const { timezone } = await getWorkspaceLocale(req.tenantId);
+    const params = isStaff ? [req.tenantId, timezone, req.user.id] : [req.tenantId, timezone];
+    const sc = isStaff ? ' AND l.assigned_to = $3' : '';
 
     const result = await query(
-      `SELECT DATE_TRUNC('${truncFormat}', lf.created_at) as period,
+      `SELECT ${bucket(truncFormat, 'lf.created_at', '$2')} as period,
               COUNT(*) as scheduled,
               COUNT(*) FILTER (WHERE lf.is_completed = true) as completed
        FROM lead_followups lf
@@ -371,27 +338,28 @@ const getTimeline = async (req, res) => {
     const { period = 'daily', days = 30 } = req.query;
     const truncFormat = period === 'monthly' ? 'month' : period === 'weekly' ? 'week' : 'day';
     const isStaff = req.user.role === 'staff';
-    const params = isStaff ? [req.tenantId, req.user.id] : [req.tenantId];
-    const sc = isStaff ? ' AND assigned_to = $2' : '';
+    const { timezone } = await getWorkspaceLocale(req.tenantId);
+    const params = isStaff ? [req.tenantId, timezone, req.user.id] : [req.tenantId, timezone];
+    const sc = isStaff ? ' AND assigned_to = $3' : '';
 
     // Leads-created and revenue-won are bucketed separately (a lead created in one period can
     // be won in a later one) and merged by period, rather than both grouped by created_at.
     const result = await query(
       `WITH created_buckets AS (
-         SELECT DATE_TRUNC('${truncFormat}', created_at) as period,
+         SELECT ${bucket(truncFormat, 'created_at', '$2::text')} as period,
                 COUNT(*) as total_leads,
                 ROUND(AVG(response_time_seconds) FILTER (WHERE response_time_seconds IS NOT NULL)) as avg_response_seconds,
                 COUNT(*) FILTER (WHERE response_time_seconds IS NOT NULL) as responded_count
          FROM leads
-         WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'${sc}
+         WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'${sc}
          GROUP BY period
        ),
        won_buckets AS (
-         SELECT DATE_TRUNC('${truncFormat}', won_at) as period,
+         SELECT ${bucket(truncFormat, 'won_at', '$2::text')} as period,
                 COUNT(*) as won,
                 COALESCE(SUM(deal_value), 0) as revenue
-         FROM leads
-         WHERE tenant_id = $1 AND stage = 'won' AND won_at >= NOW() - INTERVAL '${parseInt(days)} days'${sc}
+         FROM leads l
+         WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND lower(trim(l.stage)) IN ${WON} AND l.won_at >= NOW() - INTERVAL '${parseInt(days)} days'${sc}
          GROUP BY period
        )
        SELECT COALESCE(c.period, w.period) as period,
@@ -463,7 +431,7 @@ const getDashboardSummary = async (req, res) => {
     const rsc = ' AND ($4::uuid IS NULL OR assigned_to = $4)';
     // liveParams: $1 tenant, $2 staff id (nullable) — for always-live, non-period-scoped queries
     const liveParams = [tid, uid];
-    const lsfc = ' AND ($2::uuid IS NULL OR lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $2))';
+    const lsfc = ' AND ($2::uuid IS NULL OR lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND assigned_to = $2))';
 
     const [summary, followupStats, pipeline, sources, team, recentLeads, trend, unassigned, automation] = await Promise.all([
 
@@ -473,8 +441,6 @@ const getDashboardSummary = async (req, res) => {
           COUNT(*) as total_leads,
           COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3) as leads_in_period,
           COUNT(*) FILTER (WHERE created_at >= $4 AND created_at < $5) as leads_prev_period,
-          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW())) as leads_today,
-          COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW()) AND first_response_at IS NOT NULL) as leads_today_contacted,
           COUNT(*) FILTER (WHERE lead_score = 'hot') as hot_leads,
           COUNT(*) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as total_won,
@@ -495,7 +461,7 @@ const getDashboardSummary = async (req, res) => {
           COALESCE(SUM(deal_value - advance_received) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)
             AND won_at >= $2 AND won_at < $3), 0) as balance_due_in_period
-        FROM leads WHERE tenant_id = $1${' AND ($6::uuid IS NULL OR assigned_to = $6)'}
+        FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL${' AND ($6::uuid IS NULL OR assigned_to = $6)'}
       `, compareParams),
 
       require('../services/followupSummary').summary(tid, isStaff ? req.user.id : null).then(row => ({rows:[row]})),
@@ -506,7 +472,7 @@ const getDashboardSummary = async (req, res) => {
                COUNT(l.id) as count,
                COALESCE(SUM(l.deal_value), 0) as pipeline_value
         FROM lead_stages ls
-        LEFT JOIN leads l ON LOWER(l.stage) = LOWER(ls.name) AND l.tenant_id = ls.tenant_id
+        LEFT JOIN leads l ON LOWER(l.stage) = LOWER(ls.name) AND l.tenant_id = ls.tenant_id AND l.merged_into_id IS NULL
           AND l.created_at >= $2 AND l.created_at < $3
           AND ($4::uuid IS NULL OR l.assigned_to = $4)
         WHERE ls.tenant_id = $1 AND ls.is_active = true
@@ -521,7 +487,7 @@ const getDashboardSummary = async (req, res) => {
           COUNT(*) as total,
           COUNT(*) FILTER (WHERE LOWER(stage) IN (
             SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) as won
-        FROM leads WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${rsc}
+        FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at >= $2 AND created_at < $3${rsc}
         GROUP BY source ORDER BY total DESC LIMIT 6
       `, rangeParams),
 
@@ -541,7 +507,7 @@ const getDashboardSummary = async (req, res) => {
             WHERE l2.tenant_id = $1 AND l2.assigned_to = u.id
               AND lf.is_completed = true AND lf.completed_at >= $2 AND lf.completed_at < $3) as completed_followups
         FROM users u
-        LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
+        LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1 AND l.merged_into_id IS NULL
           AND ((l.created_at >= $2 AND l.created_at < $3) OR (l.won_at >= $2 AND l.won_at < $3))
         WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin', 'staff')
           AND ($4::uuid IS NULL OR u.id = $4)
@@ -551,21 +517,21 @@ const getDashboardSummary = async (req, res) => {
       // Recent 6 leads — from the selected period
       query(`
         SELECT id, name, phone, source, lead_score, stage, created_at
-        FROM leads WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${rsc}
+        FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at >= $2 AND created_at < $3${rsc}
         ORDER BY created_at DESC LIMIT 6
       `, rangeParams),
 
       // Daily lead-creation trend across the selected period
       query(`
-        SELECT DATE_TRUNC('day', created_at) as day, COUNT(*) as count
-        FROM leads WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3${rsc}
+        SELECT ${bucket('day', 'created_at', '$5::text')} as day, COUNT(*) as count
+        FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at >= $2 AND created_at < $3${rsc}
         GROUP BY day ORDER BY day ASC
-      `, rangeParams),
+      `, [...rangeParams, scope.tz]),
 
       // Unassigned leads (admin only) — always live
       isStaff
         ? Promise.resolve({ rows: [{ count: '0' }] })
-        : query('SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND assigned_to IS NULL', [tid]),
+        : query('SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND assigned_to IS NULL', [tid]),
 
       require('../services/dashboardActivity').counts(tid,uid).then(row=>({rows:[row]})),
     ]);
@@ -591,6 +557,7 @@ const getDashboardSummary = async (req, res) => {
       hot_leads:         parseInt(s.hot_leads),
       total_won:         parseInt(s.total_won),
       won_in_period:     metrics.won,
+      converted_in_period: metrics.converted,   // cohort: leads created in the period that became customers
       total_revenue:     parseFloat(s.total_revenue),
       revenue_in_period: metrics.revenue,
       revenue_change:    pct(s.revenue_in_period, s.revenue_prev_period),

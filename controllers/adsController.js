@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { metricScope, getBreakdown } = require('../services/metrics');
 const queues = require('../jobs/queues');
 const { exchangeForLongLived, inspectToken, saveToken, syncAccountsForToken } = require('../services/metaAds/client');
 const metaLeads = require('../services/metaLeads');
@@ -12,7 +13,12 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENTITY_TYPES = ['account', 'campaign', 'adset', 'ad'];
 const bad = (res, error, status = 422) => res.status(status).json({ error });
-const fail = (label) => (e, res) => { console.error(`${label}:`, e.message); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); };
+const { isSchemaError, schemaErrorMessage } = require('../utils/schemaErrors');
+const fail = (label) => (e, res) => {
+  console.error(`${label}:`, e.message);
+  if (isSchemaError(e)) return res.status(503).json({ error: schemaErrorMessage(e), code: 'MIGRATION_PENDING' });
+  res.status(e.status || 500).json({ error: e.status ? e.message : `${label} failed. Please try again.` });
+};
 
 // from/to as YYYY-MM-DD (inclusive); default last 30 days; at most 400 days.
 const dateRange = (q) => {
@@ -173,58 +179,45 @@ const dailyInsights = async (req, res) => {
 };
 
 // GET /api/ads/dashboard?account_id&from&to
-// Per campaign: Meta's CPL vs cost per qualified lead vs cost per converted lead.
-// CRM side = leads attributed to the campaign and created in the range;
-// "qualified" = reached an is_qualified or won stage, "converted" = reached a won stage
-// (current stage or stage history).
+// Per Meta campaign: spend + leads REPORTED BY META (daily insights) next to the CRM side from
+// the shared metrics (services/metrics.js): leads IN CURVELEAD created in the range, how many
+// of those qualified / converted (cohort), and leads won this period (event).
 const dashboard = async (req, res) => {
   try {
     const { from, to } = dateRange(req.query);
     const accountId = await resolveAccountId(req.tenantId, req.query.account_id);
-    const { rows } = await query(
-      `WITH spend AS (
-         SELECT entity_id, sum(spend) AS spend, sum(leads) AS meta_leads
-         FROM ad_insights_daily WHERE tenant_id = $1 AND ad_account_id = $2 AND entity_type = 'campaign' AND date BETWEEN $3 AND $4
-         GROUP BY entity_id
-       ), crm AS (
-         SELECT ac.external_id, count(*) AS crm_leads,
-                count(*) FILTER (WHERE f.qualified) AS qualified, count(*) FILTER (WHERE f.converted) AS converted
-         FROM ad_campaigns ac
-         JOIN leads l ON l.tenant_id = ac.tenant_id AND l.campaign_id = ac.campaign_id
-         CROSS JOIN LATERAL (
-           SELECT bool_or(s.is_qualified OR COALESCE(s.is_won, false)) AS qualified, bool_or(COALESCE(s.is_won, false)) AS converted
-           FROM lead_stages s
-           WHERE s.tenant_id = l.tenant_id AND (
-             lower(trim(s.name)) = lower(trim(l.stage))
-             OR EXISTS (SELECT 1 FROM lead_stage_history h WHERE h.tenant_id = l.tenant_id AND h.lead_id = l.id AND lower(trim(h.new_stage)) = lower(trim(s.name))))
-         ) f
-         WHERE ac.tenant_id = $1 AND ac.ad_account_id = $2 AND l.created_at >= $3::date AND l.created_at < $4::date + 1
-         GROUP BY ac.external_id
-       )
-       SELECT ac.id, ac.external_id, ac.campaign_id AS crm_campaign_id, ac.name, ac.effective_status,
-              COALESCE(sp.spend, 0)::float AS spend, COALESCE(sp.meta_leads, 0)::int AS meta_leads,
-              CASE WHEN sp.meta_leads > 0 THEN round(sp.spend / sp.meta_leads, 2)::float END AS meta_cpl,
-              COALESCE(c.crm_leads, 0)::int AS crm_leads,
-              COALESCE(c.qualified, 0)::int AS qualified_leads,
-              CASE WHEN c.qualified > 0 THEN round(sp.spend / c.qualified, 2)::float END AS cost_per_qualified,
-              COALESCE(c.converted, 0)::int AS converted_leads,
-              CASE WHEN c.converted > 0 THEN round(sp.spend / c.converted, 2)::float END AS cost_per_converted
+    const account = (await query('SELECT currency, timezone_name FROM ad_accounts WHERE tenant_id = $1 AND id = $2', [req.tenantId, accountId])).rows[0] || {};
+    const ad = await query(
+      `SELECT ac.id, ac.external_id, ac.campaign_id AS crm_campaign_id, ac.name, ac.effective_status,
+              COALESCE(sum(i.spend), 0)::float AS spend, COALESCE(sum(i.leads), 0)::int AS meta_leads
        FROM ad_campaigns ac
-       LEFT JOIN spend sp ON sp.entity_id = ac.external_id
-       LEFT JOIN crm c ON c.external_id = ac.external_id
-       WHERE ac.tenant_id = $1 AND ac.ad_account_id = $2 AND (sp.spend > 0 OR c.crm_leads > 0)
-       ORDER BY spend DESC`,
+       LEFT JOIN ad_insights_daily i ON i.tenant_id = ac.tenant_id AND i.entity_type = 'campaign' AND i.entity_id = ac.external_id AND i.date BETWEEN $3 AND $4
+       WHERE ac.tenant_id = $1 AND ac.ad_account_id = $2
+       GROUP BY ac.id`,
       [req.tenantId, accountId, from, to]
     );
-    const sum = (k) => rows.reduce((t, r) => t + (Number(r[k]) || 0), 0);
+    const scope = await metricScope({ tenantId: req.tenantId, user: req.user, query: { period: 'custom', date_from: from, date_to: to } });
+    const crmIds = ad.rows.map(r => r.crm_campaign_id).filter(Boolean);
+    const crm = new Map((crmIds.length ? await getBreakdown(scope, 'campaign_id', { campaignIds: crmIds }) : []).map(m => [m.campaign_id, m]));
     const div = (a, b) => (b > 0 ? Number((a / b).toFixed(2)) : null);
-    const spend = sum('spend');
+    const rows = ad.rows.map(r => {
+      const m = crm.get(r.crm_campaign_id) || { crm_leads: 0, qualified: 0, converted: 0, won: 0 };
+      return {
+        ...r, meta_cpl: div(r.spend, r.meta_leads),
+        crm_leads: m.crm_leads, qualified_leads: m.qualified, converted_leads: m.converted, won_this_period: m.won,
+        cost_per_lead: div(r.spend, m.crm_leads), cost_per_qualified: div(r.spend, m.qualified), cost_per_converted: div(r.spend, m.converted),
+      };
+    }).filter(r => r.spend > 0 || r.crm_leads > 0).sort((a, b) => b.spend - a.spend);
+    const sum = (k) => rows.reduce((t, r) => t + (Number(r[k]) || 0), 0);
+    const spend = Number(sum('spend').toFixed(2));
     res.json({
-      account_id: accountId, from, to, campaigns: rows,
+      account_id: accountId, currency: account.currency || null, timezone: account.timezone_name || null, from, to, campaigns: rows,
       totals: {
-        spend: Number(spend.toFixed(2)), meta_leads: sum('meta_leads'), meta_cpl: div(spend, sum('meta_leads')),
-        crm_leads: sum('crm_leads'), qualified_leads: sum('qualified_leads'), cost_per_qualified: div(spend, sum('qualified_leads')),
+        spend, meta_leads: sum('meta_leads'), meta_cpl: div(spend, sum('meta_leads')),
+        crm_leads: sum('crm_leads'), cost_per_lead: div(spend, sum('crm_leads')),
+        qualified_leads: sum('qualified_leads'), cost_per_qualified: div(spend, sum('qualified_leads')),
         converted_leads: sum('converted_leads'), cost_per_converted: div(spend, sum('converted_leads')),
+        won_this_period: sum('won_this_period'),
       },
     });
   } catch (e) { fail('Ads dashboard')(e, res); }

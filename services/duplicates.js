@@ -1,10 +1,10 @@
 const { normalizePhone } = require('../utils/dataQuality');
-function duplicateGroups(leads, mode = 'phone') {
+function duplicateGroups(leads, mode = 'phone', country = 'IN') {
   const parent = leads.map((_, i) => i), keys = new Map();
   const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
   leads.forEach((lead, i) => {
     const values = [];
-    try { values.push(normalizePhone(lead.phone)); } catch {}
+    try { values.push(normalizePhone(lead.phone, country)); } catch {}
     if (mode === 'phone_or_email' && lead.email?.trim()) values.push('email:' + lead.email.trim().toLowerCase());
     for (const key of values) {
       if (keys.has(key)) parent[find(i)] = find(keys.get(key));

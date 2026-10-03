@@ -1,6 +1,8 @@
 const path = require('path');
 const axios = require('axios');
 const { query } = require('../config/db');
+const { normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
+const { getWorkspaceLocale, localeFromSettings } = require('../utils/workspaceLocale');
 const { uploadToS3 } = require('../config/s3');
 const { fetchWebsiteText } = require('../utils/websiteFetcher');
 const { generateAiAgentKnowledge } = require('../services/groqService');
@@ -142,7 +144,8 @@ const getBroadcastHistory = async (req, res) => {
 const getOptIns = async (req, res) => {
   try {
     const settings = await getSettings(req.tenantId);
-    const base = { require_opt_in: !!settings.whatsapp_require_opt_in };
+    // Consent is always enforced now (services/whatsappConsent.js) — no per-workspace switch.
+    const base = { policy: { marketing: 'opt_in_required', utility: 'opt_in_or_requested_contact' } };
 
     const optedOut = await query(
       `SELECT id, name, phone, opted_out_at FROM leads
@@ -150,7 +153,7 @@ const getOptIns = async (req, res) => {
       [req.tenantId]
     );
     const counts = await query(
-      `SELECT COUNT(*) FILTER (WHERE opted_out) AS opted_out, COUNT(*) AS total FROM leads WHERE tenant_id = $1`,
+      `SELECT COUNT(*) FILTER (WHERE opted_out) AS opted_out, COUNT(*) AS total FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL`,
       [req.tenantId]
     );
 
@@ -164,7 +167,7 @@ const getOptIns = async (req, res) => {
       );
       optedIn = r.rows;
       optInCount = (await query(
-        'SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND whatsapp_opt_in_at IS NOT NULL AND opted_out = false',
+        'SELECT COUNT(*) FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND whatsapp_opt_in_at IS NOT NULL AND opted_out = false',
         [req.tenantId]
       )).rows[0].count;
     } catch (e) {
@@ -187,12 +190,15 @@ const updateOptIns = async (req, res) => {
     if (!['opt_in', 'opt_out'].includes(action)) return res.status(400).json({ error: 'action must be opt_in or opt_out.' });
 
     const ids = Array.isArray(lead_ids) ? lead_ids : [];
-    const phoneList = (Array.isArray(phones) ? phones : []).map(p => String(p).replace(/\D/g, '')).filter(Boolean).slice(0, 2000);
-    if (!ids.length && !phoneList.length) return res.status(400).json({ error: 'Provide lead_ids or phones.' });
+    // Every stored format of each number (E.164, national, 0-prefixed), read in the workspace's country.
+    const { country } = await getWorkspaceLocale(req.tenantId);
+    const phoneList = [...new Set((Array.isArray(phones) ? phones : []).slice(0, 2000).flatMap(p => {
+      try { return phoneDigitVariants(normalizePhone(p, country)); } catch { return []; }
+    }))];
+    if (!ids.length && !phoneList.length) return res.status(400).json({ error: 'Provide lead_ids or valid phone numbers.' });
 
-    const match = `tenant_id = $1 AND (id = ANY($2::uuid[]) OR regexp_replace(phone, '\\D', '', 'g') = ANY($3::text[])
-                   OR RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = ANY($3::text[]))`;
-    const params = [req.tenantId, ids, phoneList.map(p => (p.length > 10 ? p.slice(-10) : p))];
+    const match = `tenant_id = $1 AND merged_into_id IS NULL AND (id = ANY($2::uuid[]) OR regexp_replace(phone, '\\D', '', 'g') = ANY($3::text[]))`;
+    const params = [req.tenantId, ids, phoneList];
 
     let result;
     try {
@@ -209,12 +215,10 @@ const updateOptIns = async (req, res) => {
   } catch (e) { console.error('updateOptIns:', e.message); res.status(500).json({ error: 'Failed to update opt-ins.' }); }
 };
 
-// ── PUT /hub/optin-settings { require_opt_in } ──────────────────────────────
+// ── PUT /hub/optin-settings (retired) ───────────────────────────────────────
+// The old "require opt-in" switch: consent rules now always apply, so this only explains that.
 const updateOptInSettings = async (req, res) => {
-  try {
-    await saveSettings(req.tenantId, { whatsapp_require_opt_in: !!req.body.require_opt_in });
-    res.json({ require_opt_in: !!req.body.require_opt_in });
-  } catch (e) { console.error('updateOptInSettings:', e.message); res.status(500).json({ error: 'Failed to save.' }); }
+  res.status(410).json({ error: 'Opt-in is always required for marketing templates now; utility templates also reach leads who asked to be contacted.' });
 };
 
 // ── GET /hub/numbers ────────────────────────────────────────────────────────
@@ -261,7 +265,7 @@ const getClickToWhatsApp = async (req, res) => {
         `SELECT COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE campaign_id IS NULL) AS unattributed,
                 COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW())) AS today
-         FROM leads WHERE tenant_id = $1 AND source = 'whatsapp' AND meta_ad_id IS NOT NULL
+         FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND source = 'whatsapp' AND meta_ad_id IS NOT NULL
            AND created_at >= NOW() - ($2 || ' days')::interval`,
         [req.tenantId, String(days)]
       ),
@@ -271,7 +275,7 @@ const getClickToWhatsApp = async (req, res) => {
                 COUNT(l.id) FILTER (WHERE l.stage IN (SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) AS won,
                 c.actual_spend
          FROM leads l LEFT JOIN campaigns c ON c.id = l.campaign_id
-         WHERE l.tenant_id = $1 AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
+         WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
            AND l.created_at >= NOW() - ($2 || ' days')::interval
          GROUP BY c.id, c.name, c.actual_spend ORDER BY leads DESC LIMIT 50`,
         [req.tenantId, String(days)]
@@ -279,7 +283,7 @@ const getClickToWhatsApp = async (req, res) => {
       query(
         `SELECT l.id, l.name, l.phone, l.stage, l.created_at, l.source_detail, c.name AS campaign_name
          FROM leads l LEFT JOIN campaigns c ON c.id = l.campaign_id
-         WHERE l.tenant_id = $1 AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
+         WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
          ORDER BY l.created_at DESC LIMIT 25`,
         [req.tenantId]
       ),
@@ -313,7 +317,7 @@ const getAutoMessages = async (req, res) => {
       welcome_message: s.whatsapp_auto_responder_message || '',
       away_enabled: !!s.whatsapp_away_enabled,
       away_message: s.whatsapp_away_message || '',
-      business_hours: s.whatsapp_business_hours || { start: '10:00', end: '19:00', days: [1, 2, 3, 4, 5, 6], timezone: 'Asia/Kolkata' },
+      business_hours: { ...(s.whatsapp_business_hours || { start: '10:00', end: '19:00', days: [1, 2, 3, 4, 5, 6] }), timezone: localeFromSettings(s).timezone },
     });
   } catch (e) { console.error('getAutoMessages:', e.message); res.status(500).json({ error: 'Failed.' }); }
 };
@@ -333,7 +337,7 @@ const updateAutoMessages = async (req, res) => {
       patch.whatsapp_business_hours = {
         start: business_hours.start, end: business_hours.end,
         days: business_hours.days.map(Number).filter(d => d >= 0 && d <= 6),
-        timezone: business_hours.timezone || 'Asia/Kolkata',
+        timezone: (await getWorkspaceLocale(req.tenantId)).timezone,
       };
     }
     if (patch.whatsapp_away_enabled && !(patch.whatsapp_away_message || (await getSettings(req.tenantId)).whatsapp_away_message)) {
@@ -363,7 +367,7 @@ const getBookingMessages = async (req, res) => {
       ...bookingSettings(t.settings),
       business_name: t.name || '',
       business_address: [t.address, t.city].filter(Boolean).join(', '),
-      timezone: t.settings?.timezone || 'Asia/Kolkata',
+      timezone: localeFromSettings(t.settings || {}).timezone,
       recent,
     });
   } catch (e) { console.error('getBookingMessages:', e.message); res.status(500).json({ error: 'Failed.' }); }

@@ -1,5 +1,6 @@
 const { ingestLead } = require('../services/leadIngestion');
-const { normalizePhone } = require('../utils/dataQuality');
+const { normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
+const { getWorkspaceLocale, localeFromSettings, wallTimeToUtc, formatWhen } = require('../utils/workspaceLocale');
 const axios = require('axios');
 const { query } = require('../config/db');
 const { uploadToS3 } = require('../config/s3');
@@ -14,7 +15,9 @@ const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { checkNewLeadTriggers, cancelActiveEnrollments } = require('../utils/automationTriggers');
 const { createNotification } = require('./notificationController');
-const { isOptOutMessage } = require('../utils/optOut');
+const { isOptOutMessage, isOptInMessage } = require('../utils/optOut');
+const { recordOptIn, checkTemplateConsent } = require('../services/whatsappConsent');
+const { shouldPauseAi, isRepeatOf, MAX_AUTOMATED_AI_TURNS } = require('../services/autoReplyGuard');
 const { substituteVars } = require('../utils/templateVars');
 const { isWithinBusinessHours } = require('../utils/businessHours');
 const { isSessionOpen } = require('../utils/sessionWindow');
@@ -116,7 +119,7 @@ const deleteConversations = async (req, res) => {
     const params = [req.tenantId, leadIds];
     let scope = '';
     if (req.user.role === 'staff') {
-      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $3)';
+      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND assigned_to = $3)';
       params.push(req.user.id);
     }
     const result = await query(
@@ -141,7 +144,7 @@ const markConversationsRead = async (req, res) => {
     const params = [req.tenantId, leadIds];
     let scope = '';
     if (req.user.role === 'staff') {
-      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND assigned_to = $3)';
+      scope = ' AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND assigned_to = $3)';
       params.push(req.user.id);
     }
     await query(
@@ -295,6 +298,8 @@ const sendMessage = async (req, res) => {
       const templates=await listMessageTemplates(settings.whatsapp_business_account_id,settings.whatsapp_access_token);
       const approved=templates.templates?.find(t=>t.name===template_name&&t.language===lang&&t.status==='APPROVED');
       if(!approved)return res.status(422).json({error:'Approved template unavailable.'});
+      const consent = await checkTemplateConsent({ tenantId: req.tenantId, leadId: lead_id, template: approved });
+      if (!consent.allowed) return res.status(409).json({ error: consent.reason, consent_required: true, category: consent.category });
       const templateBody=approved.components?.find(c=>c.type==='BODY')?.text || '';
       const params = Array.isArray(template_params) ? template_params.map(p => String(p ?? '')) : [];
       const mediaRow = (await query(
@@ -359,7 +364,7 @@ const setConversationAi = async (req, res) => {
 // the normal /send or template flow once this returns the lead_id.
 const startChat = async (req, res) => {
   try {
-    const phone = normalizePhone(req.body.phone);
+    const phone = normalizePhone(req.body.phone, (await getWorkspaceLocale(req.tenantId)).country);
     const ingestion = await ingestLead(req.tenantId, { name: req.body.name || 'Unknown', phone, source: 'manual', stage: 'new', assigned_to: req.user.role === 'staff' ? req.user.id : null });
     const lead = ingestion.lead;
     if (req.user.role === 'staff' && lead.assigned_to !== req.user.id) return res.status(403).json({ error: 'This contact is assigned to another team member.' });
@@ -473,9 +478,15 @@ const handleWebhook = async (req, res) => {
       // A receiving number identifies the workspace before looking up any sender.
       const receivingTenantId=numberOwner?.tenant_id || await findTenantBySharedNumber(receivingNumberId);
       if(!receivingTenantId)continue;
+      // WhatsApp sends the full international number without "+": match every stored format of
+      // it (E.164, national, 0-prefixed), skip merged duplicates, always the oldest lead — so one
+      // contact never splits into two conversation threads.
+      let digits = [String(fromPhone).replace(/\D/g, '')];
+      try { digits = phoneDigitVariants(normalizePhone(`+${fromPhone}`)); } catch {}
       const leadResult=await query(
-        'SELECT id,tenant_id,name,assigned_to,ai_paused,opted_out,source,source_detail,phone FROM leads WHERE tenant_id=$1 AND (phone=$2 OR phone=$3 OR phone=chr(43)||$2) LIMIT 1',
-        [receivingTenantId,fromPhone,fromPhone.replace(/^91/,'')]
+        `SELECT id,tenant_id,name,assigned_to,ai_paused,opted_out,source,source_detail,phone FROM leads
+         WHERE tenant_id=$1 AND merged_into_id IS NULL AND phone_digits = ANY($2::text[]) ORDER BY created_at, id LIMIT 1`,
+        [receivingTenantId, digits]
       );
 
       let lead = leadResult.rows[0] || null;
@@ -534,6 +545,13 @@ const handleWebhook = async (req, res) => {
         ).catch(() => {});
       } else {
         await cancelActiveEnrollments({ tenantId: lead.tenant_id, leadId: lead.id, reason: 'replied' });
+        // START / SUBSCRIBE is an explicit opt-in (also re-subscribes after STOP).
+        if (isOptInMessage(messageText)) {
+          await recordOptIn({ tenantId: lead.tenant_id, leadId: lead.id, source: 'whatsapp_keyword', resubscribe: true }).catch(() => {});
+          lead.opted_out = false;
+          await query(`INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title) VALUES ($1, $2, 'opted_in', 'Lead opted in to WhatsApp messages')`,
+            [lead.tenant_id, lead.id]).catch(() => {});
+        }
       }
 
       // Get tenant settings to check if AI auto-reply is enabled
@@ -545,7 +563,7 @@ const handleWebhook = async (req, res) => {
       let awaySent = await require('../services/inboundReplies').replyToInbound({lead,text:messageText,messageId:waMessageId,settings:tenant?.settings || {}});
       await query("INSERT INTO integration_health(tenant_id,provider,last_lead_received_at,token_valid) VALUES($1,'whatsapp',now(),true) ON CONFLICT(tenant_id,provider) DO UPDATE SET last_lead_received_at=now(),token_valid=true",[lead.tenant_id]);
       if (!awaySent && !lead.ai_paused && tenant?.settings?.whatsapp_away_enabled && tenant.settings.whatsapp_away_message && !lead.opted_out
-          && !isWithinBusinessHours(tenant.settings.whatsapp_business_hours)) {
+          && !isWithinBusinessHours(tenant.settings.whatsapp_business_hours, new Date(), localeFromSettings(tenant.settings).timezone)) {
         try {
           const recent = await query(
             `SELECT 1 FROM whatsapp_messages WHERE lead_id = $1 AND direction = 'outbound' AND is_automated = true
@@ -568,22 +586,38 @@ const handleWebhook = async (req, res) => {
 
       if (aiEnabled && !awaySent && !lead.ai_paused && !lead.opted_out) {
         try {
-          // Get recent messages for context
+          // Recent messages, newest first, without the inbound just saved.
           const historyResult = await query(
-            `SELECT direction, message FROM whatsapp_messages WHERE lead_id = $1 ORDER BY sent_at DESC LIMIT 10`,
+            `SELECT id, direction, message, is_ai_generated, is_automated FROM whatsapp_messages WHERE lead_id = $1 ORDER BY sent_at DESC LIMIT 20`,
             [lead.id]
           );
+          const history = historyResult.rows.filter(m => m.id !== savedInbound.rows[0].id);
+
+          // Another business's bot answering our bot: pause instead of looping.
+          if (shouldPauseAi({ text: messageText, history })) {
+            await pauseAiForAutoReplies({ lead, text: messageText });
+            continue;
+          }
 
           const aiResponse = await qualifyLead(
             lead.name,
-            historyResult.rows.reverse(),
+            history.slice(0, 10).reverse().map(({ direction, message }) => ({ direction, message })),
             messageText,
             {
               business_name: tenant.name, description: tenant.settings?.business_description,
               knowledge: tenant.settings?.ai_knowledge,
               lead_source: [lead.source, lead.source_detail].filter(Boolean).join(' — ') || null,
+              timezone: localeFromSettings(tenant.settings || {}).timezone,
             }
           );
+
+          // Never send the same reply (e.g. a booking confirmation) twice in a row.
+          const lastAiReply = history.find(m => m.direction === 'outbound' && m.is_ai_generated)?.message;
+          if (isRepeatOf(aiResponse.reply, lastAiReply)) {
+            await query(`INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description) VALUES ($1, $2, 'ai_reply_suppressed', 'AI reply not sent — same as its previous message', $3)`,
+              [lead.tenant_id, lead.id, aiResponse.reply]).catch(() => {});
+            continue;
+          }
 
           // Send AI reply — from the assigned rep's own number if they have one
           const credentials = await resolveWhatsAppCredentials(lead.tenant_id, lead.assigned_to);
@@ -614,11 +648,19 @@ const handleWebhook = async (req, res) => {
           // automatically instead of leaving it sitting in the chat transcript, and
           // let the team know it's confirmed. Sanity-checked against a plausible
           // window so a hallucinated date/time can't create garbage appointments.
-          const bookingAt = aiResponse.booking?.ready && aiResponse.booking?.date_time_iso ? new Date(aiResponse.booking.date_time_iso) : null;
+          // The AI gives wall-clock time in the workspace timezone; turn it into a real instant.
+          const workspace = localeFromSettings(tenant.settings || {});
+          const bookingAt = aiResponse.booking?.ready && aiResponse.booking?.date_time_iso ? wallTimeToUtc(aiResponse.booking.date_time_iso, workspace.timezone) : null;
           const bookingIsPlausible = bookingAt && !isNaN(bookingAt.getTime())
             && bookingAt.getTime() > Date.now() - 60 * 60 * 1000
             && bookingAt.getTime() < Date.now() + 365 * 24 * 60 * 60 * 1000;
-          if (bookingIsPlausible) {
+          // The same booking again (±15 min) is not re-booked or re-announced.
+          const alreadyBooked = bookingIsPlausible && (await query(
+            `SELECT 1 FROM lead_followups WHERE tenant_id = $1 AND lead_id = $2 AND is_completed = false AND dismissed_at IS NULL
+               AND lower(followup_type) IN ('demo','visit') AND abs(extract(epoch FROM (next_followup_at - $3::timestamptz))) <= 900`,
+            [lead.tenant_id, lead.id, bookingAt.toISOString()]
+          )).rows.length > 0;
+          if (bookingIsPlausible && !alreadyBooked) {
             await query(
               `UPDATE lead_followups SET is_completed = true, completed_at = NOW() WHERE lead_id = $1 AND tenant_id = $2 AND is_completed = false`,
               [lead.id, lead.tenant_id]
@@ -626,9 +668,9 @@ const handleWebhook = async (req, res) => {
             await query(
               `INSERT INTO lead_followups (tenant_id, lead_id, notes, followup_type, next_followup_at)
                VALUES ($1, $2, $3, 'demo', $4)`,
-              [lead.tenant_id, lead.id, aiResponse.booking.summary || 'Booked automatically by AI Auto-reply.', aiResponse.booking.date_time_iso]
+              [lead.tenant_id, lead.id, aiResponse.booking.summary || 'Booked automatically by AI Auto-reply.', bookingAt.toISOString()]
             );
-            const demoTime = bookingAt.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+            const demoTime = formatWhen(bookingAt, workspace, { dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short' });
             await query(
               `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
                VALUES ($1, $2, 'demo_scheduled', 'Demo Scheduled', $3)`,
@@ -709,6 +751,19 @@ const handleWebhook = async (req, res) => {
     console.error('WhatsApp webhook error:', error);
   }
 };
+
+// Auto-reply guard tripped: pause the AI for this lead, say why on the timeline and tell
+// the assigned rep (or the admins) so a person can take over.
+async function pauseAiForAutoReplies({ lead, text }) {
+  await query('UPDATE leads SET ai_paused = true WHERE id = $1 AND tenant_id = $2', [lead.id, lead.tenant_id]);
+  const why = `The last ${MAX_AUTOMATED_AI_TURNS} messages from ${lead.name} looked automated (an auto-reply or repeated text), so AI replies were paused to avoid a bot-to-bot loop.`;
+  await query(`INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, metadata) VALUES ($1, $2, 'ai_paused', 'AI auto-reply paused', $3, $4)`,
+    [lead.tenant_id, lead.id, why, JSON.stringify({ reason: 'automated_replies', last_message: String(text).slice(0, 500) })]).catch(() => {});
+  const title = `AI paused — automated replies from ${lead.name}`;
+  const recipients = lead.assigned_to ? [lead.assigned_to]
+    : (await query(`SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND is_active = true`, [lead.tenant_id])).rows.map(r => r.id);
+  for (const userId of recipients) await createNotification(lead.tenant_id, userId, title, why, 'ai_handoff', 'lead', lead.id).catch(() => {});
+}
 
 module.exports = {
   getInbox, getConversation, sendMessage, setConversationAi, startChat, sendAttachment, handleWebhook,

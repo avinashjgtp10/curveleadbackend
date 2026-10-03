@@ -10,11 +10,12 @@ const { notifyNewLeadToAdmins } = require('../controllers/notificationController
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { isMetaLeadDeleted } = require('../utils/deletedLeads');
 const { scoreAndSaveLead } = require('./leadScoring');
+const { recordOptIn } = require('./whatsappConsent');
 
 // Meta Lead Ads → CRM leads. One pipeline for the real-time webhook (via the
 // leads:ingest-meta job), the 30-minute safety poll and per-form backfills.
 
-const LEAD_FIELDS = 'id,created_time,field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,form_id,platform,is_organic';
+const LEAD_FIELDS = 'id,created_time,field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,form_id,platform,is_organic,custom_disclaimer_responses';
 // Older leads are imported and assigned but not messaged: a backfill must not blast a
 // backlog of old leads with welcome messages and automation sequences.
 const FRESH_LEAD_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -36,6 +37,9 @@ const tenantForPage = async (pageId) => {
   const { rows } = await query(`SELECT id FROM tenants WHERE settings->>'meta_page_id' = $1 LIMIT 1`, [String(pageId)]);
   return rows[0]?.id || null;
 };
+
+// The lead ticked a consent checkbox on the form (custom disclaimer) → WhatsApp opt-in.
+const formConsent = (lead) => (lead.custom_disclaimer_responses || []).some(r => r.is_checked === true || r.is_checked === '1' || r.is_checked === 1);
 
 const fieldsOf = (lead) => {
   const f = {};
@@ -61,6 +65,7 @@ const processMetaLead = async (ctx, lead, { formName } = {}) => {
       source_detail: lead.ad_name || formName || (lead.ad_id ? `Ad: ${lead.ad_id}` : 'Meta lead form'),
       campaign_id: campaignId || null, meta_lead_id: lead.id, meta_ad_id: lead.ad_id || null,
       meta_adset_id: lead.adset_id || null, meta_form_id: lead.form_id || null, stage: 'new',
+      ...(formConsent(lead) ? { whatsapp_opt_in_at: lead.created_time ? new Date(lead.created_time) : new Date(), whatsapp_opt_in_source: 'meta_lead_form' } : {}),
       ...(lead.created_time ? { created_at: new Date(lead.created_time) } : {}),
       notes: formatFieldDataNotes(lead.field_data, {
         platform: lead.platform, tenantName: ctx.tenantName,
@@ -73,7 +78,11 @@ const processMetaLead = async (ctx, lead, { formName } = {}) => {
     console.warn(`Meta lead ${lead.id} has an invalid phone; skipped`);
     return 'skipped';
   }
-  if (ingestion.duplicate) return 'duplicate';
+  if (ingestion.duplicate) {
+    // Same person submitted again — this time with consent: record it on the existing lead.
+    if (formConsent(lead)) await recordOptIn({ tenantId, leadId: ingestion.lead.id, source: 'meta_lead_form', at: lead.created_time ? new Date(lead.created_time) : new Date() }).catch(() => {});
+    return 'duplicate';
+  }
 
   const inserted = ingestion.lead;
   const fresh = !lead.created_time || Date.now() - new Date(lead.created_time).getTime() < FRESH_LEAD_WINDOW_MS;
@@ -89,7 +98,7 @@ const processMetaLead = async (ctx, lead, { formName } = {}) => {
 const processLeads = async (ctx, leads, opts) => {
   const counts = { created: 0, duplicate: 0, skipped: 0 };
   if (!leads.length) return counts;
-  const { rows } = await query('SELECT meta_lead_id FROM leads WHERE tenant_id = $1 AND meta_lead_id = ANY($2::text[])', [ctx.tenantId, leads.map(l => String(l.id))]);
+  const { rows } = await query('SELECT meta_lead_id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND meta_lead_id = ANY($2::text[])', [ctx.tenantId, leads.map(l => String(l.id))]);
   const known = new Set(rows.map(r => r.meta_lead_id));
   for (const lead of leads) {
     if (known.has(String(lead.id))) { counts.duplicate++; continue; }
@@ -103,7 +112,7 @@ const ingestWebhookLead = async ({ pageId, leadgenId }) => {
   const tenantId = await tenantForPage(pageId);
   if (!tenantId) return { skipped: 'unknown_page' };
   const ctx = await pageContext(tenantId);
-  const { rows } = await query('SELECT id FROM leads WHERE tenant_id = $1 AND meta_lead_id = $2', [tenantId, String(leadgenId)]);
+  const { rows } = await query('SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND meta_lead_id = $2', [tenantId, String(leadgenId)]);
   if (rows[0]) return { result: 'duplicate' };
   const lead = await graphRequest({ path: `/${leadgenId}`, token: ctx.pageToken, gateKey: `page:${ctx.pageId}`, params: { fields: LEAD_FIELDS }, retries: 3 });
   return { result: await processMetaLead(ctx, lead) };
@@ -136,7 +145,7 @@ const listForms = async (tenantId) => {
   }
   const { rows } = await query(
     `SELECT f.id, f.external_id, f.name, f.status, f.leads_count, f.created_time, f.last_backfilled_at, f.last_backfill_count, f.last_backfill_error,
-            (SELECT count(*)::int FROM leads l WHERE l.tenant_id = f.tenant_id AND l.meta_form_id = f.external_id) AS crm_leads
+            (SELECT count(*)::int FROM leads l WHERE l.tenant_id = f.tenant_id AND l.merged_into_id IS NULL AND l.meta_form_id = f.external_id) AS crm_leads
      FROM ad_lead_forms f WHERE f.tenant_id = $1 AND f.page_id = $2 ORDER BY f.created_time DESC NULLS LAST, f.name`,
     [tenantId, ctx.pageId]
   );
@@ -174,6 +183,6 @@ const pollRecentLeads = async (tenantId, hours = 24) => {
 };
 
 module.exports = {
-  LEAD_FIELDS, FRESH_LEAD_WINDOW_MS, pageContext, tenantForPage, processMetaLead, processLeads,
+  LEAD_FIELDS, FRESH_LEAD_WINDOW_MS, formConsent, pageContext, tenantForPage, processMetaLead, processLeads,
   ingestWebhookLead, listForms, backfillForm, pollRecentLeads,
 };

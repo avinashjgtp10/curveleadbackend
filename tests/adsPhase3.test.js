@@ -51,6 +51,7 @@ const world = ({ scopes = ['ads_read', 'ads_management'], cap = null, metaFails 
   db.transaction = (fn) => fn(db);
   const ctrl = load('services/metaAds/controls.js', {
     '../../config/db': db,
+    '../../utils/workspaceLocale': require('../utils/workspaceLocale'),
     './parseInsights': { parseBudgetPaise },
     './client': { getAccountWithToken: async () => ({ token: 'tok', account: { external_id: 'act_1', token_status: 'active', token_row_id: 'tk' } }) },
     '../../utils/metaGraph': { graphRequest: async (opts) => {

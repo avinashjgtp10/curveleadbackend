@@ -3,10 +3,12 @@
 // With no hours configured, the business counts as always open.
 const DAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
-const isWithinBusinessHours = (hours, now = new Date()) => {
+// `timezone` is the workspace timezone; it wins over the one saved inside the hours
+// (older saves always stored Asia/Kolkata).
+const isWithinBusinessHours = (hours, now = new Date(), timezone) => {
   if (!hours?.start || !hours?.end) return true;
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: hours.timezone || 'Asia/Kolkata', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    timeZone: timezone || hours.timezone || 'Asia/Kolkata', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(now);
   const get = (t) => parts.find(p => p.type === t)?.value;
   const day = DAY_INDEX[get('weekday')];

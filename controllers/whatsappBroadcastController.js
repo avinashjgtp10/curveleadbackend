@@ -2,6 +2,7 @@ const path = require('path');
 const { query, transaction } = require('../config/db');
 const { sendTemplate, listMessageTemplates, createMessageTemplate, uploadTemplateMedia } = require('../services/whatsappService');
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
+const { templateCategory, decideConsent } = require('../services/whatsappConsent');
 const { uploadToS3 } = require('../config/s3');
 const { generateTemplateDraft } = require('../services/groqService');
 const imageService = require('../services/imageService');
@@ -234,16 +235,26 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
   const report=(await query('INSERT INTO whatsapp_broadcast_reports(tenant_id,template_name,recipients) VALUES($1,$2,$3) RETURNING id',[tenantId,template_name,lead_ids.length])).rows[0];
   onStart?.(report.id);
   const needsAssignedName = mapping.some(m => m.source === 'field' && m.value === 'assigned_to_name');
-  // Opt-in enforcement is per tenant (Opt-ins tab); the opt-in column is only read when it's on.
-  const requireOptIn = !!(await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]))
-    .rows[0]?.settings?.whatsapp_require_opt_in;
+  // Consent (services/whatsappConsent.js): marketing templates need a recorded opt-in;
+  // utility templates also reach leads who asked to be contacted.
+  const category = templateCategory(approved);
   const leadsResult = await query(
-    `SELECT l.id, l.name, l.phone, l.email, l.location, l.stage, l.assigned_to, l.opted_out${requireOptIn ? ', l.whatsapp_opt_in_at' : ''}${needsAssignedName ? ', u.name as assigned_to_name' : ''}
+    `SELECT l.id, l.name, l.phone, l.email, l.location, l.stage, l.assigned_to, l.opted_out, l.source, l.whatsapp_opt_in_at${needsAssignedName ? ', u.name as assigned_to_name' : ''}
      FROM leads l
      ${needsAssignedName ? 'LEFT JOIN users u ON l.assigned_to = u.id' : ''}
      WHERE l.tenant_id = $1 AND l.id = ANY($2::uuid[]) AND EXISTS(SELECT 1 FROM users sender WHERE sender.id=$3 AND sender.tenant_id=l.tenant_id AND sender.is_active=true AND (sender.role IN ('admin','super_admin') OR l.assigned_to=sender.id))`,
     [tenantId, lead_ids,userId]
   );
+
+  const consentSignals = new Map();
+  if (category !== 'MARKETING') {
+    const r = await query(
+      `SELECT l.id,
+              EXISTS (SELECT 1 FROM whatsapp_messages m WHERE m.tenant_id = l.tenant_id AND m.lead_id = l.id AND m.direction = 'inbound') AS has_inbound,
+              EXISTS (SELECT 1 FROM lead_followups f WHERE f.tenant_id = l.tenant_id AND f.lead_id = l.id AND lower(f.followup_type) IN ('demo','visit')) AS has_booking
+       FROM leads l WHERE l.tenant_id = $1 AND l.id = ANY($2::uuid[])`, [tenantId, lead_ids]);
+    for (const x of r.rows) consentSignals.set(x.id, { hasInbound: x.has_inbound, hasBooking: x.has_booking });
+  }
 
   const mediaRow = (await query(
     'SELECT media_type, media_url FROM whatsapp_template_media WHERE tenant_id = $1 AND template_name = $2 AND language = $3',
@@ -278,8 +289,8 @@ const executeBroadcast = async ({ tenantId, userId, lead_ids, template_name, lan
     }
     try {
       if (!lead.phone) throw new Error('Lead has no phone number.');
-      if (lead.opted_out) throw new Error('Lead has opted out of WhatsApp messages.');
-      if (requireOptIn && !lead.whatsapp_opt_in_at) throw new Error('No WhatsApp opt-in on record for this lead.');
+      const consent = decideConsent({ lead, category, ...consentSignals.get(lead.id) });
+      if (!consent.allowed) throw new Error(consent.reason);
 
       const credKey = lead.assigned_to || 'tenant';
       if (!credCache.has(credKey)) {

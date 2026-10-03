@@ -1,15 +1,20 @@
 const { query } = require('../config/db');
+const { checkTemplateConsent } = require('../services/whatsappConsent');
 const { sendTextMessage, sendTemplate, listMessageTemplates } = require('../services/whatsappService');
 const { sendEmail } = require('../utils/email');
 const { substituteVars } = require('../utils/templateVars');
 const { isSessionOpen } = require('../utils/sessionWindow');
 const { generateFollowUpMessage } = require('../services/groqService');
+const { localeFromSettings, zonedParts, wallTimeToUtc } = require('../utils/workspaceLocale');
 
-// v1 limitation: business hours are compared against server time, not a
-// per-tenant timezone — documented, not solved, until tenants can set a timezone.
+// Business hours are the workspace's local time (settings.timezone).
+const localHHMM = (settings, now) => {
+  const { minutes } = zonedParts(now, localeFromSettings(settings).timezone);
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+};
 const isWithinBusinessHours = (settings, now) => {
   if (!settings.automation_business_hours_enabled) return true;
-  const hhmm = now.toISOString().slice(11, 16);
+  const hhmm = localHHMM(settings, now);
   const start = settings.automation_business_hours_start || '09:00';
   const end = settings.automation_business_hours_end || '20:00';
   return hhmm >= start && hhmm < end;
@@ -18,11 +23,15 @@ const isWithinBusinessHours = (settings, now) => {
 const nextBusinessWindowStart = (settings, now) => {
   const start = settings.automation_business_hours_start || '09:00';
   const end = settings.automation_business_hours_end || '20:00';
-  const hhmm = now.toISOString().slice(11, 16);
-  const [h, m] = start.split(':').map(Number);
-  const next = new Date(now);
-  next.setUTCHours(h, m, 0, 0);
-  if (hhmm >= end) next.setUTCDate(next.getUTCDate() + 1);
+  const { timezone } = localeFromSettings(settings);
+  const hhmm = localHHMM(settings, now);
+  const today = zonedParts(now, timezone).date;
+  const next = wallTimeToUtc(`${today}T${start}`, timezone);
+  // After today's window has closed, the next start is tomorrow (local calendar).
+  if (hhmm >= end) {
+    const tomorrow = zonedParts(new Date(next.getTime() + 26 * 60 * 60 * 1000), timezone).date;
+    return wallTimeToUtc(`${tomorrow}T${start}`, timezone);
+  }
   return next;
 };
 
@@ -166,6 +175,16 @@ const runAutomationSequences = async () => {
             const headerMedia = media.rows[0]
               ? { type: media.rows[0].media_type.toLowerCase(), link: media.rows[0].media_url }
               : null;
+            // Consent: marketing templates need an opt-in; an unknown template counts as marketing.
+            const consent = await checkTemplateConsent({ tenantId: row.tenant_id, leadId: row.lead_id, template: matchedTemplate });
+            if (!consent.allowed) {
+              await query(
+                `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+                 VALUES ($1,$2,'automation_skipped','Automated template not sent',$3)`,
+                [row.tenant_id, row.lead_id, consent.reason]
+              ).catch(() => {});
+              continue;
+            }
             const sendResult = await sendTemplate(row.phone, step.approved_template_name, language, parameters, credentials, headerMedia);
             // The actual rendered text (body with the lead's name filled in), same as a
             // manual broadcast send stores — not the bare "[Template: name]" placeholder,
@@ -260,4 +279,4 @@ const runAutomationSequences = async () => {
   }
 };
 
-module.exports = { runAutomationSequences };
+module.exports = { runAutomationSequences, isWithinBusinessHours, nextBusinessWindowStart };

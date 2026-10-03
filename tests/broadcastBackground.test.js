@@ -22,18 +22,19 @@ function setup() {
       if (sql.includes('SELECT settings')) return { rows: [{ settings: { whatsapp_business_account_id: 'w', whatsapp_access_token: 't', whatsapp_messaging_limit: 1000 } }] };
       if (sql.includes('SELECT id FROM leads WHERE tenant_id=$1 AND id=ANY')) return { rows: p[1].map(id => ({ id })) };
       if (sql.includes('INSERT INTO whatsapp_broadcast_reports')) return { rows: [{ id: 'report-1' }] };
-      if (sql.includes('SELECT l.id, l.name')) return { rows: p[1].map(id => ({ id, name: 'Lead', phone: id.slice(-4) })) };
+      if (sql.includes('SELECT l.id, l.name')) return { rows: p[1].map(id => ({ id, name: 'Lead', phone: id.slice(-4), source: 'meta_ads' })) };
       if (sql.includes('count(*)::int n')) return { rows: [{ n: 0, known: false }] };
       return { rows: [] };
     },
   };
   db.transaction = fn => fn(db);
   const ctrl = load('controllers/whatsappBroadcastController.js', {
+    '../services/whatsappConsent': require('../services/whatsappConsent'),
     '../config/db': db,
     '../utils/messagingLimit': { messagingLimit: async () => 1000 },
     '../utils/whatsappCredentials': { resolveWhatsAppCredentials: async () => ({}) },
     '../services/whatsappService': {
-      listMessageTemplates: async () => ({ templates: [{ name: 'promo', language: 'en_US', status: 'APPROVED', components: [{ type: 'BODY', text: 'Hi {{1}}' }] }] }),
+      listMessageTemplates: async () => ({ templates: [{ name: 'promo', language: 'en_US', status: 'APPROVED', category: 'UTILITY', components: [{ type: 'BODY', text: 'Hi {{1}}' }] }] }),
       sendTemplate: async () => { await gate; return { success: true, wa_message_id: 'wa' }; },
     },
   });
@@ -95,7 +96,7 @@ test('a lead update failing after a successful send still counts the message as 
     query: async (sql, p) => {
       if (sql.includes('SELECT settings')) return { rows: [{ settings: { whatsapp_business_account_id: 'w', whatsapp_access_token: 't', whatsapp_messaging_limit: 1000 } }] };
       if (sql.includes('INSERT INTO whatsapp_broadcast_reports')) return { rows: [{ id: 'r' }] };
-      if (sql.includes('SELECT l.id, l.name')) return { rows: [{ id: 'a', name: 'A', phone: '1' }] };
+      if (sql.includes('SELECT l.id, l.name')) return { rows: [{ id: 'a', name: 'A', phone: '1', source: 'meta_ads' }] };
       if (sql.includes('count(*)::int n')) return { rows: [{ n: 0, known: false }] };
       if (sql.startsWith('UPDATE leads SET last_contacted_at')) throw Object.assign(new Error('violates check constraint "leads_source_canonical"'), { code: '23514' });
       return { rows: [] };
@@ -103,11 +104,12 @@ test('a lead update failing after a successful send still counts the message as 
   };
   db.transaction = fn => fn(db);
   const ctrl = load('controllers/whatsappBroadcastController.js', {
+    '../services/whatsappConsent': require('../services/whatsappConsent'),
     '../config/db': db,
     '../utils/messagingLimit': { messagingLimit: async () => 1000 },
     '../utils/whatsappCredentials': { resolveWhatsAppCredentials: async () => ({}) },
     '../services/whatsappService': {
-      listMessageTemplates: async () => ({ templates: [{ name: 'promo', language: 'en_US', status: 'APPROVED', components: [{ type: 'BODY', text: 'Hi' }] }] }),
+      listMessageTemplates: async () => ({ templates: [{ name: 'promo', language: 'en_US', status: 'APPROVED', category: 'UTILITY', components: [{ type: 'BODY', text: 'Hi' }] }] }),
       sendTemplate: async () => ({ success: true, wa_message_id: 'wa' }),
     },
   });

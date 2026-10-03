@@ -53,4 +53,11 @@ const changeLeadStage = async ({ tenantId, leadId, newStageName, lostReason = nu
   }).catch(() => {});
 };
 
-module.exports = { changeLeadStage };
+// The workspace's won stage (first active stage flagged is_won, by pipeline position) —
+// workspaces name it "Won", "Converted", "Enrolled"… Falls back to "Won".
+const wonStageName = async (tenantId) => (await query(
+  `SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won AND COALESCE(is_active, true)
+   ORDER BY COALESCE(pos, position) NULLS LAST, name LIMIT 1`, [tenantId]
+)).rows[0]?.name || 'Won';
+
+module.exports = { wonStageName, changeLeadStage };

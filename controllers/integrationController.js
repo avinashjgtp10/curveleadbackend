@@ -469,7 +469,7 @@ const getCapiStats = async (req, res) => {
       `SELECT
          COUNT(*) FILTER (WHERE meta_lead_id IS NOT NULL) AS total_meta_leads,
          COUNT(*) FILTER (WHERE meta_lead_id IS NOT NULL AND LOWER(stage) != LOWER($2)) AS leads_with_stage
-       FROM leads WHERE tenant_id = $1`,
+       FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL`,
       [req.tenantId, defaultStageName]
     );
 

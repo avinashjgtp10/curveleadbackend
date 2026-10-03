@@ -18,6 +18,6 @@ async function boundaries(tenantId){return (await query(`SELECT date_trunc('day'
 async function counts(tenantId,staffId){
  const b=await boundaries(tenantId),p=predicates('$3','$4','$5');
  const r=await query(`SELECT ${Object.entries(p).map(([key,sql])=>`count(*) FILTER(WHERE ${sql})::int AS ${key}`).join(',')}
- FROM leads l WHERE l.tenant_id=$1 AND ($2::uuid IS NULL OR l.assigned_to=$2)`,[tenantId,staffId,b.today,b.month,b.week]);return r.rows[0];
+ FROM leads l WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND ($2::uuid IS NULL OR l.assigned_to=$2)`,[tenantId,staffId,b.today,b.month,b.week]);return r.rows[0];
 }
 module.exports={predicates,boundaries,counts};

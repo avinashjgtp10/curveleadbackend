@@ -24,7 +24,7 @@ const scoreLeadById = async (req, res) => {
 const scoreBulkLeads = async (req, res) => {
   try {
     const leads = await query(
-      `SELECT * FROM leads WHERE tenant_id = $1 AND (score_updated_at IS NULL OR score_updated_at < NOW() - INTERVAL '7 days')
+      `SELECT * FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND (score_updated_at IS NULL OR score_updated_at < NOW() - INTERVAL '7 days')
        LIMIT 50`,
       [req.tenantId]
     );
