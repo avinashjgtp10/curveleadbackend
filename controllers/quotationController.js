@@ -362,7 +362,8 @@ const accept = async (req, res) => {
 
     const leadId = result.rows[0].lead_id;
     if (leadId) {
-      await query(`UPDATE leads SET stage='won', updated_at=NOW() WHERE id=$1 AND tenant_id=$2`, [leadId, req.tenantId]);
+      const { changeLeadStage, wonStageName } = require('../utils/leadStage');
+      await changeLeadStage({ tenantId: req.tenantId, leadId, newStageName: await wonStageName(req.tenantId) });
       await query(
         `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
          VALUES ($1,$2,'quotation','Quotation Accepted','Lead moved to Won stage',$3)`,

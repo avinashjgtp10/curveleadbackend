@@ -199,12 +199,12 @@ const acceptQuotation = async (req, res) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found.' });
 
-    // Move lead to "Won" stage
-    await query(
-      `UPDATE leads SET stage = 'Won', won_at = NOW(), deal_value = $1
-       WHERE id = $2 AND tenant_id = $3`,
-      [result.rows[0].total, result.rows[0].lead_id, req.tenantId]
-    );
+    // Move the lead to the workspace's won stage (history, won_at and CAPI included).
+    if (result.rows[0].lead_id) {
+      const { changeLeadStage, wonStageName } = require('../utils/leadStage');
+      await changeLeadStage({ tenantId: req.tenantId, leadId: result.rows[0].lead_id, newStageName: await wonStageName(req.tenantId) });
+      await query('UPDATE leads SET deal_value = $1 WHERE id = $2 AND tenant_id = $3', [result.rows[0].total, result.rows[0].lead_id, req.tenantId]);
+    }
 
     res.json({ quotation: result.rows[0] });
   } catch (error) {

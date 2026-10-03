@@ -30,56 +30,37 @@ const getCampaigns = async (req, res) => {
     );
 
     const campaigns = result.rows;
-
-    const scope = await metricScope(req);
-    const metrics = await getMetrics(scope);
-    const breakdown = await getBreakdown(scope, 'campaign_id');
-    const byId = new Map(breakdown.map(m => [m.campaign_id, m]));
-    const lifetime = await getBreakdown({ ...scope, from: new Date(0), to: new Date() }, 'campaign_id');
-    const lifetimeById = new Map(lifetime.map(m => [m.campaign_id,m]));
-    const periodSpend = await periodMetaSpend(req.tenantId, scope, campaigns.map(c => c.id));
-    const periodCampaigns = campaigns.map(c => {
-      const m = byId.get(c.id) || { total_leads: 0, won: 0, lost: 0, hot_leads: 0, revenue: 0, conversion_rate: 0 };
-      const spend = Number(c.actual_spend) || 0;
-      const all = lifetimeById.get(c.id) || { total_leads: 0, won: 0, revenue: 0 };
-      // Meta campaigns synced by Ads Manager: CPL = spend in the period ÷ CRM leads in the
-      // period (same formula as Ads Manager). Others: lifetime spend ÷ lifetime leads.
-      const ps = periodSpend.get(c.id);
-      const cpl = ps !== undefined
-        ? (m.total_leads ? (ps / m.total_leads).toFixed(2) : 0)
-        : (all.total_leads ? (spend / all.total_leads).toFixed(2) : 0);
-      return { ...c, ...m, id: c.id, won_leads: m.won, lost_leads: m.lost,
-        cpl, cpl_basis: ps !== undefined ? 'period' : 'lifetime', period_spend: ps ?? null,
-        cost_per_won: all.won ? (spend / all.won).toFixed(2) : 0,
-        disqualified_rate: m.total_leads ? (m.lost / m.total_leads * 100).toFixed(1) : 0,
-        hot_rate: m.total_leads ? (m.hot_leads / m.total_leads * 100).toFixed(1) : 0,
-        roi: spend ? ((all.revenue-spend)/spend*100).toFixed(1) : 0 };
-
-    });
     const counts = await query(`SELECT count(*)::int AS total FROM campaigns c ${where}`, params);
-    res.json({ campaigns: rankCampaigns(periodCampaigns, breakdown.map(m => ({ ...m, id: m.campaign_id, disqualified_rate: m.total_leads ? m.lost/m.total_leads*100 : 0, hot_rate: m.total_leads ? m.hot_leads/m.total_leads*100 : 0 }))), metrics, total: counts.rows[0].total });
+    const { totals, rows } = await campaignRows(req, campaigns);
+    res.json({ campaigns: rows, metrics: totals, total: counts.rows[0].total });
   } catch (error) {
     console.error('Get campaigns error:', error);
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
 
-// Ads Manager spend per CRM campaign within the metrics period (workspace timezone days).
-// Empty when the workspace doesn't use Ads Manager (or before its migration).
-const periodMetaSpend = async (tenantId, scope, campaignIds) => {
-  if (!campaignIds.length) return new Map();
-  const tz = (await query("SELECT settings->>'timezone' AS tz FROM tenants WHERE id = $1", [tenantId])).rows[0]?.tz || 'Asia/Kolkata';
-  const day = d => new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(d);
-  const r = await query(
-    `SELECT ac.campaign_id, COALESCE(sum(i.spend), 0)::float AS spend
-     FROM ad_campaigns ac
-     LEFT JOIN ad_insights_daily i ON i.tenant_id = ac.tenant_id AND i.entity_type = 'campaign' AND i.entity_id = ac.external_id
-       AND i.date BETWEEN $3::date AND $4::date
-     WHERE ac.tenant_id = $1 AND ac.campaign_id = ANY($2::uuid[])
-     GROUP BY ac.campaign_id`,
-    [tenantId, campaignIds, day(scope.from), day(new Date(scope.to.getTime() - 1))]
-  ).catch(e => { if (e.code === '42P01') return { rows: [] }; throw e; });
-  return new Map(r.rows.map(x => [x.campaign_id, x.spend]));
+// Campaign rows for the selected range from the shared metrics (services/metrics.js), plus
+// the verdicts. KPIs (`totals`) count campaign-attributed leads only; the verdict baseline is
+// the same weighted rate the KPIs show. lifetime_spend = the campaign's running total.
+const EMPTY = { crm_leads: 0, total_leads: 0, won: 0, converted: 0, qualified: 0, lost: 0, hot_leads: 0, unassigned: 0, revenue: 0,
+  conversion_rate: 0, spend: null, currency: null, spend_basis: 'not_measured', platform_leads: null, cpl: null, cost_per_customer: null, platform_cpl: null };
+const rates = (m) => ({
+  disqualified_rate: m.crm_leads ? Number((m.lost / m.crm_leads * 100).toFixed(1)) : 0,
+  hot_rate: m.crm_leads ? Number((m.hot_leads / m.crm_leads * 100).toFixed(1)) : 0,
+});
+const campaignRows = async (req, campaigns) => {
+  const scope = await metricScope(req);
+  const [totals, breakdown] = await Promise.all([getMetrics(scope, { attributedOnly: true }), getBreakdown(scope, 'campaign_id')]);
+  const byId = new Map(breakdown.map(m => [m.campaign_id, m]));
+  const rows = campaigns.map(c => {
+    const m = { ...EMPTY, ...(byId.get(c.id) || {}) };
+    return { ...c, ...m, ...rates(m), id: c.id, lifetime_spend: Number(c.actual_spend) || 0, won_leads: m.won, lost_leads: m.lost,
+      roi: m.spend ? Number((((m.revenue - m.spend) / m.spend) * 100).toFixed(1)) : null };
+  });
+  const r = rates(totals);
+  const avg = { conversion: totals.conversion_rate, disqualified: r.disqualified_rate, hot: r.hot_rate };
+  const baseline = breakdown.filter(m => m.campaign_id).map(m => ({ ...m, ...rates(m), id: m.campaign_id }));
+  return { totals, rows: rankCampaigns(rows, baseline, { avg }), scope };
 };
 
 // GET /api/campaigns/:id - Campaign details with lead breakdown
@@ -93,22 +74,27 @@ const getCampaign = async (req, res) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Campaign not found.' });
 
-    // Get leads in this campaign grouped by stage
+    // Everything below uses the same date range (and definitions) as the Campaigns tab;
+    // period=lifetime shows the whole campaign.
+    const scope = await metricScope(req);
+    const range = [scope.from, scope.to];
+    const isStaff = req.user.role === 'staff';
+
     const stageBreakdown = await query(
       `SELECT stage, COUNT(*) as count, COALESCE(SUM(deal_value), 0) as total_value
-       FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL GROUP BY stage`,
-      [req.params.id, req.tenantId]
+       FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL AND created_at >= $3 AND created_at < $4
+       ${isStaff ? 'AND assigned_to = $5' : ''} GROUP BY stage`,
+      [req.params.id, req.tenantId, ...range, ...(isStaff ? [req.user.id] : [])]
     );
 
-    // Leads list — filterable by stage/score/search, unlike the KPIs above
-    // (which always reflect the whole campaign regardless of the list filter)
+    // Leads list — filterable by stage/score/search within the range.
     const { stage, lead_score, search } = req.query;
-    let leadsWhere = 'WHERE campaign_id = $1 AND tenant_id = $2';
-    const leadsParams = [req.params.id, req.tenantId];
-    let li = 3;
+    let leadsWhere = 'WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL AND created_at >= $3 AND created_at < $4';
+    const leadsParams = [req.params.id, req.tenantId, ...range];
+    let li = 5;
     // Staff can only see (and open) their own assigned leads — same restriction
     // getLead enforces, so nothing shows up here that 404s when clicked.
-    if (req.user.role === 'staff') { leadsWhere += ` AND assigned_to = $${li++}`; leadsParams.push(req.user.id); }
+    if (isStaff) { leadsWhere += ` AND assigned_to = $${li++}`; leadsParams.push(req.user.id); }
     if (stage) { leadsWhere += ` AND LOWER(stage) = LOWER($${li++})`; leadsParams.push(stage); }
     if (lead_score) { leadsWhere += ` AND lead_score = $${li++}`; leadsParams.push(lead_score); }
     if (search) { leadsWhere += ` AND (name ILIKE $${li} OR phone ILIKE $${li})`; leadsParams.push(`%${search}%`); li++; }
@@ -120,60 +106,10 @@ const getCampaign = async (req, res) => {
       leadsParams
     );
 
-    // Won/lost-ness is tenant-configurable (lead_stages.is_won/is_lost), not the literal string
-    const [wonStats, lostStats, scoreStats] = await Promise.all([
-      query(
-        `SELECT COUNT(*) as won_leads, COALESCE(SUM(deal_value), 0) as revenue
-         FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL
-           AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_won = true)`,
-        [req.params.id, req.tenantId]
-      ),
-      query(
-        `SELECT COUNT(*) as lost_leads
-         FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL
-           AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_lost = true)`,
-        [req.params.id, req.tenantId]
-      ),
-      query(`SELECT COUNT(*) as hot_leads FROM leads WHERE campaign_id = $1 AND tenant_id = $2 AND merged_into_id IS NULL AND lead_score = 'hot'`,
-        [req.params.id, req.tenantId]),
-    ]);
-
-    const totalLeads = stageBreakdown.rows.reduce((sum, s) => sum + parseInt(s.count), 0);
-    const wonLeads = parseInt(wonStats.rows[0].won_leads) || 0;
-    const lostLeads = parseInt(lostStats.rows[0].lost_leads) || 0;
-    const hotLeads = parseInt(scoreStats.rows[0].hot_leads) || 0;
-    const revenue = parseFloat(wonStats.rows[0].revenue) || 0;
-    const spend = parseFloat(result.rows[0].actual_spend) || 0;
-
-    const campaignMetrics = {
-      ...result.rows[0],
-      total_leads: totalLeads,
-      won_leads: wonLeads,
-      lost_leads: lostLeads,
-      hot_leads: hotLeads,
-      revenue,
-      cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0,
-      cost_per_won: wonLeads > 0 ? (spend / wonLeads).toFixed(2) : 0,
-      conversion_rate: totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : 0,
-      disqualified_rate: totalLeads > 0 ? ((lostLeads / totalLeads) * 100).toFixed(1) : 0,
-      hot_rate: totalLeads > 0 ? ((hotLeads / totalLeads) * 100).toFixed(1) : 0,
-      roi: spend > 0 ? (((revenue - spend) / spend) * 100).toFixed(1) : 0,
-    };
-
-    // Baseline for the verdict: every campaign's lifetime numbers, shaped like the
-    // campaign list's baseline (getBaselineMetrics was removed in the Phase 2 refactor).
-    const lifetime = await getBreakdown(
-      { workspaceId: req.tenantId, from: new Date(0), to: new Date(), staffId: req.user.role === 'staff' ? req.user.id : null },
-      'campaign_id'
-    );
-    const baseline = lifetime.filter(m => m.campaign_id).map(m => ({
-      ...m, id: m.campaign_id,
-      disqualified_rate: m.total_leads ? m.lost / m.total_leads * 100 : 0,
-      hot_rate: m.total_leads ? m.hot_leads / m.total_leads * 100 : 0,
-    }));
-
+    const { rows } = await campaignRows(req, [result.rows[0]]);
     res.json({
-      campaign: rankCampaigns([campaignMetrics], baseline)[0],
+      campaign: rows[0],
+      range: { period: req.query.period || 'this_month', from: scope.from.toISOString(), to: scope.to.toISOString() },
       stageBreakdown: stageBreakdown.rows,
       recentLeads: recentLeads.rows,
     });
@@ -321,8 +257,8 @@ const getCampaignStats = async (req, res) => {
     const leadStats = await query(
       `SELECT 
         COUNT(*) as leads_from_campaigns,
-        COUNT(*) FILTER (WHERE stage = 'won') as won_from_campaigns,
-        COALESCE(SUM(deal_value) FILTER (WHERE stage = 'won'), 0) as revenue_from_campaigns
+        COUNT(*) FILTER (WHERE lower(trim(stage)) IN (SELECT lower(trim(s.name)) FROM lead_stages s WHERE s.tenant_id = leads.tenant_id AND s.is_won)) as won_from_campaigns,
+        COALESCE(SUM(deal_value) FILTER (WHERE lower(trim(stage)) IN (SELECT lower(trim(s.name)) FROM lead_stages s WHERE s.tenant_id = leads.tenant_id AND s.is_won)), 0) as revenue_from_campaigns
        FROM leads WHERE campaign_id IS NOT NULL AND tenant_id = $1 AND merged_into_id IS NULL`,
       [req.tenantId]
     );

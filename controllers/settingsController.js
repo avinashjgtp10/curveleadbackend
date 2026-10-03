@@ -1,5 +1,6 @@
 const path = require('path');
 const { query } = require('../config/db');
+const { stageFlagError, checkStageUpdate } = require('../utils/stageRules');
 const { uploadToS3 } = require('../config/s3');
 
 // Surfaces a few settings-JSONB fields at the top level for frontend convenience.
@@ -110,6 +111,9 @@ const createStage = async (req, res) => {
   try {
     const { name, color, is_won, is_lost, meta_event_name } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'Stage name is required.' });
+    const existing = await query('SELECT count(*)::int AS n FROM lead_stages WHERE tenant_id = $1', [req.tenantId]);
+    const flagError = stageFlagError({ isWon: !!is_won, isLost: !!is_lost, isFirst: existing.rows[0].n === 0 });
+    if (flagError) return res.status(422).json({ error: flagError });
 
     const maxPos = await query(
       'SELECT GREATEST(COALESCE(MAX(pos), 0), COALESCE(MAX(position), 0)) + 1 as next_pos FROM lead_stages WHERE tenant_id = $1',
@@ -130,6 +134,8 @@ const createStage = async (req, res) => {
 const updateStage = async (req, res) => {
   try {
     const { name, color, is_active, is_won, is_lost, meta_event_name } = req.body;
+    const flagError = await checkStageUpdate({ tenantId: req.tenantId, stageId: req.params.id, isWon: is_won, isLost: is_lost });
+    if (flagError) return res.status(422).json({ error: flagError });
     const result = await query(
       `UPDATE lead_stages
        SET name = COALESCE($1, name), color = COALESCE($2, color),
