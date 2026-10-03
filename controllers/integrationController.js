@@ -370,6 +370,15 @@ const getAdAccounts = async (req, res) => {
 // ── POST /api/integrations/facebook/sync-ad-insights ───────────────────────
 const syncAdInsightsNow = async (req, res) => {
   try {
+    // Workspaces connected in Ads Manager sync through the Ads module's queue.
+    const adAccounts = await query(
+      "SELECT id FROM ad_accounts WHERE tenant_id = $1 AND provider = 'meta' AND is_active", [req.tenantId]
+    ).catch(e => { if (e.code === '42P01') return { rows: [] }; throw e; });
+    if (adAccounts.rows.length) {
+      const queues = require('../jobs/queues');
+      for (const a of adAccounts.rows) await queues.enqueue('ads:sync-account', { tenantId: req.tenantId, adAccountId: a.id }, { jobId: `sync-${a.id}` });
+      return res.json({ message: 'Sync started — new numbers appear in a few minutes.', queued: adAccounts.rows.length });
+    }
     const result = await syncTenantAdInsights(req.tenantId);
     if (result.reason === 'not_configured') {
       return res.status(400).json({ error: 'Connect an ad account first.' });

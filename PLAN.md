@@ -1,6 +1,37 @@
 # Ads + Social module — implementation plan
 
-Status: **Phase 0 + 1 built** (see `docs/ads-phase-1.md`), awaiting review. Decisions taken: D1 BullMQ with in-process fallback when `REDIS_URL` is unset; D2 many accounts + one primary; D3 versioned keys; D4 paise/rupees as described. D5–D7 apply to later phases.
+Status: **Phase 0 + 1 built** (see `docs/ads-phase-1.md`); migration applied to production 2026-10-03. **Phase 1b built** (see `docs/ads-phase-1b.md`). **Phase 2 built** (see `docs/ads-phase-2.md`; D5 = score on ingest, rule-based, no Groq). **Phase 3 built** (see `docs/ads-phase-3.md`). **Phase 4 built** (see `docs/ads-phase-4.md`). Decisions taken: D1 BullMQ with in-process fallback when `REDIS_URL` is unset; D2 many accounts + one primary; D3 versioned keys; D4 paise/rupees as described; **D8 Campaigns vs Ads Manager (below) — Phase 1b runs before Phase 2.** D5–D7 apply to later phases.
+
+## D8 — Overlap with the existing Campaigns section (decided 2026-10-03)
+
+**What overlaps today (Meta ads only):**
+
+| | Campaigns (Engage) | Ads Manager (Grow, Phase 1) |
+|---|---|---|
+| Connect Meta ads | Integrations → "Connect Ad Account" (plaintext `settings.meta_ads_access_token`) | Ads Manager → Connect (encrypted `ad_oauth_tokens`) |
+| Sync | `jobs/metaAdInsightsSync.js` every 6 h + "Sync ad insights" buttons (Campaigns, Integrations) | `ads:sync-insights` every 4 h + "Sync now" |
+| Data | `campaigns.actual_spend/impressions/clicks` (lifetime) + `meta_ads` (ad lifetime totals) | `ad_campaigns/adsets/ads` + `ad_insights_daily` |
+| Ad drill-down | Campaign detail → "Ads in this campaign" (lifetime) | Campaign → ad set → ad with creatives (by date range) |
+| Lead quality | Verdicts, won/lost, **lifetime** spend ÷ lifetime CRM leads, ROI | Meta CPL vs cost per qualified/converted, **period** spend |
+
+Result: two Meta connections, two syncs, two copies of the same campaigns, and CPL numbers that disagree between the pages.
+
+**What only Campaigns does:** every lead source (Google, referral, walk-in, organic, manual), manual budget/spend, the *Priority campaign* flag (skips automation), `leads.campaign_id` attribution used by assignment/automation/reports, and the "Where to focus" verdicts.
+
+**Decision:** one **Ads Manager** page (`/ads`, sidebar → Grow) with two tabs; `/campaigns` redirects to `/ads?tab=campaigns` (done 2026-10-03):
+- **Campaigns tab = the CRM's campaign list** (all sources, lead outcomes, priority, verdicts). For Meta campaigns it *shows* Meta numbers but never edits them.
+- **Meta Ads tab = the only place for Meta ad data and controls** (connection, sync, ad sets/ads/creatives, daily insights, and from Phase 3 pause/resume/budgets).
+- Linked through `ad_campaigns.campaign_id → campaigns.id`.
+
+### Phase 1b — consolidate (before Phase 2)
+
+1. **One connection.** Integrations' "Connect Ad Account" card becomes a link to Ads Manager; `scripts/migrateAdTokens.js` moves existing tokens; remove the Integrations ad-account picker and its "Sync ad insights" button.
+2. **One sync.** The Phase 1 sync also maintains the CRM side: creates/links the `campaigns` row (`findOrCreateMetaCampaign`), and writes status, budgets, lifetime spend (one campaign-level `date_preset=maximum` insights call), impressions and clicks. Then retire `jobs/metaAdInsightsSync.js` and the `meta_ads` table; `resolveCampaignFromAdId` (Click-to-WhatsApp) reads `ad_ads`; delete `settings.meta_ads_access_token`.
+3. **Campaigns page, Meta campaigns:** "Sync ad insights" triggers the Ads Manager sync; in the edit modal, status/budget/dates are read-only ("Managed in Meta — change it in Ads Manager"), since the sync overwrites them anyway; "Open in Meta Ads" link on card + detail (`/ads?tab=meta`); the detail page's "Ads in this campaign" table reads `ad_ads` + `ad_insights_daily` for the page's period.
+4. **One CPL definition** on both pages: spend in the selected period (`ad_insights_daily`) ÷ CRM leads created in that period. Manual (non-Meta) campaigns keep their manually entered spend.
+5. **Meta Ads → CRM:** each row in "Lead quality by campaign" links to its campaign detail page.
+
+**Effect on later phases:** Phase 2 (Lead Ads) extends the existing `/api/webhook/meta` and sets `leads.campaign_id` through `ad_campaigns.campaign_id` — unchanged. Phase 3 controls live only in Ads Manager (point 3 prevents conflicting edits from Campaigns). Phase 4 hardens the existing CAPI queue — unchanged. Phase 5 is new. Phase 6: Facebook/Instagram posting is new; for Google Business Profile, the existing GMB page only handles reviews, so posting is new but must reuse its OAuth connection (no second Google connect).
 
 ## 1. What exists today (from the repo)
 
@@ -161,7 +192,7 @@ Existing and reused: `META_APP_ID`, `META_APP_SECRET`, `META_WEBHOOK_VERIFY_TOKE
 
 ## 14. Order and review gates
 
-0 + 1 together → review → 2 → review → 3 → review → 4 → review → 5 → review → 6 → review → 7. After each phase: summary of changes, migration file, new env vars, Meta permissions used, and a `docs/ads-phase-N.md` rollout note. Migrations are never run on production by me; I'll give the exact command.
+0 + 1 together → review → 1b (consolidate with Campaigns, D8) → review → 2 → review → 3 → review → 4 → review → 5 → review → 6 → review → 7. After each phase: summary of changes, migration file, new env vars, Meta permissions used, and a `docs/ads-phase-N.md` rollout note. Migrations are never run on production by me; I'll give the exact command.
 
 ## 15. Risks
 

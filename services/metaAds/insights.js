@@ -81,4 +81,22 @@ const saveDailyInsights = async ({ tenantId, adAccountId, externalAccountId, sin
   return parsed.length;
 };
 
-module.exports = { fetchDailyAdInsights, saveDailyInsights, FIELDS };
+// Lifetime (date_preset=maximum) spend/impressions/clicks per campaign, written to the CRM
+// `campaigns` rows. The Campaigns tab shows these running totals (and budget progress);
+// period figures come from ad_insights_daily.
+const syncLifetimeCampaignTotals = async ({ tenantId, externalAccountId, token }) => {
+  const rows = await graphPaged({
+    path: `/${externalAccountId}/insights`, token, gateKey: externalAccountId,
+    params: { level: 'campaign', date_preset: 'maximum', fields: 'campaign_id,spend,impressions,clicks', limit: 200 },
+  });
+  for (const r of rows) {
+    await query(
+      `UPDATE campaigns SET actual_spend = $3, impressions = $4, clicks = $5, updated_at = now()
+       WHERE tenant_id = $1 AND meta_campaign_id = $2`,
+      [tenantId, r.campaign_id, Number(r.spend) || 0, parseInt(r.impressions, 10) || 0, parseInt(r.clicks, 10) || 0]
+    );
+  }
+  return rows.length;
+};
+
+module.exports = { fetchDailyAdInsights, saveDailyInsights, syncLifetimeCampaignTotals, FIELDS };

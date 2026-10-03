@@ -1,7 +1,7 @@
 const { query } = require('../../config/db');
 const { getAccountWithToken, markToken } = require('./client');
 const { fetchHierarchy, saveHierarchy } = require('./hierarchy');
-const { fetchDailyAdInsights, saveDailyInsights } = require('./insights');
+const { fetchDailyAdInsights, saveDailyInsights, syncLifetimeCampaignTotals } = require('./insights');
 const { MetaGraphError } = require('../../utils/metaGraph');
 
 const BACKFILL_DAYS = 90;
@@ -38,6 +38,7 @@ const syncAdAccount = async ({ tenantId, adAccountId }) => {
     const range = syncRange(account);
     const rows = await fetchDailyAdInsights(account.external_id, token, range);
     const saved = await saveDailyInsights({ tenantId, adAccountId, externalAccountId: account.external_id, ...range, rows });
+    await syncLifetimeCampaignTotals({ tenantId, externalAccountId: account.external_id, token });
     await query(
       `UPDATE ad_accounts SET last_synced_at = now(), insights_synced_through = $3, sync_error = NULL, updated_at = now()
        WHERE tenant_id = $1 AND id = $2`,

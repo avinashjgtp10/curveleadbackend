@@ -16,9 +16,8 @@ test('sync status is tenant scoped, read-only and returns no settings/credential
 test('sync records successful completion only; failures preserve the last-good timestamp',async()=>{
  let fail=false,writes=0;
  const sync=load('utils/metaLeadSync.js',{'../config/db':{query:async(sql,params)=>{
-  if(sql.startsWith('SELECT name'))return{rows:[{settings:{meta_page_id:'page',meta_page_access_token:'test'}}]};
   assert.match(sql,/^UPDATE tenants/);assert.equal(params[0],'tenant-a');assert.match(params[1],/Z$/);writes++;return{rows:[]};
- }},fetch:async()=>({json:async()=>fail?{error:{message:'Meta unavailable'}}:{data:[]}})});
+ }},'../services/metaLeads':{pollRecentLeads:async(id,hours)=>{assert.equal(id,'tenant-a');assert.equal(hours,24);if(fail)throw new Error('Meta unavailable');return{created:0,duplicate:0,skipped:0};}}});
  const result=await sync.syncFacebookLeadsForTenant('tenant-a');assert.match(result.last_synced_at,/Z$/);assert.equal(writes,1);
  fail=true;await assert.rejects(sync.syncFacebookLeadsForTenant('tenant-a'),/Meta unavailable/);assert.equal(writes,1);
 });

@@ -37,13 +37,38 @@ const findOrCreateMetaCampaign = async ({ tenantId, campaignId, campaignName, ad
 const resolveCampaignFromAdId = async ({ tenantId, adId }) => {
   if (!adId) return null;
 
+  // Already synced by Ads Manager: no Graph call needed.
+  const local = await query(
+    `SELECT ac.external_id AS campaign_external_id, ac.name AS campaign_name, s.external_id AS adset_id, s.name AS adset_name, ad.name AS ad_name
+     FROM ad_ads ad JOIN ad_adsets s ON s.id = ad.ad_adset_id JOIN ad_campaigns ac ON ac.id = s.ad_campaign_id
+     WHERE ad.tenant_id = $1 AND ad.external_id = $2`, [tenantId, String(adId)]
+  ).catch(() => ({ rows: [] }));
+  if (local.rows[0]) {
+    const r = local.rows[0];
+    const campaignId = await findOrCreateMetaCampaign({ tenantId, campaignId: r.campaign_external_id, campaignName: r.campaign_name, adsetId: r.adset_id });
+    return { campaignId, adName: r.ad_name || null, adsetName: r.adset_name || null };
+  }
+
+  // Not synced yet: ask Meta with the Ads Manager token, else the legacy Integrations token.
+  let token = null;
+  const account = await query(
+    `SELECT a.id FROM ad_accounts a JOIN ad_oauth_tokens t ON t.id = a.token_id AND t.status = 'active'
+     WHERE a.tenant_id = $1 AND a.provider = 'meta' AND a.is_active ORDER BY a.is_primary DESC LIMIT 1`, [tenantId]
+  ).catch(() => ({ rows: [] }));
+  if (account.rows[0]) token = (await require('../services/metaAds/client').getAccountWithToken(tenantId, account.rows[0].id).catch(() => null))?.token || null;
+  if (token) return lookupAd({ tenantId, adId, token });
+
   const result = await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]);
   const { meta_ads_access_token } = result.rows[0]?.settings || {};
   if (!meta_ads_access_token) return null;
+  return lookupAd({ tenantId, adId, token: meta_ads_access_token });
+};
 
+const lookupAd = async ({ tenantId, adId, token }) => {
   try {
     const { data } = await axios.get(`${GRAPH_URL}/${adId}`, {
-      params: { fields: 'name,campaign{id,name},adset{id,name}', access_token: meta_ads_access_token },
+      params: { fields: 'name,campaign{id,name},adset{id,name}' },
+      headers: { Authorization: `Bearer ${token}` },
     });
     const campaignId = await findOrCreateMetaCampaign({
       tenantId, campaignId: data.campaign?.id, campaignName: data.campaign?.name, adsetId: data.adset?.id,

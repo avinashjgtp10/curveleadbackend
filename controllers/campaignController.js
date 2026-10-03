@@ -37,12 +37,19 @@ const getCampaigns = async (req, res) => {
     const byId = new Map(breakdown.map(m => [m.campaign_id, m]));
     const lifetime = await getBreakdown({ ...scope, from: new Date(0), to: new Date() }, 'campaign_id');
     const lifetimeById = new Map(lifetime.map(m => [m.campaign_id,m]));
+    const periodSpend = await periodMetaSpend(req.tenantId, scope, campaigns.map(c => c.id));
     const periodCampaigns = campaigns.map(c => {
       const m = byId.get(c.id) || { total_leads: 0, won: 0, lost: 0, hot_leads: 0, revenue: 0, conversion_rate: 0 };
       const spend = Number(c.actual_spend) || 0;
       const all = lifetimeById.get(c.id) || { total_leads: 0, won: 0, revenue: 0 };
+      // Meta campaigns synced by Ads Manager: CPL = spend in the period ÷ CRM leads in the
+      // period (same formula as Ads Manager). Others: lifetime spend ÷ lifetime leads.
+      const ps = periodSpend.get(c.id);
+      const cpl = ps !== undefined
+        ? (m.total_leads ? (ps / m.total_leads).toFixed(2) : 0)
+        : (all.total_leads ? (spend / all.total_leads).toFixed(2) : 0);
       return { ...c, ...m, id: c.id, won_leads: m.won, lost_leads: m.lost,
-        cpl: all.total_leads ? (spend / all.total_leads).toFixed(2) : 0,
+        cpl, cpl_basis: ps !== undefined ? 'period' : 'lifetime', period_spend: ps ?? null,
         cost_per_won: all.won ? (spend / all.won).toFixed(2) : 0,
         disqualified_rate: m.total_leads ? (m.lost / m.total_leads * 100).toFixed(1) : 0,
         hot_rate: m.total_leads ? (m.hot_leads / m.total_leads * 100).toFixed(1) : 0,
@@ -55,6 +62,24 @@ const getCampaigns = async (req, res) => {
     console.error('Get campaigns error:', error);
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
+};
+
+// Ads Manager spend per CRM campaign within the metrics period (workspace timezone days).
+// Empty when the workspace doesn't use Ads Manager (or before its migration).
+const periodMetaSpend = async (tenantId, scope, campaignIds) => {
+  if (!campaignIds.length) return new Map();
+  const tz = (await query("SELECT settings->>'timezone' AS tz FROM tenants WHERE id = $1", [tenantId])).rows[0]?.tz || 'Asia/Kolkata';
+  const day = d => new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(d);
+  const r = await query(
+    `SELECT ac.campaign_id, COALESCE(sum(i.spend), 0)::float AS spend
+     FROM ad_campaigns ac
+     LEFT JOIN ad_insights_daily i ON i.tenant_id = ac.tenant_id AND i.entity_type = 'campaign' AND i.entity_id = ac.external_id
+       AND i.date BETWEEN $3::date AND $4::date
+     WHERE ac.tenant_id = $1 AND ac.campaign_id = ANY($2::uuid[])
+     GROUP BY ac.campaign_id`,
+    [tenantId, campaignIds, day(scope.from), day(new Date(scope.to.getTime() - 1))]
+  ).catch(e => { if (e.code === '42P01') return { rows: [] }; throw e; });
+  return new Map(r.rows.map(x => [x.campaign_id, x.spend]));
 };
 
 // GET /api/campaigns/:id - Campaign details with lead breakdown
@@ -164,7 +189,26 @@ const getCampaignAds = async (req, res) => {
     const owned = await query('SELECT id FROM campaigns WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
     if (!owned.rows.length) return res.status(404).json({ error: 'Campaign not found.' });
 
-    const result = await query(
+    // Ads module (Ads Manager) data: ads under this CRM campaign with spend summed over the
+    // synced days. Falls back to the legacy meta_ads table for workspaces not migrated yet.
+    const modern = await query(
+      `SELECT ad.id, ad.external_id AS meta_ad_id, ad.name, ad.effective_status,
+              COALESCE(sum(i.spend), 0)::float AS spend, COALESCE(sum(i.impressions), 0)::bigint AS impressions,
+              COALESCE(sum(i.clicks), 0)::bigint AS clicks, COALESCE(sum(i.leads), 0)::int AS meta_leads,
+              min(i.date) AS from_date,
+              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = ad.external_id AND tenant_id = ad.tenant_id) AS total_leads,
+              (SELECT COUNT(*) FROM leads WHERE meta_ad_id = ad.external_id AND tenant_id = ad.tenant_id
+                 AND LOWER(stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = ad.tenant_id AND is_won = true)) AS won_leads
+       FROM ad_campaigns ac
+       JOIN ad_adsets s ON s.ad_campaign_id = ac.id AND s.tenant_id = ac.tenant_id
+       JOIN ad_ads ad ON ad.ad_adset_id = s.id AND ad.tenant_id = ac.tenant_id
+       LEFT JOIN ad_insights_daily i ON i.tenant_id = ad.tenant_id AND i.entity_type = 'ad' AND i.entity_id = ad.external_id
+       WHERE ac.tenant_id = $2 AND ac.campaign_id = $1
+       GROUP BY ad.id ORDER BY spend DESC, ad.name`,
+      [req.params.id, req.tenantId]
+    ).catch(e => { if (e.code === '42P01') return { rows: [] }; throw e; });
+
+    const result = modern.rows.length ? modern : await query(
       `SELECT a.*,
               (SELECT COUNT(*) FROM leads WHERE meta_ad_id = a.meta_ad_id AND tenant_id = a.tenant_id) as total_leads,
               (SELECT COUNT(*) FROM leads WHERE meta_ad_id = a.meta_ad_id AND tenant_id = a.tenant_id
@@ -181,7 +225,7 @@ const getCampaignAds = async (req, res) => {
       return { ...a, total_leads: totalLeads, won_leads: parseInt(a.won_leads) || 0, cpl: totalLeads > 0 ? (spend / totalLeads).toFixed(2) : 0 };
     });
 
-    res.json({ ads });
+    res.json({ ads, source: modern.rows.length ? 'ads_manager' : 'legacy' });
   } catch (error) {
     console.error('Get campaign ads error:', error);
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
@@ -219,19 +263,19 @@ const updateCampaign = async (req, res) => {
       'start_date', 'end_date', 'status', 'utm_source', 'utm_medium', 'utm_campaign', 'is_priority',
     ];
 
-    const updates = [];
-    const params = [req.params.id, req.tenantId];
-    let i = 3;
-
-    for (const field of allowedFields) {
-      if (req.body[field] !== undefined) {
-        updates.push(`${field} = $${i++}`);
-        params.push(req.body[field]);
-      }
+    const current = await query('SELECT meta_campaign_id FROM campaigns WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
+    if (current.rows.length === 0) return res.status(404).json({ error: 'Campaign not found.' });
+    // A Meta-synced campaign's status, budget, spend and dates come from Meta (the sync
+    // overwrites them) — those are changed in Ads Manager → Meta Ads, not here.
+    const metaManaged = current.rows[0].meta_campaign_id ? ['budget', 'actual_spend', 'start_date', 'end_date', 'status'] : [];
+    const fields = allowedFields.filter(f => req.body[f] !== undefined && !metaManaged.includes(f));
+    if (!fields.length && metaManaged.some(f => req.body[f] !== undefined)) {
+      return res.status(409).json({ error: 'This campaign is managed in Meta. Change its status, budget or dates in Ads Manager → Meta Ads.' });
     }
-    if (updates.length === 0) return res.status(400).json({ error: 'No fields to update.' });
+    if (fields.length === 0) return res.status(400).json({ error: 'No fields to update.' });
 
-    updates.push('updated_at = NOW()');
+    const params = [req.params.id, req.tenantId, ...fields.map(f => req.body[f])];
+    const updates = [...fields.map((f, idx) => `${f} = $${idx + 3}`), 'updated_at = NOW()'];
 
     const result = await query(
       `UPDATE campaigns SET ${updates.join(', ')} WHERE id = $1 AND tenant_id = $2 RETURNING *`,

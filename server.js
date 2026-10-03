@@ -212,11 +212,11 @@ app.listen(PORT, () => {
   setTimeout(runMetaAdInsightsSync, 45 * 1000);
   setInterval(runMetaAdInsightsSync, 6 * 60 * 60 * 1000);
 
-  // Meta lead sync — safety net for the real-time webhook, runs every 5 minutes so
-  // leads are captured and assigned without anyone opening the app
+  // Meta lead sync — safety net for the real-time webhook (which queues leads:ingest-meta
+  // jobs): every 30 minutes, re-checks leads created in the last 24 hours
   const { runMetaLeadSync } = require('./jobs/metaLeadSync');
   setTimeout(runMetaLeadSync, 50 * 1000);
-  setInterval(runMetaLeadSync, 5 * 60 * 1000);
+  setInterval(runMetaLeadSync, 30 * 60 * 1000);
 
   // Daily report email — polls every 15 min, only actually sends once per
   // tenant per day (inside the target UTC hour, guarded by last-sent date)
@@ -228,6 +228,7 @@ app.listen(PORT, () => {
   // Ads module jobs (insights sync every 4h, daily token checks) — BullMQ when
   // REDIS_URL is set, otherwise in-process timers.
   require('./jobs/adsJobs').registerAdsJobs();
+  require('./jobs/metaLeadJobs').registerMetaLeadJobs();
   require('./jobs/queues').start().catch(e => console.error('Job queues failed to start:', e.message));
 });
 
