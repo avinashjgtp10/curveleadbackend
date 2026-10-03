@@ -39,6 +39,7 @@ function setup({ row = booking(), sessionOpen = false, claimed = true, templates
     },
     '../utils/whatsappCredentials': { resolveWhatsAppCredentials: async () => null },
     '../utils/sessionWindow': { isSessionOpen: async () => sessionOpen },
+    './whatsappConsent': { checkTemplateConsent: async () => ({ allowed: true }) },   // a booking = asked to be contacted
   });
   return { svc, writes, sends };
 }

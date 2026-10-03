@@ -36,7 +36,7 @@ const getCoaching = async (req, res) => {
               COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
                 SELECT LOWER(name) FROM lead_stages WHERE tenant_id=$1 AND is_won=true)) as won
        FROM users u
-       LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
+       LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1 AND l.merged_into_id IS NULL
        WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin','staff')
        GROUP BY u.id, u.name ORDER BY u.name ASC`,
       [tid]

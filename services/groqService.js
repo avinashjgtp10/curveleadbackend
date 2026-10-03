@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { validTimezone, DEFAULT_LOCALE } = require('../utils/workspaceLocale');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
@@ -64,8 +65,10 @@ const qualifyLead = async (leadName, messageHistory, latestMessage, businessCont
     businessContext.lead_source ? `\nHow this lead found us: ${businessContext.lead_source}\n` : '',
   ].join('');
 
-  const nowIst = new Date().toLocaleString('en-IN', {
-    timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+  // The workspace's own timezone (Settings → Business), never a hardcoded one.
+  const timezone = validTimezone(businessContext.timezone) ? businessContext.timezone : DEFAULT_LOCALE.timezone;
+  const nowLocal = new Date().toLocaleString('en-GB', {
+    timeZone: timezone, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
   });
 
   const prompt = `You are a friendly sales assistant for ${businessContext.business_name || 'our business'}.
@@ -73,7 +76,7 @@ const qualifyLead = async (leadName, messageHistory, latestMessage, businessCont
 Business context: ${businessContext.description || 'We help businesses with their needs.'}
 ${knowledgeBlock}
 You are chatting with a potential customer named ${leadName} via WhatsApp.
-Right now it is: ${nowIst} (India time) — resolve anything the lead says like "tomorrow" or "Monday" against this.
+Right now it is: ${nowLocal} (${timezone} time) — resolve anything the lead says like "tomorrow" or "Monday" against this.
 
 Previous conversation:
 ${conversationContext || '(no previous messages)'}
@@ -95,7 +98,7 @@ Respond ONLY with valid JSON:
   "intent": "interested|not_interested|needs_info|ready_to_buy|unclear",
   "should_human_takeover": true|false,
   "suggested_action": "schedule_call|send_pricing|send_demo|close_conversation|continue",
-  "booking": {"ready": true|false, "date_time_iso": "YYYY-MM-DDTHH:mm:00 in India time, or null", "summary": "one line of what was booked and any details the lead gave, or null"}
+  "booking": {"ready": true|false, "date_time_iso": "YYYY-MM-DDTHH:mm:00 as local ${timezone} time, no offset, or null", "summary": "one line of what was booked and any details the lead gave, or null"}
 }`;
 
   const result = await callGroq(

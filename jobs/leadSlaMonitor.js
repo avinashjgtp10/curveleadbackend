@@ -25,7 +25,7 @@ async function notifyAssigneeAtRisk() {
   const result = await query(`
     SELECT l.id, l.tenant_id, l.name, l.assigned_to
     FROM leads l
-    WHERE l.first_response_at IS NULL
+    WHERE l.merged_into_id IS NULL AND l.first_response_at IS NULL
       AND l.assigned_to IS NOT NULL
       AND l.created_at <= NOW() - INTERVAL '${TARGET_RESPONSE_MINUTES} minutes'
       AND NOT EXISTS (
@@ -52,7 +52,7 @@ async function escalateToAdmins() {
   const result = await query(`
     SELECT l.id, l.tenant_id, l.name
     FROM leads l
-    WHERE l.first_response_at IS NULL
+    WHERE l.merged_into_id IS NULL AND l.first_response_at IS NULL
       AND l.created_at <= NOW() - INTERVAL '${ESCALATION_AFTER_MINUTES} minutes'
       AND NOT EXISTS (
         -- Dedup on our own lead_activities write, not on a notification having gone out —
@@ -85,7 +85,7 @@ async function flagMissedLeads() {
   const result = await query(`
     SELECT l.id, l.tenant_id, l.name
     FROM leads l
-    WHERE l.first_response_at IS NULL
+    WHERE l.merged_into_id IS NULL AND l.first_response_at IS NULL
       AND l.created_at <= NOW() - INTERVAL '${MISSED_AFTER_MINUTES} minutes'
       AND NOT EXISTS (
         SELECT 1 FROM lead_activities a WHERE a.tenant_id = l.tenant_id AND a.lead_id = l.id AND a.activity_type = 'sla_missed'
@@ -115,7 +115,7 @@ async function autoReassignStale() {
   const result = await query(`
     SELECT l.id, l.tenant_id, l.name, l.assigned_to
     FROM leads l
-    WHERE l.first_response_at IS NULL
+    WHERE l.merged_into_id IS NULL AND l.first_response_at IS NULL
       AND l.assigned_to IS NOT NULL
       AND l.created_at <= NOW() - INTERVAL '${REASSIGN_AFTER_MINUTES} minutes'
       AND NOT EXISTS (
@@ -129,7 +129,7 @@ async function autoReassignStale() {
       WHERE u.tenant_id = $1 AND u.role = 'staff' AND u.is_active = true AND u.id != $2
       ORDER BY (
         SELECT COUNT(*) FROM leads
-        WHERE assigned_to = u.id AND LOWER(stage) NOT IN (
+        WHERE assigned_to = u.id AND merged_into_id IS NULL AND LOWER(stage) NOT IN (
           SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND (is_won = true OR is_lost = true)
         )
       ) ASC

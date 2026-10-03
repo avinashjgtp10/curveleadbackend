@@ -2,6 +2,7 @@ const { query } = require('../config/db');
 const { sendTextMessage, sendTemplate, listMessageTemplates } = require('./whatsappService');
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 const { isSessionOpen } = require('../utils/sessionWindow');
+const { checkTemplateConsent } = require('./whatsappConsent');
 
 // WhatsApp messages to the lead about a demo/visit booking: a confirmation when it's
 // booked, and up to two reminders before it. Inside the 24h customer-service window a
@@ -160,6 +161,8 @@ const sendBookingMessage = async (followupId, kind) => {
     } else if (templateName) {
       const found = await findApprovedTemplate(settings, templateName);
       if (found.error) throw new Error(found.error);
+      const consent = await checkTemplateConsent({ tenantId: row.tenant_id, leadId: row.lead_id, template: found.template });
+      if (!consent.allowed) return skip(consent.reason);
       const needed = templateVarCount(found.body);
       const keys = VARIABLES[type];
       if (needed > keys.length) throw new Error(`Template "${templateName}" has ${needed} variables; a ${type} message can fill at most ${keys.length}.`);

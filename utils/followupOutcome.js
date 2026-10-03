@@ -129,14 +129,14 @@ const computeOutcomeTransition = ({ outcome, conversationResult }) => {
 };
 
 // "Call attempted by Rahul — No answer. Next attempt scheduled for 13 July at 10:00 AM."
-const buildActivityMessage = ({ outcome, conversationResult, attemptedByName, nextFollowupAt }) => {
+const buildActivityMessage = ({ outcome, conversationResult, attemptedByName, nextFollowupAt, timezone = 'Asia/Kolkata' }) => {
   const outcomeLabel = outcome === 'connected'
     ? `Connected — ${CONVERSATION_RESULT_LABELS[conversationResult] || conversationResult}`
     : OUTCOME_LABELS[outcome];
   let msg = `Call attempted by ${attemptedByName} — ${outcomeLabel}.`;
   if (nextFollowupAt) {
     const when = new Date(nextFollowupAt).toLocaleString('en-IN', {
-      day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit', hour12: true,
+      timeZone: timezone, day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit', hour12: true,
     });
     msg += ` Next attempt scheduled for ${when}.`;
   }

@@ -80,12 +80,17 @@ const sendLeadConversionEvent = async ({ tenantId, lead, eventName, eventTime })
     responseBody = JSON.stringify(e.response?.data || { message: e.message });
   }
 
+  // The event already reached Meta: a log failure must not turn it into a retry.
   await query(
     `INSERT INTO meta_capi_events (tenant_id, lead_id, event_name, status, response_body, event_id)
      VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (tenant_id, lead_id, event_name) WHERE status = 'success' DO NOTHING`,
     [tenantId, lead.id, eventName, status, responseBody, event.event_id]
-  );
+  ).catch(async (e) => {
+    if (!['42P10', '42703'].includes(e.code)) throw e;   // before migration_ads_phase4.sql
+    await query('INSERT INTO meta_capi_events (tenant_id, lead_id, event_name, status, response_body) VALUES ($1, $2, $3, $4, $5)',
+      [tenantId, lead.id, eventName, status, responseBody]).catch(() => {});
+  });
   return status;
 };
 

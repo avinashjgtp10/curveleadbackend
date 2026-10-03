@@ -15,7 +15,7 @@ const authenticate = async (req, res, next) => {
     const result = await query(
       `SELECT u.id, u.name, u.email, u.role, u.tenant_id, u.is_active,
               t.name as tenant_name, t.business_type, t.subscription_status, t.trial_ends_at,
-              t.subscription_start, t.subscription_end, p.name as plan_name
+              t.subscription_start, t.subscription_end, p.name as plan_name, jsonb_build_object('country', t.settings->'country', 'currency', t.settings->'currency', 'timezone', t.settings->'timezone') as tenant_settings
        FROM users u
        LEFT JOIN tenants t ON u.tenant_id = t.id
        LEFT JOIN plans p ON t.plan_id = p.id

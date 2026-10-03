@@ -7,7 +7,7 @@ async function snapshot(tenantId,db={query}) {
  (SELECT count(*)::int FROM assignment_rules WHERE tenant_id=$1 AND is_active=true) assignment,
  (SELECT count(*)::int FROM automation_sequences WHERE tenant_id=$1 AND is_active=true) sequence,
  (SELECT count(*)::int FROM users WHERE tenant_id=$1 AND is_active=true) team,
- (SELECT count(*)::int FROM leads WHERE tenant_id=$1 AND source='import') imported,
+ (SELECT count(*)::int FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND source='import') imported,
  (SELECT count(*)::int FROM outgoing_webhooks WHERE tenant_id=$1 AND active=true) webhooks,
  (SELECT count(*)::int FROM whatsapp_broadcast_reports WHERE tenant_id=$1) broadcasts`,[tenantId])).rows[0];
  const detected={meta:!!(s.meta_page_id&&s.meta_page_access_token),whatsapp:!!(s.whatsapp_phone_number_id&&s.whatsapp_access_token),assignment:counts.assignment>0,import:counts.imported>0,sequence:counts.sequence>0,team:counts.team>1};

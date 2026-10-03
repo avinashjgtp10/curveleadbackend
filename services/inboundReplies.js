@@ -1,5 +1,6 @@
 const { query } = require("../config/db");
 const { isWithinBusinessHours } = require("../utils/businessHours");
+const { localeFromSettings } = require("../utils/workspaceLocale");
 const { isSessionOpen } = require("../utils/sessionWindow");
 const { resolveWhatsAppCredentials } = require("../utils/whatsappCredentials");
 const {
@@ -8,6 +9,7 @@ const {
   listMessageTemplates,
 } = require("./whatsappService");
 const { substituteVars } = require("../utils/templateVars");
+const { checkTemplateConsent } = require("./whatsappConsent");
 function matchReply(rules, { text, first, outside }) {
   return (rules || []).find(
     (r) =>
@@ -32,7 +34,7 @@ async function replyToInbound({ lead, text, messageId, settings }) {
   const rule = matchReply(settings.inbound_reply_rules, {
     text,
     first,
-    outside: !isWithinBusinessHours(settings.whatsapp_business_hours),
+    outside: !isWithinBusinessHours(settings.whatsapp_business_hours, new Date(), localeFromSettings(settings).timezone),
   });
   if (!rule) return false;
   if (rule.type === "text" && !(await isSessionOpen(lead.id))) return false;
@@ -66,6 +68,8 @@ async function replyToInbound({ lead, text, messageId, settings }) {
     )
       return false;
     body = raw;
+    const consent = await checkTemplateConsent({ tenantId: lead.tenant_id, leadId: lead.id, template });
+    if (!consent.allowed) return false;
     result = await sendTemplate(
       lead.phone,
       rule.value,

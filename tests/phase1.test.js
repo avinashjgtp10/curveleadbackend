@@ -34,7 +34,7 @@ test('500 UUID body lookup succeeds, excessive/invalid lists return 422 without 
 });
 test('automation pagination preserves true server totals and staff scope', async () => {
   const ctrl = load('controllers/automationEnrollmentController.js', { '../config/db': { query: async (sql, params) => {
-    assert.match(sql, /l\.tenant_id = \$1 AND l\.assigned_to = \$2/);
+    assert.match(sql, /l\.tenant_id = \$1 AND l\.merged_into_id IS NULL AND l\.assigned_to = \$2/);
     assert.match(sql, /FROM scoped/); assert.match(sql, /LIMIT \$4 OFFSET \$5/);
     assert.deepEqual(Array.from(params), ['tenant-a', 'staff-a', '%Sunita%', 25, 25]);
     return { rows: [{ leads: [], total: 1200, summary: { total: 1500 }, steps: [] }] };
