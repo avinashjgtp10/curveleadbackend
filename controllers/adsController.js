@@ -12,7 +12,12 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENTITY_TYPES = ['account', 'campaign', 'adset', 'ad'];
 const bad = (res, error, status = 422) => res.status(status).json({ error });
-const fail = (label) => (e, res) => { console.error(`${label}:`, e.message); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); };
+const { isSchemaError, schemaErrorMessage } = require('../utils/schemaErrors');
+const fail = (label) => (e, res) => {
+  console.error(`${label}:`, e.message);
+  if (isSchemaError(e)) return res.status(503).json({ error: schemaErrorMessage(e), code: 'MIGRATION_PENDING' });
+  res.status(e.status || 500).json({ error: e.status ? e.message : `${label} failed. Please try again.` });
+};
 
 // from/to as YYYY-MM-DD (inclusive); default last 30 days; at most 400 days.
 const dateRange = (q) => {
