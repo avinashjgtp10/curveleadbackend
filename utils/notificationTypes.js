@@ -45,6 +45,12 @@ const NOTIFICATION_GROUPS = [
     description: 'A hot lead or priority-campaign lead needs personal attention.',
     types: ['lead_escalation'],
   },
+  {
+    key: 'social_posts',
+    label: 'Social post problems',
+    description: 'A scheduled Facebook, Instagram or Google post could not be published.',
+    types: ['social_post_failed'],
+  },
 ];
 
 const FOLLOWUP_GROUP_KEY = 'followups';

@@ -2,6 +2,7 @@
 // migration to run, instead of a bare 500. Postgres: 42P01 undefined table,
 // 42703 undefined column, 42P10 no unique index matching an ON CONFLICT clause.
 const MIGRATION_FOR = [
+  [/social_accounts|social_posts|social_post_targets|next_attempt_at/, 'models/migration_ads_phase6.sql'],
   [/ad_ai_drafts/, 'models/migration_ads_phase5.sql'],
   [/ad_audit_log/, 'models/migration_ads_phase3.sql'],
   [/last_error|sent_at|event_id|meta_capi/, 'models/migration_ads_phase4.sql'],

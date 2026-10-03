@@ -152,6 +152,7 @@ app.use('/api/teams', apiLimiter, require('./routes/teams'));
 app.use('/api/features', apiLimiter, require('./routes/features'));
 app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
 app.use('/api/ads', apiLimiter, require('./routes/ads'));
+app.use('/api/social', apiLimiter, require('./routes/social'));
 
 // ============================================
 // 404 handler
@@ -229,6 +230,7 @@ app.listen(PORT, () => {
   // REDIS_URL is set, otherwise in-process timers.
   require('./jobs/adsJobs').registerAdsJobs();
   require('./jobs/metaLeadJobs').registerMetaLeadJobs();
+  require('./jobs/socialJobs').registerSocialJobs();
   require('./jobs/queues').start().catch(e => console.error('Job queues failed to start:', e.message));
 });
 
