@@ -100,9 +100,19 @@ app.use('/uploads', require('express').static(require('path').join(__dirname, 'u
 // ============================================
 // Rate limiting
 // ============================================
+// Logged-in users get their own bucket. Keyed by IP, a whole office shared 500 requests,
+// and the inbox's background polling alone uses ~200 per open tab — once spent, new
+// WhatsApp messages silently stopped appearing until the window reset.
+const jwt = require('jsonwebtoken');
+const limiterUserId = (req) => {
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Bearer ')) return null;
+  try { return jwt.verify(auth.slice(7), process.env.JWT_SECRET).userId || null; } catch { return null; }
+};
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500,
+  max: (req) => (limiterUserId(req) ? 2000 : 500),
+  keyGenerator: (req) => { const id = limiterUserId(req); return id ? `user:${id}` : req.ip; },
   message: { error: 'Too many requests, please try again later.' },
 });
 
