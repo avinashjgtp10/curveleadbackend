@@ -76,26 +76,31 @@ const getInbox = async (req, res) => {
     const params = [req.tenantId];
     if (req.user.role === 'staff') { where += ' AND l.assigned_to = $2'; params.push(req.user.id); }
 
-    // Latest message per lead, then the 100 most recently active conversations.
-    // DISTINCT ON must order by lead_id, so the recency limit is applied outside
-    // it — limiting inside would keep an arbitrary 100 by UUID order.
+    // Latest message per lead, then the 100 most recently active conversations plus
+    // every conversation with unread messages — the sidebar badge counts all unread
+    // chats, so an older unread chat must still be listed or it can never be opened.
+    // DISTINCT ON must order by lead_id, so the recency cut is applied outside it.
     const result = await query(
-      `SELECT c.lead_id, c.message, c.direction, c.sent_at, c.status,
-              l.name as lead_name, l.phone as lead_phone, l.lead_score, l.stage, COALESCE(l.tags, '{}') as tags,
-              l.assigned_to, u.name as assigned_to_name, l.ai_paused, l.custom_fields,
-              (SELECT MAX(sent_at) FROM whatsapp_messages WHERE lead_id = c.lead_id AND direction = 'inbound') as last_inbound_at,
-              (SELECT COUNT(*) FROM whatsapp_messages WHERE lead_id = c.lead_id AND direction = 'inbound' AND read_at IS NULL) as unread_count
-       FROM (
-         SELECT DISTINCT ON (wm.lead_id) wm.lead_id, wm.message, wm.direction, wm.sent_at, wm.status
-         FROM whatsapp_messages wm
-         JOIN leads l ON wm.lead_id = l.id
-         ${where}
-         ORDER BY wm.lead_id, wm.sent_at DESC
-       ) c
-       JOIN leads l ON l.id = c.lead_id
-       LEFT JOIN users u ON l.assigned_to = u.id
-       ORDER BY c.sent_at DESC NULLS LAST
-       LIMIT 100`,
+      `SELECT * FROM (
+         SELECT c.lead_id, c.message, c.direction, c.sent_at, c.status,
+                l.name as lead_name, l.phone as lead_phone, l.lead_score, l.stage, COALESCE(l.tags, '{}') as tags,
+                l.assigned_to, u.name as assigned_to_name, l.ai_paused, l.custom_fields,
+                (SELECT MAX(sent_at) FROM whatsapp_messages WHERE lead_id = c.lead_id AND direction = 'inbound') as last_inbound_at,
+                (SELECT COUNT(*) FROM whatsapp_messages WHERE lead_id = c.lead_id AND direction = 'inbound' AND read_at IS NULL) as unread_count,
+                ROW_NUMBER() OVER (ORDER BY c.sent_at DESC NULLS LAST) as recency
+         FROM (
+           SELECT DISTINCT ON (wm.lead_id) wm.lead_id, wm.message, wm.direction, wm.sent_at, wm.status
+           FROM whatsapp_messages wm
+           JOIN leads l ON wm.lead_id = l.id
+           ${where}
+           ORDER BY wm.lead_id, wm.sent_at DESC
+         ) c
+         JOIN leads l ON l.id = c.lead_id
+         LEFT JOIN users u ON l.assigned_to = u.id
+       ) x
+       WHERE x.recency <= 100 OR x.unread_count > 0
+       ORDER BY x.sent_at DESC NULLS LAST
+       LIMIT 1000`,
       params
     );
 
