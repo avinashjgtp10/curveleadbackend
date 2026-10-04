@@ -133,6 +133,26 @@ const deleteConversations = async (req, res) => {
   }
 };
 
+// GET /api/whatsapp/unread-count — chats with unread inbound messages, for the sidebar badge.
+// Staff only count chats of leads assigned to them, matching what their inbox shows.
+const getUnreadCount = async (req, res) => {
+  try {
+    const params = [req.tenantId];
+    let scope = '';
+    if (req.user.role === 'staff') { scope = ' AND l.assigned_to = $2'; params.push(req.user.id); }
+    const { rows } = await query(
+      `SELECT COUNT(DISTINCT wm.lead_id)::int AS chats, COUNT(*)::int AS messages
+       FROM whatsapp_messages wm JOIN leads l ON l.id = wm.lead_id
+       WHERE wm.tenant_id = $1 AND wm.direction = 'inbound' AND wm.read_at IS NULL${scope}`,
+      params
+    );
+    res.json(rows[0]);
+  } catch (error) {
+    console.error('Unread count error:', error);
+    res.status(500).json({ error: 'Failed.' });
+  }
+};
+
 // PUT /api/whatsapp/conversations/read { lead_ids: [...] } — bulk mark-as-read,
 // same effect opening each chat individually would have.
 const markConversationsRead = async (req, res) => {
@@ -767,5 +787,5 @@ async function pauseAiForAutoReplies({ lead, text }) {
 
 module.exports = {
   getInbox, getConversation, sendMessage, setConversationAi, startChat, sendAttachment, handleWebhook,
-  updateChatLabels, deleteConversations, markConversationsRead,
+  updateChatLabels, deleteConversations, markConversationsRead, getUnreadCount,
 };
