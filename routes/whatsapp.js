@@ -4,7 +4,7 @@ const path = require('path');
 const router = express.Router();
 const {
   getInbox, getConversation, sendMessage, setConversationAi, startChat, sendAttachment, handleWebhook,
-  updateChatLabels, deleteConversations, markConversationsRead,
+  updateChatLabels, deleteConversations, markConversationsRead, getUnreadCount,
 } = require('../controllers/whatsappController');
 const { getSendableTemplates, getBroadcastTemplates, createBroadcastTemplate, aiDraftTemplate, getImagePrompt, generateHeaderImages, sendBroadcast, getBroadcastProgress, uploadBroadcastMedia } = require('../controllers/whatsappBroadcastController');
 const hub = require('../controllers/whatsappHubController');
@@ -37,6 +37,7 @@ router.put('/conversation/:leadId/attributes', async(req,res)=>{
  }catch(e){res.status(500).json({error:'Save failed.'});}
 });
 router.get('/inbox', getInbox);
+router.get('/unread-count', getUnreadCount);
 router.get('/conversation/:leadId', getConversation);
 router.post('/send', sendMessage);
 router.put('/conversation/:leadId/ai', setConversationAi);
