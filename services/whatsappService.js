@@ -8,6 +8,56 @@ const normalizePhone = (phone) => {
   return p;
 };
 
+// Meta error codes that mean the token or its permissions no longer work — every send will
+// fail until someone reconnects, so the workspace is flagged instead of reporting "Connected".
+const AUTH_ERROR_CODES = new Set([190, 102, 10, 200, 131005]);
+
+// Plain-language reasons for the send failures staff actually hit (the raw Meta text is logged).
+const FRIENDLY_ERRORS = {
+  190: 'WhatsApp login has expired. Reconnect in Integrations → WhatsApp.',
+  102: 'WhatsApp login has expired. Reconnect in Integrations → WhatsApp.',
+  10: 'WhatsApp access was denied. Reconnect in Integrations → WhatsApp to restore sending.',
+  200: 'WhatsApp access was denied. Reconnect in Integrations → WhatsApp to restore sending.',
+  131005: 'WhatsApp access was denied. Reconnect in Integrations → WhatsApp to restore sending.',
+  131047: "It's been more than 24 hours since this customer's last message. Send an approved template instead.",
+  131026: "This number can't receive WhatsApp messages.",
+  131049: 'Meta held back this marketing message to protect engagement. Try again later or use a Utility template.',
+  131056: 'Too many messages to this number in a short time. Wait a moment and try again.',
+  132001: "This template doesn't exist in that language on WhatsApp.",
+  132000: "The template's variables don't match what was sent.",
+  130429: 'WhatsApp rate limit reached. Try again shortly.',
+};
+
+const failure = (error, phoneNumberId) => {
+  const meta = error.response?.data?.error;
+  const code = meta?.code;
+  if (AUTH_ERROR_CODES.has(code) && phoneNumberId) flagAuthFailure(phoneNumberId).catch(() => {});
+  return { success: false, code, error: FRIENDLY_ERRORS[code] || meta?.message || error.message, raw_error: meta?.message || error.message };
+};
+
+// Mark every workspace using this number's shared connection as needing attention.
+const flagAuthFailure = async (phoneNumberId) => {
+  const { query } = require('../config/db');
+  await query(
+    `INSERT INTO integration_health (tenant_id, provider, token_valid, checked_at)
+     SELECT id, 'whatsapp', false, now() FROM tenants WHERE settings->>'whatsapp_phone_number_id' = $1
+     ON CONFLICT (tenant_id, provider) DO UPDATE SET token_valid = false, checked_at = now()`,
+    [String(phoneNumberId)]
+  );
+};
+
+// A send went through, so access works again: clear an earlier auth-failure flag.
+const clearAuthFailure = (phoneNumberId) => {
+  if (!phoneNumberId) return;
+  const { query } = require('../config/db');
+  query(
+    `UPDATE integration_health SET token_valid = true, checked_at = now()
+     WHERE provider = 'whatsapp' AND token_valid = false
+       AND tenant_id IN (SELECT id FROM tenants WHERE settings->>'whatsapp_phone_number_id' = $1)`,
+    [String(phoneNumberId)]
+  ).catch(() => {});
+};
+
 // Resolve credentials: tenant-level first, then global env fallback
 const resolveCredentials = (creds) => ({
   phoneNumberId: creds?.phone_number_id || process.env.WHATSAPP_PHONE_NUMBER_ID,
@@ -39,10 +89,11 @@ const sendTextMessage = async (to, message, credentials = null) => {
       },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
+    clearAuthFailure(phoneNumberId);
     return { success: true, wa_message_id: response.data.messages?.[0]?.id };
   } catch (error) {
     console.error('WhatsApp send error:', error.response?.data || error.message);
-    return { success: false, error: error.response?.data?.error?.message || error.message };
+    return failure(error, phoneNumberId);
   }
 };
 
@@ -84,10 +135,11 @@ const sendTemplate = async (to, templateName, languageCode = 'en', parameters = 
       },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
+    clearAuthFailure(phoneNumberId);
     return { success: true, wa_message_id: response.data.messages?.[0]?.id };
   } catch (error) {
     console.error('WhatsApp template error:', error.response?.data || error.message);
-    return { success: false, error: error.response?.data?.error?.message || error.message };
+    return failure(error, phoneNumberId);
   }
 };
 
@@ -238,10 +290,11 @@ const sendMediaMessage = async (to, fileType, mediaUrl, caption = '', credential
       { messaging_product: 'whatsapp', to: normalizePhone(to), type: waType, [waType]: mediaPayload },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
+    clearAuthFailure(phoneNumberId);
     return { success: true, wa_message_id: response.data.messages?.[0]?.id };
   } catch (error) {
     console.error('WhatsApp media send error:', error.response?.data || error.message);
-    return { success: false, error: error.response?.data?.error?.message || error.message };
+    return failure(error, phoneNumberId);
   }
 };
 

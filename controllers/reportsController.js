@@ -42,10 +42,15 @@ const getConversionReport = async (req, res) => {
     const params = isStaff ? [req.tenantId, start, end, req.user.id] : [req.tenantId, start, end];
     const sc = isStaff ? ' AND assigned_to = $4' : '';
 
+    // Pipeline order, with lost/unqualified flagged so charts show them as exits, not steps.
     const stages = await query(
-      `SELECT stage, COUNT(*) as count, COALESCE(SUM(deal_value), 0) as value
-       FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND created_at >= $2 AND created_at < $3${sc}
-       GROUP BY stage ORDER BY count DESC`,
+      `SELECT l.stage, COUNT(*) as count, COALESCE(SUM(l.deal_value), 0) as value,
+              MIN(COALESCE(ls.pos, ls.position, 999)) AS pos,
+              BOOL_OR(COALESCE(ls.is_lost, false) OR lower(trim(l.stage)) IN ('lost','unqualified','disqualified')) AS is_exit,
+              BOOL_OR(COALESCE(ls.is_won, false)) AS is_won
+       FROM leads l LEFT JOIN lead_stages ls ON ls.tenant_id = l.tenant_id AND lower(ls.name) = lower(l.stage)
+       WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.created_at >= $2 AND l.created_at < $3${sc.replace('assigned_to', 'l.assigned_to')}
+       GROUP BY l.stage ORDER BY pos, l.stage`,
       params
     );
 
@@ -409,6 +414,22 @@ const resolveDashboardRange = ({ period, date_from, date_to }) => {
   return { start, end, prevStart, prevEnd: start };
 };
 
+// The range a dashboard period is compared against. A period still in progress is compared
+// like for like — 1–4 Oct against 1–4 Sep, not against the whole of September, which showed
+// "↓97%" at every month start. Calendar periods step back one calendar unit.
+const STEP_BACK = { this_month: 'month', last_month: 'month', this_year: 'year' };
+const previousRange = ({ start, end, period, now = new Date() }) => {
+  let prevStart;
+  if (STEP_BACK[period]) {
+    prevStart = new Date(start);
+    if (STEP_BACK[period] === 'month') prevStart.setUTCMonth(prevStart.getUTCMonth() - 1);
+    else prevStart.setUTCFullYear(prevStart.getUTCFullYear() - 1);
+  } else prevStart = new Date(+start - (+end - +start));
+  if (+now >= +end) return { prevStart, prevEnd: new Date(start) }; // finished: the whole previous period
+  const elapsed = Math.max(0, +now - +start);
+  return { prevStart, prevEnd: new Date(Math.min(+prevStart + elapsed, +start)) };
+};
+
 const getDashboardSummary = async (req, res) => {
   try {
     const tid = req.tenantId;
@@ -416,7 +437,7 @@ const getDashboardSummary = async (req, res) => {
     const uid = isStaff ? req.user.id : null;
     const scope = await metricScope(req);
     const { from: start, to: end } = scope;
-    const prevEnd = start, prevStart = new Date(+start - (+end - +start));
+    const { prevStart, prevEnd } = previousRange({ start, end, period: req.query.period || 'this_month' });
     const metrics = await getMetrics(scope);
     const sourceMetrics = await getBreakdown(scope, 'source');
     const staffMetrics = await getBreakdown(scope, 'assigned_to');
@@ -648,7 +669,8 @@ const getMessagesReport = async (req, res) => {
       query(
         `SELECT wm.id, wm.lead_id, l.name as lead_name, l.phone as lead_phone,
                 wm.direction, wm.message, wm.message_type, wm.template_name, wm.status,
-                wm.is_automated, wm.is_ai_generated, wm.sent_at, wm.delivered_at, wm.read_at
+                wm.is_automated, wm.is_ai_generated, wm.sent_at, wm.delivered_at, wm.read_at,
+                to_jsonb(wm)->>'error_detail' AS error_detail
          ${fromClause}
          ORDER BY wm.sent_at DESC
          LIMIT $${limitParam} OFFSET $${offsetParam}`,
@@ -676,5 +698,5 @@ module.exports = {
   getConversionReport, getReportBySource, getReportByStaff,
   getReportByCampaign, getTimeline, getDashboardSummary,
   getFunnelReport, getTimeInStageReport, getFollowupTrend,
-  getMessagesReport,
+  getMessagesReport, previousRange,
 };

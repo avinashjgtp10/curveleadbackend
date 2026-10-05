@@ -233,7 +233,7 @@ const createLead = async (req, res) => {
     // Staff leads are always assigned to themselves
     const assigned_to = req.user.role === 'staff' ? req.user.id : (req.body.assigned_to || null);
 
-    if (!name || !phone) return res.status(400).json({ error: 'Name and phone required.' });
+    if (!String(name || '').trim() || !phone) return res.status(400).json({ error: 'Name and phone required.' });
 
     const ingestion = await ingestLead(req.tenantId, {
       name, phone, email, location, business_name, address, source, source_detail, campaign_id: campaign_id || null,

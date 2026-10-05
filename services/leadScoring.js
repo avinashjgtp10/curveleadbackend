@@ -12,9 +12,13 @@ const gatherIntentInputs = async (lead, tenantId) => {
        WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 5`,
       [lead.id]
     ),
+    // is_first: a won tag on the entry stage (where new leads land) is a setup mistake, never a
+    // closed deal — the same rule utils/stageRules.js enforces when stages are saved.
     query(
-      `SELECT is_won, is_lost FROM lead_stages
-       WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1`,
+      `SELECT s.is_won, s.is_lost,
+              COALESCE(s.pos, s.position) <= (SELECT min(COALESCE(x.pos, x.position)) FROM lead_stages x WHERE x.tenant_id = s.tenant_id AND COALESCE(x.is_active, true)) AS is_first
+       FROM lead_stages s
+       WHERE s.tenant_id = $1 AND LOWER(s.name) = LOWER($2) LIMIT 1`,
       [tenantId, lead.stage]
     ),
   ]);
@@ -25,7 +29,7 @@ const gatherIntentInputs = async (lead, tenantId) => {
   const followupHealth = computeFollowupHealth(pendingFollowup);
   const stage = stageResult.rows[0] || {};
 
-  return { followupHealth, rolloverCount, isWon: !!stage.is_won, isLost: !!stage.is_lost };
+  return { followupHealth, rolloverCount, isWon: !!stage.is_won && !stage.is_first, isLost: !!stage.is_lost };
 };
 
 // Scores a lead and stores the result (same as "Score lead" in the app), logging it on

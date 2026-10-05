@@ -17,12 +17,14 @@ const res = () => ({ code: 200, status(c) { this.code = c; return this; }, json(
 const pgError = (code, message) => Object.assign(new Error(message), { code });
 
 test('schema errors name the migration to run', () => {
-  const { isSchemaError, schemaErrorMessage } = require('../utils/schemaErrors');
+  const { isSchemaError, schemaErrorMessage, migrationFor } = require('../utils/schemaErrors');
   assert.ok(isSchemaError(pgError('42P01', 'relation "ad_lead_forms" does not exist')));
   assert.ok(!isSchemaError(pgError('23505', 'duplicate key')));
-  assert.match(schemaErrorMessage(pgError('42P01', 'relation "ad_lead_forms" does not exist')), /migration_ads_phase2\.sql/);
-  assert.match(schemaErrorMessage(pgError('42P01', 'relation "ad_ai_drafts" does not exist')), /migration_ads_phase5\.sql/);
-  assert.match(schemaErrorMessage(pgError('42703', 'column "something_else" does not exist')), /database update/);
+  assert.equal(migrationFor(pgError('42P01', 'relation "ad_lead_forms" does not exist')), 'models/migration_ads_phase2.sql');
+  assert.equal(migrationFor(pgError('42P01', 'relation "ad_ai_drafts" does not exist')), 'models/migration_ads_phase5.sql');
+  // Customers get plain copy; file names stay in the server log.
+  assert.match(schemaErrorMessage(pgError('42703', 'column "something_else" does not exist')), /temporarily unavailable/);
+  assert.doesNotMatch(schemaErrorMessage(pgError('42P01', 'relation "ad_lead_forms" does not exist')), /\.sql|migration/);
 });
 
 test('GET /api/ads/forms before the Phase 2 migration answers 503 with the reason, not "Failed."', async () => {
@@ -34,7 +36,8 @@ test('GET /api/ads/forms before the Phase 2 migration answers 503 with the reaso
   await ctrl.listLeadForms({ tenantId: 't' }, r);
   assert.equal(r.code, 503);
   assert.equal(r.data.code, 'MIGRATION_PENDING');
-  assert.match(r.data.error, /migration_ads_phase2\.sql/);
+  assert.match(r.data.error, /temporarily unavailable/);
+  assert.doesNotMatch(r.data.error, /\.sql/);
 });
 
 test('unexpected errors keep a readable message instead of "Failed."', async () => {

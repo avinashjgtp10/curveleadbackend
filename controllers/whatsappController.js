@@ -16,7 +16,7 @@ const { notifyNewLead } = require('../utils/leadNotifyEmail');
 const { checkNewLeadTriggers, cancelActiveEnrollments } = require('../utils/automationTriggers');
 const { createNotification } = require('./notificationController');
 const { isOptOutMessage, isOptInMessage } = require('../utils/optOut');
-const { recordOptIn, checkTemplateConsent } = require('../services/whatsappConsent');
+const { recordOptIn, checkTemplateConsent, resumeBlockedEnrollments } = require('../services/whatsappConsent');
 const { shouldPauseAi, isRepeatOf, MAX_AUTOMATED_AI_TURNS } = require('../services/autoReplyGuard');
 const { substituteVars } = require('../utils/templateVars');
 const { isWithinBusinessHours } = require('../utils/businessHours');
@@ -353,6 +353,12 @@ const sendMessage = async (req, res) => {
         result.wa_message_id, result.success ? 'sent' : 'failed', req.user.id,
       ]
     );
+    // Keep the reason on the bubble. Separate and best-effort: error_detail comes from a
+    // later migration, and a missing column must never stop the message being saved.
+    if (!result.success) {
+      saved.rows[0].error_detail = (result.error || 'WhatsApp rejected the message.').slice(0, 500);
+      await query('UPDATE whatsapp_messages SET error_detail = $2 WHERE id = $1', [saved.rows[0].id, saved.rows[0].error_detail]).catch(() => {});
+    }
 
     // Update lead's last contacted, and pause AI auto-reply now that a human has taken over
     await query('UPDATE leads SET last_contacted_at = NOW(), ai_paused = true WHERE id = $1', [lead_id]);
@@ -573,6 +579,7 @@ const handleWebhook = async (req, res) => {
         // START / SUBSCRIBE is an explicit opt-in (also re-subscribes after STOP).
         if (isOptInMessage(messageText)) {
           await recordOptIn({ tenantId: lead.tenant_id, leadId: lead.id, source: 'whatsapp_keyword', resubscribe: true }).catch(() => {});
+          await resumeBlockedEnrollments({ tenantId: lead.tenant_id, leadIds: [lead.id] }).catch(() => {});
           lead.opted_out = false;
           await query(`INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title) VALUES ($1, $2, 'opted_in', 'Lead opted in to WhatsApp messages')`,
             [lead.tenant_id, lead.id]).catch(() => {});
@@ -586,7 +593,7 @@ const handleWebhook = async (req, res) => {
 
       // Away message: outside business hours, at most once per 12h per lead. If sent, the AI skips this turn.
       let awaySent = await require('../services/inboundReplies').replyToInbound({lead,text:messageText,messageId:waMessageId,settings:tenant?.settings || {}});
-      await query("INSERT INTO integration_health(tenant_id,provider,last_lead_received_at,token_valid) VALUES($1,'whatsapp',now(),true) ON CONFLICT(tenant_id,provider) DO UPDATE SET last_lead_received_at=now(),token_valid=true",[lead.tenant_id]);
+      await query("INSERT INTO integration_health(tenant_id,provider,last_lead_received_at,token_valid) VALUES($1,'whatsapp',now(),true) ON CONFLICT(tenant_id,provider) DO UPDATE SET last_lead_received_at=now()",[lead.tenant_id]);
       if (!awaySent && !lead.ai_paused && tenant?.settings?.whatsapp_away_enabled && tenant.settings.whatsapp_away_message && !lead.opted_out
           && !isWithinBusinessHours(tenant.settings.whatsapp_business_hours, new Date(), localeFromSettings(tenant.settings).timezone)) {
         try {

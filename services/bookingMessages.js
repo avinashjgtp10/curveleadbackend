@@ -200,4 +200,5 @@ const sendBookingMessage = async (followupId, kind) => {
 
 module.exports = {
   BOOKING_TYPES, DEFAULTS, VARIABLES, bookingSettings, whenText, bookingValues, freeText, templateVarCount, sendBookingMessage,
+  findApprovedTemplate,
 };

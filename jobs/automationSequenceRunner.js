@@ -7,6 +7,11 @@ const { isSessionOpen } = require('../utils/sessionWindow');
 const { generateFollowUpMessage } = require('../services/groqService');
 const { localeFromSettings, zonedParts, wallTimeToUtc } = require('../utils/workspaceLocale');
 
+// The reason a send failed, for the chat bubble. Best-effort: error_detail is a later migration.
+const saveSendError = (messageId, result) => (messageId && !result.success
+  ? query('UPDATE whatsapp_messages SET error_detail = $2 WHERE id = $1', [messageId, String(result.error || 'WhatsApp rejected the message.').slice(0, 500)]).catch(() => {})
+  : null);
+
 // Business hours are the workspace's local time (settings.timezone).
 const localHHMM = (settings, now) => {
   const { minutes } = zonedParts(now, localeFromSettings(settings).timezone);
@@ -127,9 +132,9 @@ const runAutomationSequences = async () => {
             const sendResult = await sendTextMessage(row.phone, message, credentials);
             await query(
               `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, is_automated, is_ai_generated)
-               VALUES ($1,$2,'outbound',$3,'text',$4,$5,true,$6)`,
+               VALUES ($1,$2,'outbound',$3,'text',$4,$5,true,$6) RETURNING id`,
               [row.tenant_id, row.lead_id, message, sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed', aiGeneratedSend]
-            ).catch(() => {});
+            ).then(r => saveSendError(r.rows[0]?.id, sendResult)).catch(() => {});
             await query(
               `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
                VALUES ($1,$2,'automated_whatsapp',$3,$4)`,
@@ -178,10 +183,23 @@ const runAutomationSequences = async () => {
             // Consent: marketing templates need an opt-in; an unknown template counts as marketing.
             const consent = await checkTemplateConsent({ tenantId: row.tenant_id, leadId: row.lead_id, template: matchedTemplate });
             if (!consent.allowed) {
+              // Couldn't read the template list (network): the category is unknown, so try
+              // again in an hour rather than treat it as marketing and block for good.
+              if (!templateList?.success) {
+                await query(`UPDATE automation_enrollments SET next_send_at = NOW() + INTERVAL '1 hour' WHERE id = $1`, [row.enrollment_id]);
+                continue;
+              }
+              // Consent won't change by itself, so retrying every cycle only floods the timeline
+              // (one lead logged 146 skips). Stop the enrolment once, with a visible reason.
+              const reasonCode = /opted out/i.test(consent.reason) ? 'opted_out' : consent.category === 'MARKETING' ? 'blocked_no_opt_in' : 'blocked_no_consent';
+              await query(
+                `UPDATE automation_enrollments SET status = 'cancelled', cancelled_at = NOW(), cancelled_reason = $2 WHERE id = $1 AND status = 'active'`,
+                [row.enrollment_id, reasonCode]
+              );
               await query(
                 `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
-                 VALUES ($1,$2,'automation_skipped','Automated template not sent',$3)`,
-                [row.tenant_id, row.lead_id, consent.reason]
+                 VALUES ($1,$2,'automation_blocked','Automation stopped: template not allowed',$3)`,
+                [row.tenant_id, row.lead_id, `${consent.reason} Template: ${step.approved_template_name}. It resumes automatically when the lead opts in (or switch this step to a Utility template).`]
               ).catch(() => {});
               continue;
             }
@@ -198,10 +216,10 @@ const runAutomationSequences = async () => {
             }
             await query(
               `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, template_name, wa_message_id, status, is_automated)
-               VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,true)`,
+               VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,true) RETURNING id`,
               [row.tenant_id, row.lead_id, renderedMessage, step.approved_template_name,
                 sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed']
-            ).catch(() => {});
+            ).then(r => saveSendError(r.rows[0]?.id, sendResult)).catch(() => {});
             await query(
               `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
                VALUES ($1,$2,'automated_whatsapp','Automated template sent',$3)`,

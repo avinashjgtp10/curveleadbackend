@@ -1,6 +1,7 @@
 const path = require('path');
 const axios = require('axios');
 const { query } = require('../config/db');
+const { resumeBlockedEnrollments } = require('../services/whatsappConsent');
 const { normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
 const { getWorkspaceLocale, localeFromSettings } = require('../utils/workspaceLocale');
 const { uploadToS3 } = require('../config/s3');
@@ -208,8 +209,12 @@ const updateOptIns = async (req, res) => {
              WHERE ${match}`, [...params, (source || 'manual').slice(0, 50)])
         : await query(`UPDATE leads SET opted_out = true, opted_out_at = NOW() WHERE ${match}`, params);
     } catch (e) {
-      if (isMissingSchema(e)) return res.status(409).json({ error: 'Opt-in tracking needs the database migration (migration_whatsapp_hub.sql) first.', needs_migration: true });
+      if (isMissingSchema(e)) return res.status(409).json({ error: 'Opt-in tracking is temporarily unavailable while we finish an update. Please try again later.', needs_migration: true });
       throw e;
+    }
+    if (action === 'opt_in' && result.rowCount) {
+      const ids = (await query(`SELECT id FROM leads WHERE ${match}`, params)).rows.map(r => r.id);
+      await resumeBlockedEnrollments({ tenantId: req.tenantId, leadIds: ids }).catch(() => {});
     }
     res.json({ updated: result.rowCount });
   } catch (e) { console.error('updateOptIns:', e.message); res.status(500).json({ error: 'Failed to update opt-ins.' }); }

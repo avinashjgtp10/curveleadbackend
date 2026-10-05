@@ -22,6 +22,7 @@ const getGmbSettings = async (req, res) => {
       enabled: !!s.google_review_request_enabled,
       review_link: s.google_review_link || '',
       message: s.google_review_request_message || DEFAULT_TEMPLATE,
+      template_name: s.google_review_request_template || '',
       gmb_connected: !!s.gmb_refresh_token_encrypted,
       gmb_account_name: s.gmb_account_name || null,
       gmb_locations_loaded: !!s.gmb_account_id,
@@ -32,11 +33,12 @@ const getGmbSettings = async (req, res) => {
 // PUT /api/gmb/settings
 const updateGmbSettings = async (req, res) => {
   try {
-    const { enabled, review_link, message } = req.body;
+    const { enabled, review_link, message, template_name } = req.body;
     const patch = {};
     if (enabled !== undefined) patch.google_review_request_enabled = !!enabled;
     if (review_link !== undefined) patch.google_review_link = String(review_link).trim().slice(0, 500);
     if (message !== undefined) patch.google_review_request_message = String(message).trim().slice(0, 1000);
+    if (template_name !== undefined) patch.google_review_request_template = String(template_name || '').trim().slice(0, 200);
     await saveSettings(req.tenantId, patch);
     res.json({ ok: true });
   } catch (e) { console.error('updateGmbSettings:', e.message); res.status(500).json({ error: 'Failed to save.' }); }

@@ -94,7 +94,7 @@ const getSettings = async (req, res) => {
   } catch (e) {
     console.error('getSettings error:', e.message);
     if (e.message?.includes('settings')) {
-      return res.status(500).json({ error: 'DB migration required. Run migration_integrations.sql on your RDS database.' });
+      return res.status(500).json({ error: 'Integrations are temporarily unavailable while we finish an update. Please try again later.' });
     }
     res.status(500).json({ error: 'Failed.' });
   }
@@ -267,7 +267,7 @@ const facebookAuth = async (req, res) => {
 
     const appId = process.env.META_APP_ID;
     const appSecret = process.env.META_APP_SECRET;
-    if (!appId || !appSecret) return res.status(500).json({ error: 'META_APP_ID / META_APP_SECRET not configured on server.' });
+    if (!appId || !appSecret) { console.error('META_APP_ID / META_APP_SECRET not configured on server.'); return res.status(500).json({ error: 'Connecting with Facebook is temporarily unavailable. Please contact support.' }); }
 
     const tokenData = await fbGet(
       `/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${encodeURIComponent(user_token)}`
@@ -511,7 +511,7 @@ const whatsappEmbeddedSignup = async (req, res) => {
 
     const appId = process.env.META_APP_ID;
     const appSecret = process.env.META_APP_SECRET;
-    if (!appId || !appSecret) return res.status(500).json({ error: 'META_APP_ID / META_APP_SECRET not configured on server.' });
+    if (!appId || !appSecret) { console.error('META_APP_ID / META_APP_SECRET not configured on server.'); return res.status(500).json({ error: 'Connecting with Facebook is temporarily unavailable. Please contact support.' }); }
 
     // Business integration token: scoped to the assets the customer granted, no expiry.
     const { access_token: token } = await fbGet(
