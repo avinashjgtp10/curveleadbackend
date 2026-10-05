@@ -1,5 +1,5 @@
 const { query, transaction } = require('../config/db');
-const { exchangeForLongLived, inspectToken, saveToken } = require('../services/metaAds/client');
+const { exchangeForLongLived, inspectToken, fetchPermissions, saveToken } = require('../services/metaAds/client');
 const accounts = require('../services/social/accounts');
 const { storeUpload, withPreviewUrls, ownsKey } = require('../services/social/media');
 const { validatePost, derivePostType } = require('../services/social/rules');
@@ -45,7 +45,8 @@ const connectMeta = async (req, res) => {
     const info = await inspectToken(token);
     if (!info.is_valid || !info.user_id) return bad(res, 'Facebook did not return a valid login. Please try again.', 400);
     if (!info.scopes.includes('pages_show_list')) return bad(res, 'Allow CurveLead to see your Pages when logging in with Facebook.', 400);
-    const tokenId = await saveToken({ tenantId: req.tenantId, userId: req.user.id, externalUserId: info.user_id, token, scopes: info.scopes, expiresAt: info.expires_at });
+    const declined = (await fetchPermissions(token).catch(() => [])).filter(p => p.status === 'declined').map(p => p.permission);
+    const tokenId = await saveToken({ tenantId: req.tenantId, userId: req.user.id, externalUserId: info.user_id, token, scopes: info.scopes, expiresAt: info.expires_at, declinedScopes: declined });
     const found = await accounts.discoverMetaAccounts({ tenantId: req.tenantId, tokenId, token, scopes: info.scopes });
     const missing = ['pages_manage_posts', 'instagram_content_publish'].filter(s => !info.scopes.includes(s));
     res.json({ ...found, missing_scopes: missing });

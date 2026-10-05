@@ -19,7 +19,7 @@ const upsertAccount = (tenantId, a) => query(
      picture_url = EXCLUDED.picture_url, token_id = COALESCE(EXCLUDED.token_id, social_accounts.token_id),
      token_encrypted = COALESCE(EXCLUDED.token_encrypted, social_accounts.token_encrypted),
      key_version = COALESCE(EXCLUDED.key_version, social_accounts.key_version),
-     status = 'active', last_error = NULL, meta = EXCLUDED.meta, updated_at = now()
+     status = 'active', last_error = NULL, expired_at = NULL, error_subcode = NULL, meta = EXCLUDED.meta, updated_at = now()
    RETURNING id`,
   [tenantId, a.platform, a.external_id, a.parent_external_id || null, a.name || null, a.username || null, a.picture_url || null,
     a.token_id || null, a.token_encrypted || null, a.key_version || null, JSON.stringify(a.meta || {})]

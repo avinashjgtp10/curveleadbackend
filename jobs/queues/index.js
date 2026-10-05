@@ -29,7 +29,8 @@ const runLocal = async (name, data, attempt = 0) => {
     await h.fn(data, { attempt });
   } catch (e) {
     console.error(`[jobs] ${name} failed (attempt ${attempt + 1}/${h.attempts}):`, e.message);
-    if (attempt + 1 < h.attempts) setTimeout(() => runLocal(name, data, attempt + 1), h.backoffMs * 2 ** attempt).unref?.();
+    // Errors flagged noRetry (e.g. a Facebook login that Facebook ended) can't succeed later.
+    if (!e?.noRetry && attempt + 1 < h.attempts) setTimeout(() => runLocal(name, data, attempt + 1), h.backoffMs * 2 ** attempt).unref?.();
   }
 };
 const localRunning = new Set();
@@ -67,7 +68,12 @@ const start = async () => {
       const connection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
       bull = { connection, queues: new Map(), workers: [] };
       for (const [name, h] of handlers) {
-        const worker = new Worker(queueName(name), (job) => h.fn(job.data, { attempt: job.attemptsMade }), { connection, concurrency: h.concurrency });
+        const { UnrecoverableError } = require('bullmq');
+        const run = async (job) => {
+          try { return await h.fn(job.data, { attempt: job.attemptsMade }); }
+          catch (e) { throw e?.noRetry ? new UnrecoverableError(e.message) : e; }   // BullMQ: fail now, no more attempts
+        };
+        const worker = new Worker(queueName(name), run, { connection, concurrency: h.concurrency });
         worker.on('failed', (job, err) => console.error(`[jobs] ${name} failed (attempt ${job?.attemptsMade}):`, err.message));
         bull.workers.push(worker);
       }

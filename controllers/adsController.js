@@ -1,7 +1,8 @@
 const { query } = require('../config/db');
 const { metricScope, getBreakdown } = require('../services/metrics');
 const queues = require('../jobs/queues');
-const { exchangeForLongLived, inspectToken, saveToken, syncAccountsForToken } = require('../services/metaAds/client');
+const { exchangeForLongLived, inspectToken, fetchPermissions, saveToken, syncAccountsForToken } = require('../services/metaAds/client');
+const { classifyPermissions, adsAccessProblem } = require('../services/metaAds/tokenHealth');
 const metaLeads = require('../services/metaLeads');
 const controls = require('../services/metaAds/controls');
 const googleControls = require('../services/googleAds/controls');
@@ -58,7 +59,8 @@ const listAccounts = async (req, res) => {
     const { rows } = await query(
       `SELECT a.id, a.external_id, a.name, a.currency, a.timezone_name, a.account_status, a.is_primary, a.is_active,
               a.last_synced_at, a.insights_synced_through, a.sync_error,
-              t.status AS token_status, t.expires_at AS token_expires_at
+              t.status AS token_status, t.expires_at AS token_expires_at, t.expired_at AS token_expired_at, t.error_subcode AS token_error_subcode,
+              t.scopes AS token_scopes, t.declined_scopes AS token_declined_scopes
        FROM ad_accounts a LEFT JOIN ad_oauth_tokens t ON t.id = a.token_id AND t.tenant_id = a.tenant_id
        WHERE a.tenant_id = $1 AND a.provider = $2 ORDER BY a.is_primary DESC, a.name`,
       [req.tenantId, providerOf(req.query)]
@@ -68,6 +70,10 @@ const listAccounts = async (req, res) => {
 };
 
 // POST /api/ads/accounts/connect { user_token } — token from Facebook Login.
+// Response: { connected, permissions: { ads_read: 'granted'|'declined'|'missing', … } }.
+// Without ads_read / ads_management: 400 with code ADS_READ_DECLINED (the person turned it
+// off — Reconnect re-asks) or ADS_READ_NOT_APPROVED (never offered: Standard Access and no
+// role on the Meta app).
 const connectAccounts = async (req, res) => {
   try {
     const { user_token } = req.body || {};
@@ -75,13 +81,15 @@ const connectAccounts = async (req, res) => {
     const token = await exchangeForLongLived(user_token);
     const info = await inspectToken(token);
     if (!info.is_valid || !info.user_id) return bad(res, 'Facebook did not return a valid token. Please try again.', 400);
-    if (!info.scopes.some((s) => s === 'ads_read' || s === 'ads_management'))
-      return bad(res, 'Grant the "ads_read" permission when logging in with Facebook to connect ad accounts.', 400);
-    const tokenId = await saveToken({ tenantId: req.tenantId, userId: req.user.id, externalUserId: info.user_id, token, scopes: info.scopes, expiresAt: info.expires_at });
+    const summary = classifyPermissions({ granted: info.scopes, permissions: await fetchPermissions(token).catch(() => []) });
+    const problem = adsAccessProblem(summary);
+    if (problem) return res.status(400).json({ error: problem.message, code: problem.code, permissions: summary.byName });
+    const tokenId = await saveToken({ tenantId: req.tenantId, userId: req.user.id, externalUserId: info.user_id, token, scopes: info.scopes,
+      expiresAt: info.expires_at, declinedScopes: summary.allDeclined });
     const count = await syncAccountsForToken({ tenantId: req.tenantId, tokenId, token });
     const { rows } = await query("SELECT id FROM ad_accounts WHERE tenant_id = $1 AND token_id = $2 AND is_active", [req.tenantId, tokenId]);
     for (const a of rows) await queues.enqueue('ads:sync-account', { tenantId: req.tenantId, adAccountId: a.id }, { jobId: `sync-${a.id}` });
-    res.json({ connected: count });
+    res.json({ connected: count, permissions: summary.byName });
   } catch (e) {
     if (e.name === 'MetaGraphError') return bad(res, `Facebook: ${e.message}`, 400);
     fail('Connect ad accounts')(e, res);
@@ -233,6 +241,7 @@ const listLeadForms = async (req, res) => {
   try { res.json(await metaLeads.listForms(req.tenantId)); }
   catch (e) {
     if (e.code === 'NO_PAGE') return bad(res, 'Connect your Facebook Page in Integrations to see its lead forms.', 400);
+    if (e.code === 'PAGE_TOKEN_EXPIRED') return bad(res, e.message, 400);
     if (e.name === 'MetaGraphError') return bad(res, `Facebook: ${e.message}`, 400);
     fail('List lead forms')(e, res);
   }

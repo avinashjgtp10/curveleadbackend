@@ -2,8 +2,9 @@ const { query } = require('../config/db');
 const queues = require('./queues');
 const { syncAdAccount } = require('../services/metaAds/sync');
 const { syncGoogleAccount } = require('../services/googleAds/sync');
-const { inspectToken, exchangeForLongLived, saveToken, markToken } = require('../services/metaAds/client');
+const { inspectToken, exchangeForLongLived, saveToken } = require('../services/metaAds/client');
 const { decryptToken } = require('../utils/cryptoSecrets');
+const { expireAdToken } = require('../services/metaAds/tokenHealth');
 const { createNotification } = require('../controllers/notificationController');
 
 const SYNC_EVERY_MS = Number(process.env.ADS_INSIGHTS_SYNC_MINUTES || 240) * 60 * 1000;
@@ -36,7 +37,7 @@ const refreshTokens = async () => {
       const token = decryptToken(t.token_encrypted, t.key_version);
       const info = await inspectToken(token);
       if (!info.is_valid) {
-        await markToken(t.tenant_id, t.id, 'expired', 'Meta reports the token is no longer valid.');
+        await expireAdToken({ tenantId: t.tenant_id, tokenId: t.id, info: { subcode: info.error?.subcode ?? null, message: info.error?.message || 'Meta reports the token is no longer valid.' } });
         await notifyAdmins(t.tenant_id, 'Facebook Ads disconnected — reconnect to keep ad data syncing.');
         continue;
       }

@@ -206,7 +206,10 @@ test('an expired login is not retried: account marked expired, post partly publi
   } });
   const r = await publishPost({ postId: 'p1' }, w.deps);
   assert.equal(r.status, 'partially_published');
-  assert.equal(w.marked[0][2], 'expired');
+  const expire = w.sql.find(q => q.text.includes("UPDATE social_accounts SET status = 'expired'"));
+  assert.ok(expire, 'account marked expired');
+  assert.match(expire.text, /expired_at = COALESCE\(expired_at, now\(\)\)/, 'with the time it expired');
+  assert.deepEqual(w.marked, [], 'not the generic status update');
   assert.deepEqual(w.notified, [['instagram']]);
   assert.match(w.sql.find(q => q.text.includes("SET status = 'failed'")).params[2], /login for this account expired/);
 });
