@@ -34,8 +34,8 @@ async function overview(tenantId) {
  WHERE m.tenant_id=$1 AND m.direction='outbound' AND m.status IN ('sent','delivered','read') AND m.sent_at>now()-interval '24 hours') recipients`,[tenantId])).rows[0].n;
  const health=(await query("SELECT token_valid,checked_at FROM integration_health WHERE tenant_id=$1 AND provider='whatsapp'",[tenantId])).rows[0];
  return {onboarding:{completed,dismissed:!!s.onboarding_dismissed&&completed.length===STEPS.length},
- whatsapp:{status:!detected.whatsapp?'Not connected':(health?.token_valid===false?'Disconnected':health?.token_valid===true?'Connected':'Not verified'),limit,remaining:limit===null?null:Math.max(0,limit-usage),used:usage},
- automations:{sources:detected.meta||!!s.google_webhook_secret,assignment:counts.assignment>0,dedupe:s.dedupe_mode!=='off',responder:!!s.whatsapp_auto_responder_enabled,sequences:counts.sequence>0,inbound:(s.inbound_reply_rules||[]).some(r=>r.enabled!==false),bulk:counts.broadcasts>0,capi:!!s.meta_capi_enabled,webhooks:counts.webhooks>0,reviews:!!s.google_review_request_enabled}};
+ whatsapp:{status:!detected.whatsapp?'Not connected':(health?.token_valid===false?'Action needed':health?.token_valid===true?'Connected':'Not verified'),limit,remaining:limit===null?null:Math.max(0,limit-usage),used:usage},
+ automations:{sources:detected.meta||!!s.google_webhook_secret,assignment:counts.assignment>0,dedupe:s.dedupe_mode!=='off',responder:!!s.whatsapp_auto_responder_enabled,sequences:counts.sequence>0,inbound:(s.inbound_reply_rules||[]).some(r=>r.enabled!==false)||!!s.ai_qualification_enabled,bulk:counts.broadcasts>0,capi:!s.meta_capi_enabled?false:(s.meta_dataset_id&&s.meta_capi_access_token?true:'not_set_up'),webhooks:counts.webhooks>0,reviews:!!s.google_review_request_enabled}};
 }
 async function saveOnboarding(tenantId,body) {
  if(body.step!==undefined&&!STEPS.includes(body.step)) throw Object.assign(new Error('Invalid onboarding step.'),{status:422});

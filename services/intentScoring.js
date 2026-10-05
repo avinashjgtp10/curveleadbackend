@@ -84,6 +84,7 @@ function computeIntentScore({ lead, followupHealth, rolloverCount = 0, isWon = f
   else if (rolloverCount >= 2) suggested_action = "Get a real outcome on the next call — don't just reschedule";
   else if (followupHealth === 'delayed') suggested_action = 'Follow up today';
   else if (isPositiveStatus) suggested_action = 'Move forward — schedule the next step';
+  else if (!lead.last_contacted_at) suggested_action = 'Call or WhatsApp within 5 minutes — first contact wins';
 
   return { intent_score, score, reason: reasons.join(' '), suggested_action };
 }

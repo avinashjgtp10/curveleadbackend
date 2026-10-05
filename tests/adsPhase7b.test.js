@@ -22,7 +22,7 @@ const schema = require('../services/googleAds/aiSearchSchema');
 const aiSearch = require('../services/googleAds/aiSearch');
 const googleControls = require('../services/googleAds/controls');
 const { dailyBudgetTotal } = require('../services/metaAds/controls');
-const { schemaErrorMessage } = require('../utils/schemaErrors');
+const { migrationFor } = require('../utils/schemaErrors');
 
 const reset = (h) => { calls.length = 0; handler = h || (() => ({ rows: [] })); };
 const audits = () => calls.filter(c => /INSERT INTO ad_audit_log/.test(c.sql)).map(c => ({ action: c.params[6], success: c.params[11], provider: c.params[13], error: c.params[12] }));
@@ -293,7 +293,7 @@ test('the AI brief needs a landing page; over-long variants are dropped only whe
 });
 
 test('missing 7b columns point at the 7b migration', () => {
-  assert.match(schemaErrorMessage({ code: '42703', message: 'column "budget_resource" of relation "ad_campaigns" does not exist' }), /migration_ads_phase7b/);
-  assert.match(schemaErrorMessage({ code: '42703', message: 'column "provider" of relation "ad_ai_drafts" does not exist' }), /migration_ads_phase7b/);
-  assert.match(schemaErrorMessage({ code: '42703', message: 'column a.provider does not exist' }), /migration_ads_phase7b/);
+  assert.match(migrationFor({ code: '42703', message: 'column "budget_resource" of relation "ad_campaigns" does not exist' }), /migration_ads_phase7b/);
+  assert.match(migrationFor({ code: '42703', message: 'column "provider" of relation "ad_ai_drafts" does not exist' }), /migration_ads_phase7b/);
+  assert.match(migrationFor({ code: '42703', message: 'column a.provider does not exist' }), /migration_ads_phase7b/);
 });

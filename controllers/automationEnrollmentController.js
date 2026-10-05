@@ -84,12 +84,15 @@ const getAutomationLeads = async (req, res) => {
       SELECT l.id, l.name, l.phone, l.won_at, l.lost_at, l.opted_out, e.enrollment,
         CASE WHEN l.won_at IS NOT NULL THEN 'Converted' WHEN l.lost_at IS NOT NULL THEN 'Lost'
         WHEN e.status = 'active' THEN 'In Progress' WHEN e.status = 'completed' THEN 'Completed'
+        WHEN e.status = 'cancelled' AND e.cancelled_reason LIKE 'blocked%' THEN 'Blocked'
         WHEN e.status = 'cancelled' THEN 'Cancelled' ELSE 'Not Enrolled' END AS status,
         CASE WHEN e.enrollment IS NULL THEN 'Not Enrolled' ELSE
-          CASE WHEN e.status = 'cancelled' THEN 'Cancelled — ' ELSE '' END ||
+          CASE WHEN e.status = 'cancelled' AND e.cancelled_reason = 'blocked_no_opt_in' THEN 'Blocked (no opt-in) — '
+               WHEN e.status = 'cancelled' AND e.cancelled_reason LIKE 'blocked%' THEN 'Blocked — '
+               WHEN e.status = 'cancelled' THEN 'Cancelled — ' ELSE '' END ||
           'Step ' || (e.current_step + 1) || ' of ' || e.step_count END AS step
       FROM leads l LEFT JOIN LATERAL (
-        SELECT e.status, e.current_step, json_array_length(st.steps) AS step_count,
+        SELECT e.status, e.cancelled_reason, e.current_step, json_array_length(st.steps) AS step_count,
           to_jsonb(e) || jsonb_build_object('enrollment_id', e.id, 'sequence_name', s.name, 'steps', st.steps) AS enrollment
         FROM automation_enrollments e JOIN automation_sequences s ON s.id = e.sequence_id
         CROSS JOIN LATERAL (SELECT COALESCE(json_agg(json_build_object('step_order', step_order, 'channel', channel, 'message', message) ORDER BY step_order), '[]') AS steps FROM automation_sequence_steps WHERE sequence_id = e.sequence_id) st

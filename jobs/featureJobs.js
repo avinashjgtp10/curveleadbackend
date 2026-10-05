@@ -47,6 +47,12 @@ async function checkHealth() {
             },
           );
           valid = true;
+          // Reading the number works even when messaging permission is gone (Meta 131005), so a
+          // failure recorded by an actual send stays until a send succeeds or WhatsApp is reconnected.
+          if (provider === "whatsapp") {
+            const prev = (await query("SELECT token_valid FROM integration_health WHERE tenant_id=$1 AND provider='whatsapp'", [t.id])).rows[0];
+            if (prev?.token_valid === false) valid = null;
+          }
         } catch (e) {
           if (
             [190, 102].includes(e.response?.data?.error?.code) ||

@@ -26,7 +26,8 @@ const formatFieldDataNotes = (fieldData, meta = {}) => {
 
   if (lines.length) blocks.push(`Meta Lead Form Submission:\n${lines.join('\n')}`);
 
-  if (fieldData?.length) blocks.push(`Raw Meta Field Data:\n${JSON.stringify(fieldData)}`);
+  // The raw JSON used to be appended here too; every answer is already listed above and kept
+  // in custom_fields, so notes stay readable.
   return blocks.length ? blocks.join('\n\n') : null;
 };
 

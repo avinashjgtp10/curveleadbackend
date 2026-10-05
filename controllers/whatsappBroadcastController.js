@@ -420,7 +420,7 @@ const sendBroadcast = async (req, res) => {
         );
         return res.status(201).json({ scheduled: true, id: saved.rows[0].id, scheduled_at: saved.rows[0].scheduled_at, count: lead_ids.length });
       } catch (e) {
-        if (e.code === '42P01') return res.status(409).json({ error: 'Scheduling needs the database migration (migration_scheduled_broadcasts.sql) first.' });
+        if (e.code === '42P01') return res.status(409).json({ error: 'Scheduling is temporarily unavailable while we finish an update. Please try again later.' });
         throw e;
       }
     }
