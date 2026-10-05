@@ -12,6 +12,9 @@ const { notifyNewLeadToAdmins } = require('./notificationController');
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { syncTenantAdInsights } = require('../utils/metaAdInsights');
 const { syncFacebookLeadsForTenant } = require('../utils/metaLeadSync');
+const { PAGE_TOKEN_HEALTH_KEYS } = require('../services/metaAds/tokenHealth');
+// A new Page login clears the "expired" marker set when Facebook ended the old one.
+const withoutPageTokenHealth = (settings) => Object.fromEntries(Object.entries(settings).filter(([k]) => !PAGE_TOKEN_HEALTH_KEYS.includes(k)));
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -62,6 +65,8 @@ const getSettings = async (req, res) => {
       meta_page_name: settings.meta_page_name || '',
       meta_page_access_token: settings.meta_page_access_token ? '••••••••' : '',
       meta_configured: !!(settings.meta_page_id && settings.meta_page_access_token),
+      meta_page_token_status: settings.meta_page_token_status === 'expired' ? 'expired' : (settings.meta_page_access_token ? 'active' : null),
+      meta_page_token_expired_at: settings.meta_page_token_expired_at || null,
       meta_dataset_id: settings.meta_dataset_id || '',
       meta_capi_access_token: settings.meta_capi_access_token ? '••••••••' : '',
       meta_capi_configured: !!(settings.meta_dataset_id && settings.meta_capi_access_token),
@@ -114,7 +119,10 @@ const updateSettings = async (req, res) => {
 
     const updated = { ...current };
     if (meta_page_id !== undefined) updated.meta_page_id = meta_page_id;
-    if (meta_page_access_token && !meta_page_access_token.startsWith('•')) updated.meta_page_access_token = meta_page_access_token;
+    if (meta_page_access_token && !meta_page_access_token.startsWith('•')) {
+      updated.meta_page_access_token = meta_page_access_token;
+      for (const k of PAGE_TOKEN_HEALTH_KEYS) delete updated[k];
+    }
     if (google_webhook_secret && !google_webhook_secret.startsWith('•')) updated.google_webhook_secret = google_webhook_secret;
     const whatsappCredsChanged = whatsapp_phone_number_id !== undefined
       || (whatsapp_access_token !== undefined && !whatsapp_access_token.startsWith('•'));
@@ -324,7 +332,7 @@ const facebookConnectPage = async (req, res) => {
 
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
-    const updated = { ...current, meta_page_id: page_id, meta_page_access_token: page_access_token, meta_page_name: page_name };
+    const updated = { ...withoutPageTokenHealth(current), meta_page_id: page_id, meta_page_access_token: page_access_token, meta_page_name: page_name };
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(updated), req.tenantId]);
 
     // Auto-subscribe page to webhook so real-time leads start flowing
@@ -450,7 +458,7 @@ const facebookSyncLeads = async (req, res) => {
     const { created, skipped, last_synced_at } = await syncFacebookLeadsForTenant(req.tenantId);
     res.json({ message: `Sync complete — ${created} new leads imported, ${skipped} skipped.`, created, skipped, last_synced_at });
   } catch (e) {
-    if (e.code === 'NO_PAGE') return res.status(400).json({ error: e.message });
+    if (e.code === 'NO_PAGE' || e.code === 'PAGE_TOKEN_EXPIRED') return res.status(400).json({ error: e.message, code: e.code });
     console.error('facebookSyncLeads:', e.message);
     res.status(500).json({ error: e.message || 'Failed to sync leads.' });
   }

@@ -8,7 +8,8 @@ const runMetaLeadSync = async () => {
   try {
     const tenants = await query(
       `SELECT id FROM tenants WHERE settings->>'meta_page_id' IS NOT NULL AND settings->>'meta_page_id' != ''
-         AND settings->>'meta_page_access_token' IS NOT NULL AND settings->>'meta_page_access_token' != ''`
+         AND settings->>'meta_page_access_token' IS NOT NULL AND settings->>'meta_page_access_token' != ''
+         AND COALESCE(settings->>'meta_page_token_status', '') <> 'expired'`
     );
 
     let created = 0, failed = 0;

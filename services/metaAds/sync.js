@@ -3,6 +3,7 @@ const { getAccountWithToken, markToken } = require('./client');
 const { fetchHierarchy, saveHierarchy } = require('./hierarchy');
 const { fetchDailyAdInsights, saveDailyInsights, syncLifetimeCampaignTotals } = require('./insights');
 const { MetaGraphError } = require('../../utils/metaGraph');
+const { deadTokenInfo, expireAdToken, EXPIRED_TEXT } = require('./tokenHealth');
 
 const BACKFILL_DAYS = 90;
 // Meta keeps updating recent days (attribution windows), so each run re-pulls these.
@@ -54,6 +55,14 @@ const syncAdAccount = async ({ tenantId, adAccountId }) => {
     );
     return { campaigns: campaigns.length, insight_rows: saved, ...range };
   } catch (e) {
+    // Facebook ended the login: mark it expired and stop here — returning (not throwing)
+    // means the job queue doesn't retry; the 4-hourly fan-out skips expired logins.
+    const dead = deadTokenInfo(e);
+    if (dead) {
+      if (account.token_row_id) await expireAdToken({ tenantId, tokenId: account.token_row_id, info: dead });
+      await query('UPDATE ad_accounts SET sync_error = $3, updated_at = now() WHERE tenant_id = $1 AND id = $2', [tenantId, adAccountId, EXPIRED_TEXT]);
+      return { skipped: 'token_expired', subcode: dead.subcode };
+    }
     if (e instanceof MetaGraphError && e.isAuth && account.token_row_id) await markToken(tenantId, account.token_row_id, 'expired', e.message);
     await query('UPDATE ad_accounts SET sync_error = $3, updated_at = now() WHERE tenant_id = $1 AND id = $2',
       [tenantId, adAccountId, String(e.message).slice(0, 500)]);

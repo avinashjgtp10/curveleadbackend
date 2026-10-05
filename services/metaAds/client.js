@@ -20,7 +20,7 @@ const exchangeForLongLived = async (shortToken) => {
   return data.access_token;
 };
 
-// { is_valid, user_id, scopes, expires_at (Date|null — null = never) }
+// { is_valid, user_id, scopes, expires_at (Date|null — null = never), error ({ code, subcode, message } | null) }
 const inspectToken = async (token) => {
   const { data } = await graphRequest({ path: '/debug_token', token: appToken(), params: { input_token: token }, retries: 2 });
   const expires = Number(data?.expires_at) || Number(data?.data_access_expires_at) || 0;
@@ -29,20 +29,26 @@ const inspectToken = async (token) => {
     user_id: data?.user_id ? String(data.user_id) : null,
     scopes: data?.scopes || [],
     expires_at: Number(data?.expires_at) === 0 ? null : expires ? new Date(expires * 1000) : null,
+    error: data?.error ? { code: data.error.code ?? null, subcode: data.error.subcode ?? null, message: data.error.message || null } : null,
   };
 };
 
-const saveToken = async ({ tenantId, userId, externalUserId, token, scopes, expiresAt }) => {
+// [{ permission, status: 'granted' | 'declined' | 'expired' }] for the person behind the token.
+const fetchPermissions = async (token) => (await graphRequest({ path: '/me/permissions', token, retries: 2 })).data || [];
+
+// Reconnecting clears any earlier expiry. declinedScopes: permissions the person turned off
+// (omit to keep the saved list, e.g. when the daily job refreshes the token).
+const saveToken = async ({ tenantId, userId, externalUserId, token, scopes, expiresAt, declinedScopes = null }) => {
   const { ciphertext, keyVersion } = encryptToken(token);
   const { rows } = await query(
-    `INSERT INTO ad_oauth_tokens (tenant_id, provider, external_user_id, token_encrypted, key_version, scopes, expires_at, status, last_checked_at, last_refreshed_at, created_by)
-     VALUES ($1, 'meta', $2, $3, $4, $5, $6, 'active', now(), now(), $7)
+    `INSERT INTO ad_oauth_tokens (tenant_id, provider, external_user_id, token_encrypted, key_version, scopes, declined_scopes, expires_at, status, last_checked_at, last_refreshed_at, created_by)
+     VALUES ($1, 'meta', $2, $3, $4, $5, COALESCE($6::text[], '{}'), $7, 'active', now(), now(), $8)
      ON CONFLICT (tenant_id, provider, external_user_id) DO UPDATE SET
        token_encrypted = EXCLUDED.token_encrypted, key_version = EXCLUDED.key_version, scopes = EXCLUDED.scopes,
-       expires_at = EXCLUDED.expires_at, status = 'active', last_error = NULL,
-       last_checked_at = now(), last_refreshed_at = now(), updated_at = now()
+       declined_scopes = COALESCE($6::text[], ad_oauth_tokens.declined_scopes), expires_at = EXCLUDED.expires_at, status = 'active', last_error = NULL,
+       expired_at = NULL, error_subcode = NULL, last_checked_at = now(), last_refreshed_at = now(), updated_at = now()
      RETURNING id`,
-    [tenantId, externalUserId, ciphertext, keyVersion, scopes || [], expiresAt || null, userId || null]
+    [tenantId, externalUserId, ciphertext, keyVersion, scopes || [], declinedScopes, expiresAt || null, userId || null]
   );
   return rows[0].id;
 };
@@ -85,4 +91,4 @@ const getAccountWithToken = async (tenantId, adAccountId) => {
   return { account, token };
 };
 
-module.exports = { appToken, exchangeForLongLived, inspectToken, saveToken, markToken, syncAccountsForToken, getAccountWithToken };
+module.exports = { appToken, exchangeForLongLived, inspectToken, fetchPermissions, saveToken, markToken, syncAccountsForToken, getAccountWithToken };

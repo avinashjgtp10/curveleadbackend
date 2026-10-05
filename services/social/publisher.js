@@ -1,6 +1,7 @@
 const { query } = require('../../config/db');
 const queues = require('../../jobs/queues');
 const { getAccountForPublish, markAccount } = require('./accounts');
+const { deadTokenInfo, expireSocialAccount } = require('../metaAds/tokenHealth');
 const { signedUrl } = require('./media');
 const { platformErrors } = require('./rules');
 const { publishToFacebook } = require('./facebook');
@@ -108,6 +109,8 @@ const publishPost = async ({ postId }, deps = {}) => {
       const account = await getAccount(post.tenant_id, t.account_id);
       if (!account) throw new Error('This account was removed from CurveLead.');
       if (account.platform !== 'gbp' && !account.token) throw new Error('This account has no saved login — reconnect it in Social → Accounts.');
+      // Facebook already ended this login: don't call it again until the person reconnects.
+      if (account.platform !== 'gbp' && account.status === 'expired') throw new Error('The Facebook login for this account expired — reconnect in Social → Accounts.');
       const r = await publishTarget({ post, account, media, settings, deps });
       await db(
         `UPDATE social_post_targets SET status = 'published', external_post_id = $3, permalink = $4, error = NULL, published_at = now(), updated_at = now()
@@ -116,7 +119,10 @@ const publishPost = async ({ postId }, deps = {}) => {
     } catch (e) {
       const retry = isRetryable(e) && attempts < MAX_ATTEMPTS;
       const message = friendlyError(t.platform, e);
-      if (isAuthError(e)) await (deps.markAccount || markAccount)(post.tenant_id, t.account_id, 'expired', message);
+      const dead = deadTokenInfo(e);
+      if (dead) await (deps.expireSocialAccount || expireSocialAccount)({ tenantId: post.tenant_id, accountId: t.account_id, info: dead, query: db });
+      else if (e?.name === 'MetaGraphError' && (e.code === 200 || e.code === 10)) await (deps.markAccount || markAccount)(post.tenant_id, t.account_id, 'error', message);
+      else if (isAuthError(e)) await (deps.markAccount || markAccount)(post.tenant_id, t.account_id, 'expired', message);
       await db(
         `UPDATE social_post_targets SET status = 'failed', error = $3, attempts = $4, updated_at = now() WHERE tenant_id = $1 AND id = $2`,
         [post.tenant_id, t.id, retry ? `${message} Retrying automatically.` : message, retry ? attempts : Math.max(attempts, MAX_ATTEMPTS)]);

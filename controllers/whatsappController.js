@@ -85,6 +85,8 @@ const getInbox = async (req, res) => {
          SELECT c.lead_id, c.message, c.direction, c.sent_at, c.status,
                 l.name as lead_name, l.phone as lead_phone, l.lead_score, l.stage, COALESCE(l.tags, '{}') as tags,
                 l.assigned_to, u.name as assigned_to_name, l.ai_paused, l.custom_fields,
+                l.email as lead_email, l.business_name, COALESCE(NULLIF(l.city, ''), l.location) as lead_city, l.address,
+                l.source, l.lead_number, cmp.name as campaign_name, COALESCE(l.lead_date, l.created_at) as lead_since,
                 (SELECT MAX(sent_at) FROM whatsapp_messages WHERE lead_id = c.lead_id AND direction = 'inbound') as last_inbound_at,
                 (SELECT COUNT(*) FROM whatsapp_messages WHERE lead_id = c.lead_id AND direction = 'inbound' AND read_at IS NULL) as unread_count,
                 ROW_NUMBER() OVER (ORDER BY c.sent_at DESC NULLS LAST) as recency
@@ -97,6 +99,7 @@ const getInbox = async (req, res) => {
          ) c
          JOIN leads l ON l.id = c.lead_id
          LEFT JOIN users u ON l.assigned_to = u.id
+         LEFT JOIN campaigns cmp ON cmp.id = l.campaign_id AND cmp.tenant_id = l.tenant_id
        ) x
        WHERE x.recency <= 100 OR x.unread_count > 0
        ORDER BY x.sent_at DESC NULLS LAST

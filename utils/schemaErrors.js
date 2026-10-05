@@ -2,6 +2,7 @@
 // bare 500. The migration to run goes to the server log, never to the customer. Postgres: 42P01 undefined table,
 // 42703 undefined column, 42P10 no unique index matching an ON CONFLICT clause.
 const MIGRATION_FOR = [
+  [/expired_at|error_subcode|declined_scopes/, 'models/migration_meta_token_health.sql'],
   [/budget_resource|budget_shared|ad_ai_drafts\.provider|ad_audit_log\.provider|"provider" of relation "ad_(ai_drafts|audit_log)"|column (?:\w+\.)?provider does not exist/, 'models/migration_ads_phase7b.sql'],
   [/login_customer_id|google_campaign_id/, 'models/migration_ads_phase7.sql'],
   [/social_accounts|social_posts|social_post_targets|next_attempt_at/, 'models/migration_ads_phase6.sql'],

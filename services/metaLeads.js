@@ -10,6 +10,7 @@ const { notifyNewLeadToAdmins } = require('../controllers/notificationController
 const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
 const { isMetaLeadDeleted } = require('../utils/deletedLeads');
 const { scoreAndSaveLead } = require('./leadScoring');
+const { deadTokenInfo, expirePageToken } = require('./metaAds/tokenHealth');
 const { recordOptIn } = require('./whatsappConsent');
 
 // Meta Lead Ads → CRM leads. One pipeline for the real-time webhook (via the
@@ -21,11 +22,16 @@ const LEAD_FIELDS = 'id,created_time,field_data,ad_id,ad_name,campaign_id,campai
 const FRESH_LEAD_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 const noPage = () => Object.assign(new Error('Connect a Facebook page first.'), { code: 'NO_PAGE', status: 400 });
+// The Page login was ended by Facebook (Graph error 190). Not retried: nothing can work
+// until the Page is connected again in Integrations.
+const pageExpired = () => Object.assign(new Error('The Facebook Page login expired — reconnect Facebook in Integrations to keep importing lead-ad leads.'),
+  { code: 'PAGE_TOKEN_EXPIRED', status: 400, noRetry: true });
 
 const pageContext = async (tenantId) => {
   const { rows } = await query('SELECT name, settings FROM tenants WHERE id = $1', [tenantId]);
   const s = rows[0]?.settings || {};
   if (!s.meta_page_id || !s.meta_page_access_token) throw noPage();
+  if (s.meta_page_token_status === 'expired') throw pageExpired();
   return {
     tenantId, tenantName: rows[0].name, pageId: String(s.meta_page_id), pageToken: s.meta_page_access_token,
     scoreOnIngest: s.meta_lead_score_on_ingest !== false,
@@ -111,25 +117,39 @@ const processLeads = async (ctx, leads, opts) => {
 const ingestWebhookLead = async ({ pageId, leadgenId }) => {
   const tenantId = await tenantForPage(pageId);
   if (!tenantId) return { skipped: 'unknown_page' };
+  try { return await ingestWithContext(tenantId, leadgenId); }
+  catch (e) { if (e.code === 'PAGE_TOKEN_EXPIRED') return { skipped: 'token_expired' }; throw e; }
+};
+const ingestWithContext = async (tenantId, leadgenId) => {
   const ctx = await pageContext(tenantId);
   const { rows } = await query('SELECT id FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND meta_lead_id = $2', [tenantId, String(leadgenId)]);
   if (rows[0]) return { result: 'duplicate' };
-  const lead = await graphRequest({ path: `/${leadgenId}`, token: ctx.pageToken, gateKey: `page:${ctx.pageId}`, params: { fields: LEAD_FIELDS }, retries: 3 });
+  const lead = await withPage(ctx, () => graphRequest({ path: `/${leadgenId}`, token: ctx.pageToken, gateKey: `page:${ctx.pageId}`, params: { fields: LEAD_FIELDS }, retries: 3 }));
   return { result: await processMetaLead(ctx, lead) };
 };
 
-const leadsOfForm = (ctx, formId, sinceUnix) => graphPaged({
+// Runs a Graph call with the Page login; on error 190 the login is marked expired first.
+const withPage = async (ctx, fn) => {
+  try { return await fn(); } catch (e) {
+    const dead = deadTokenInfo(e);
+    if (!dead) throw e;
+    await expirePageToken({ tenantId: ctx.tenantId, info: dead });
+    throw pageExpired();
+  }
+};
+
+const leadsOfForm = (ctx, formId, sinceUnix) => withPage(ctx, () => graphPaged({
   path: `/${formId}/leads`, token: ctx.pageToken, gateKey: `page:${ctx.pageId}`,
   params: {
     fields: LEAD_FIELDS, limit: 100,
     ...(sinceUnix ? { filtering: JSON.stringify([{ field: 'time_created', operator: 'GREATER_THAN', value: sinceUnix }]) } : {}),
   },
-}, 1000);
+}, 1000));
 
-const fetchForms = (ctx) => graphPaged({
+const fetchForms = (ctx) => withPage(ctx, () => graphPaged({
   path: `/${ctx.pageId}/leadgen_forms`, token: ctx.pageToken, gateKey: `page:${ctx.pageId}`,
   params: { fields: 'id,name,status,leads_count,created_time', limit: 100 },
-});
+}));
 
 // Refreshes the workspace's lead forms from its Facebook Page and returns them.
 const listForms = async (tenantId) => {
@@ -166,18 +186,25 @@ const backfillForm = async ({ tenantId, formId, since }) => {
     return counts;
   } catch (e) {
     await query('UPDATE ad_lead_forms SET last_backfill_error = $3 WHERE tenant_id = $1 AND id = $2', [tenantId, formId, String(e.message).slice(0, 500)]);
+    if (e.code === 'PAGE_TOKEN_EXPIRED') return { skipped: 'token_expired' };
     throw e;
   }
 };
 
 // Safety net for missed webhooks: leads created in the last `hours` on every form.
+// Returns token_expired: true (instead of throwing) once the Page login has expired.
 const pollRecentLeads = async (tenantId, hours = 24) => {
-  const ctx = await pageContext(tenantId);
-  const sinceUnix = Math.floor((Date.now() - hours * 3600 * 1000) / 1000);
   const total = { created: 0, duplicate: 0, skipped: 0 };
-  for (const form of await fetchForms(ctx)) {
-    const counts = await processLeads(ctx, await leadsOfForm(ctx, form.id, sinceUnix), { formName: form.name });
-    for (const k of Object.keys(total)) total[k] += counts[k];
+  try {
+    const ctx = await pageContext(tenantId);
+    const sinceUnix = Math.floor((Date.now() - hours * 3600 * 1000) / 1000);
+    for (const form of await fetchForms(ctx)) {
+      const counts = await processLeads(ctx, await leadsOfForm(ctx, form.id, sinceUnix), { formName: form.name });
+      for (const k of Object.keys(total)) total[k] += counts[k];
+    }
+  } catch (e) {
+    if (e.code === 'PAGE_TOKEN_EXPIRED') return { ...total, token_expired: true };
+    throw e;
   }
   return total;
 };
