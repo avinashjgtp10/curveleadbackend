@@ -3,7 +3,7 @@ const { normalizePhone, phoneDigitVariants } = require('../utils/dataQuality');
 const { getWorkspaceLocale, localeFromSettings, wallTimeToUtc, formatWhen } = require('../utils/workspaceLocale');
 const axios = require('axios');
 const { query } = require('../config/db');
-const { uploadToS3 } = require('../config/s3');
+const { uploadToS3, getPresignedUrl } = require('../config/s3');
 const { sendTextMessage, sendTemplate, sendMediaMessage, listMessageTemplates } = require('../services/whatsappService');
 const { qualifyLead } = require('../services/groqService');
 const { recordFirstResponse } = require('../utils/leadResponse');
@@ -238,7 +238,13 @@ const getConversation = async (req, res) => {
       [req.params.leadId, req.tenantId]
     );
 
-    res.json({ messages: result.rows });
+    // media_url points at a private S3 object — sign it here so the browser can
+    // actually open/download it. Non-S3 URLs pass through unchanged.
+    const messages = await Promise.all(result.rows.map(async (m) => (
+      m.media_url ? { ...m, media_url: await getPresignedUrl(m.media_url) } : m
+    )));
+
+    res.json({ messages });
   } catch (error) {
     console.error('Get conversation error:', error);
     res.status(500).json({ error: 'Failed.' });
@@ -283,8 +289,11 @@ const sendAttachment = async (req, res) => {
       recordFirstResponse(req.tenantId, lead_id, { by: req.user.id, type: 'whatsapp' }).catch(() => {});
     }
 
-    if (!result.success) return res.status(502).json({ error: result.error || 'Failed to send file on WhatsApp.', message: saved.rows[0] });
-    res.status(201).json({ message: saved.rows[0], delivery: result });
+    const sentMessage = saved.rows[0].media_url
+      ? { ...saved.rows[0], media_url: await getPresignedUrl(saved.rows[0].media_url) }
+      : saved.rows[0];
+    if (!result.success) return res.status(502).json({ error: result.error || 'Failed to send file on WhatsApp.', message: sentMessage });
+    res.status(201).json({ message: sentMessage, delivery: result });
   } catch (error) {
     console.error('Send attachment error:', error);
     res.status(500).json({ error: 'Failed to send file.' });
@@ -367,7 +376,10 @@ const sendMessage = async (req, res) => {
     await query('UPDATE leads SET last_contacted_at = NOW(), ai_paused = true WHERE id = $1', [lead_id]);
     recordFirstResponse(req.tenantId, lead_id, { by: req.user.id, type: 'whatsapp' }).catch(() => {});
 
-    res.status(201).json({ message: saved.rows[0], delivery: result });
+    const sentMessage = saved.rows[0].media_url
+      ? { ...saved.rows[0], media_url: await getPresignedUrl(saved.rows[0].media_url) }
+      : saved.rows[0];
+    res.status(201).json({ message: sentMessage, delivery: result });
   } catch (error) {
     console.error('Send message error:', error);
     res.status(500).json({ error: 'Failed.' });
