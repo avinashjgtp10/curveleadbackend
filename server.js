@@ -55,7 +55,7 @@ app.set('trust proxy', 1);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 // CORS - parse from env
-const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5174,https://www.curvelead.com,https://curvelead.com')
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:8081,http://localhost:8082,http://localhost:19006,https://www.curvelead.com,https://curvelead.com')
   .split(',').map(o => o.trim()).filter(Boolean);
 
 // Endpoints meant to be embedded on arbitrary third-party business websites
