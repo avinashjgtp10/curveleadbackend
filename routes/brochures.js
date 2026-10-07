@@ -19,6 +19,7 @@ const upload = multer({
 router.use(authenticate, tenantContext);
 
 router.get('/', ctrl.getAll);
+router.get('/:id/preview', ctrl.preview);
 router.post('/', adminOnly, upload.single('file'), ctrl.upload);
 router.delete('/:id', adminOnly, ctrl.delete);
 router.post('/:brochureId/share/:leadId', ctrl.shareWithLead);

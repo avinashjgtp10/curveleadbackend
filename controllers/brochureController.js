@@ -1,5 +1,5 @@
 const { query } = require('../config/db');
-const { uploadToS3, deleteFromS3 } = require('../config/s3');
+const { uploadToS3, deleteFromS3, downloadFromS3 } = require('../config/s3');
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 const { sendTextMessage } = require('../services/whatsappService');
 const { recordFirstResponse } = require('../utils/leadResponse');
@@ -112,4 +112,17 @@ const shareWithLead = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getAll, upload, delete: remove, shareWithLead };
+// GET /api/brochures/:id/preview — the PDF itself, served from our own origin so the app can
+// render a first-page thumbnail (the S3 bucket has no CORS rule for browser reads).
+const preview = async (req, res) => {
+  try {
+    const b = (await query('SELECT file_url, mime_type, file_size FROM brochures WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId])).rows[0];
+    if (!b) return res.status(404).json({ error: 'Brochure not found.' });
+    if (b.mime_type !== 'application/pdf' && !/\.pdf(\?|$)/i.test(b.file_url || '')) return res.status(415).json({ error: 'Only PDFs have a preview.' });
+    if (Number(b.file_size) > 25 * 1024 * 1024) return res.status(413).json({ error: 'Too large to preview.' });
+    const file = await downloadFromS3(b.file_url);
+    res.set({ 'Content-Type': 'application/pdf', 'Cache-Control': 'private, max-age=3600' }).send(file);
+  } catch (e) { console.error('Brochure preview error:', e.message); res.status(502).json({ error: 'Preview unavailable.' }); }
+};
+
+module.exports = { getAll, upload, delete: remove, shareWithLead, preview };
