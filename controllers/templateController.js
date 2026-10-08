@@ -10,10 +10,14 @@ const getAll = async (req, res) => {
     if (category) { where += ` AND category = $${i++}`; params.push(category); }
     if (channel)  { where += ` AND channel  = $${i++}`; params.push(channel); }
 
-    const result = await query(
-      `SELECT * FROM message_templates ${where} ORDER BY created_at DESC`,
-      params
-    );
+    let result;
+    try {
+      // Templates deactivated by a Super Admin are hidden. (is_active exists after migration_super_admin_features.sql.)
+      result = await query(`SELECT * FROM message_templates ${where} AND is_active IS NOT FALSE ORDER BY created_at DESC`, params);
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      result = await query(`SELECT * FROM message_templates ${where} ORDER BY created_at DESC`, params);
+    }
     res.json({ templates: result.rows });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };

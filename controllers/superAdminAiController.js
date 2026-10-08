@@ -25,7 +25,8 @@ const usageLevel = (activity, maxActivity) => {
 // (Vapi key, Groq key) are never selected or returned — only whether they are configured.
 const getAiOverview = async (req, res) => {
   try {
-    const [tenants, calls, aiMessages, agents, playbooks, voiceProviders, recentCalls, recentReplies] = await Promise.all([
+    const [managed, tenants, calls, aiMessages, agents, playbooks, voiceProviders, recentCalls, recentReplies] = await Promise.all([
+      safeRows(`SELECT id, name, status, credential_hint, last_tested_at, last_test_ok, last_test_error FROM platform_ai_integrations WHERE provider = 'groq' ORDER BY (status = 'active') DESC, created_at DESC LIMIT 1`),
       safeRows(`
         SELECT id, name, subscription_status,
                COALESCE((settings->>'whatsapp_auto_responder_enabled')::boolean, false) AS auto_reply_enabled,
@@ -102,7 +103,10 @@ const getAiOverview = async (req, res) => {
     // organization, so status is derived from configuration/usage — never from reading a key.
     const providers = [
       {
-        key: 'groq', name: 'Groq', type: 'LLM / AI Reply', status: process.env.GROQ_API_KEY ? 'connected' : 'not_configured',
+        key: 'groq', name: 'Groq', type: 'LLM / AI Reply',
+        status: (managed[0]?.status === 'active' || process.env.GROQ_API_KEY) ? 'connected' : 'not_configured',
+        credential_source: managed[0]?.status === 'active' ? 'integration' : process.env.GROQ_API_KEY ? 'environment' : null,
+        integration: managed[0] || null,
         organizations: llmOrgIds.size, usage: totalMessages, usage_unit: 'messages', last_sync: lastMessageAt,
       },
       {

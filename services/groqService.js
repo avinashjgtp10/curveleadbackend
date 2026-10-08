@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { getGroqKey } = require('../utils/platformAiKey');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
@@ -7,7 +8,8 @@ const DEFAULT_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
  * Call Groq API with a prompt
  */
 const callGroq = async (messages, options = {}) => {
-  if (!process.env.GROQ_API_KEY) {
+  const apiKey = await getGroqKey();
+  if (!apiKey) {
     console.warn('⚠️ GROQ_API_KEY not set, returning mock response');
     return { content: '{"score":"warm","reason":"AI disabled - default score"}' };
   }
@@ -28,7 +30,7 @@ const callGroq = async (messages, options = {}) => {
       },
       {
         headers: {
-          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+          'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
         timeout: 15000,
@@ -102,7 +104,7 @@ Respond ONLY with valid JSON:
 const generateFollowUpMessage = async ({
   leadName, tenantName, businessDescription, instructions, conversationHistory,
 }) => {
-  if (!process.env.GROQ_API_KEY) return null;
+  if (!(await getGroqKey())) return null;
 
   const conversationContext = (conversationHistory || []).map(m =>
     `${m.direction === 'inbound' ? leadName : 'You'}: ${m.message}`
@@ -170,8 +172,8 @@ Be concise, action-oriented.`;
  * Market Intelligence — competitor & market analysis
  */
 const analyzeMarket = async ({ business_name, industry, product_service, target_geography, customer_type }) => {
-  if (!process.env.GROQ_API_KEY) {
-    throw new Error('AI service not configured. Please set GROQ_API_KEY in your server environment.');
+  if (!(await getGroqKey())) {
+    throw new Error('AI service not configured. Add a Groq integration in Super Admin or set GROQ_API_KEY in your server environment.');
   }
 
   const prompt = `You are a world-class market research analyst and business strategist with deep knowledge of global markets.
@@ -249,7 +251,8 @@ Include 5-8 real competitors, 4-5 opportunities, 3-4 threats, and 4-5 recommenda
  * buffer must be a Buffer, filename is the original file name
  */
 const transcribeAudio = async (buffer, filename, mimetype) => {
-  if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY not set');
+  const apiKey = await getGroqKey();
+  if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
   const FormData = require('form-data');
   const form = new FormData();
@@ -261,7 +264,7 @@ const transcribeAudio = async (buffer, filename, mimetype) => {
     'https://api.groq.com/openai/v1/audio/transcriptions',
     form,
     {
-      headers: { ...form.getHeaders(), Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      headers: { ...form.getHeaders(), Authorization: `Bearer ${apiKey}` },
       timeout: 180000, // 3 min — long audio files take time
       maxBodyLength: 26 * 1024 * 1024,
       maxContentLength: 26 * 1024 * 1024,

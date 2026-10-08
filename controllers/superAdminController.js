@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { snapshotUser, recordDeletion } = require('../utils/accountHistory');
 const { sendTextMessage } = require('../services/whatsappService');
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 
@@ -177,8 +178,14 @@ const updateUser = async (req, res) => {
 // DELETE /api/super-admin/users/:id
 const deleteUser = async (req, res) => {
   try {
+    const before = await snapshotUser(req.params.id);
     const result = await query('DELETE FROM users WHERE id = $1 RETURNING id, name, tenant_id', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'User not found.' });
+    await recordDeletion({
+      accountType: 'user', name: before?.name, email: before?.email, role: before?.role,
+      tenantId: before?.tenant_id, tenantName: before?.tenant_name,
+      deletedBy: { id: req.user.id, name: req.user.name, email: req.user.email }, reason: req.body?.reason,
+    });
     await logActivity({ tenantId: result.rows[0].tenant_id, actorName: req.user.name, action: `${result.rows[0].name} removed`, module: 'Users', status: 'Warning' });
     res.json({ message: 'Removed.' });
   } catch (error) { console.error('Delete user error:', error); res.status(500).json({ error: 'Failed.' }); }
@@ -366,11 +373,12 @@ const getAutomations = async (req, res) => {
 // GET /api/super-admin/campaigns
 const getCrossTenantCampaigns = async (req, res) => {
   try {
-    const { search, tenant_id, status, source, page = 1, limit = 20 } = req.query;
+    const { search, tenant_id, status, source, days, page = 1, limit = 20 } = req.query;
     const conditions = [];
     const params = [];
     let i = 1;
 
+    if (parseInt(days, 10) > 0) { conditions.push(`c.created_at >= NOW() - ($${i} || ' days')::INTERVAL`); params.push(String(parseInt(days, 10))); i++; }
     if (search) { conditions.push(`c.name ILIKE $${i}`); params.push(`%${search}%`); i++; }
     if (tenant_id) { conditions.push(`c.tenant_id = $${i}`); params.push(tenant_id); i++; }
     if (status) { conditions.push(`c.status = $${i}`); params.push(status); i++; }
