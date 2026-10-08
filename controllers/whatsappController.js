@@ -575,6 +575,7 @@ const handleWebhook = async (req, res) => {
           SELECT $1,$2,'inbound',$3,$4,$5,$6,'delivered',NOW() FROM claimed RETURNING id`,
         [lead.tenant_id,lead.id,messageText,messageType,mediaUrl,waMessageId,`received:${waMessageId}`]
       );
+      const routing=isOptOutMessage(messageText) ? {handled:true} : await require('../services/automationReplies').routeSequenceReply({tenantId:lead.tenant_id,leadId:lead.id,messageId:waMessageId,text:messageText,messageAt:msg.timestamp ? new Date(Number(msg.timestamp)*1000) : null});
       if(!savedInbound.rows.length)continue;
 
       // A reply from the lead means any drip sequence has done its job — stop it.
@@ -590,7 +591,7 @@ const handleWebhook = async (req, res) => {
           [lead.tenant_id, lead.id]
         ).catch(() => {});
       } else {
-        await cancelActiveEnrollments({ tenantId: lead.tenant_id, leadId: lead.id, reason: 'replied' });
+        // Sequence-specific stop-on-reply and question routing are handled atomically above.
         // START / SUBSCRIBE is an explicit opt-in (also re-subscribes after STOP).
         if (isOptInMessage(messageText)) {
           await recordOptIn({ tenantId: lead.tenant_id, leadId: lead.id, source: 'whatsapp_keyword', resubscribe: true }).catch(() => {});
@@ -607,7 +608,7 @@ const handleWebhook = async (req, res) => {
       const aiEnabled = tenant?.settings?.ai_qualification_enabled;
 
       // Away message: outside business hours, at most once per 12h per lead. If sent, the AI skips this turn.
-      let awaySent = await require('../services/inboundReplies').replyToInbound({lead,text:messageText,messageId:waMessageId,settings:tenant?.settings || {}});
+      let awaySent = routing.handled || await require('../services/inboundReplies').replyToInbound({lead,text:messageText,messageId:waMessageId,settings:tenant?.settings || {}});
       await query("INSERT INTO integration_health(tenant_id,provider,last_lead_received_at,token_valid) VALUES($1,'whatsapp',now(),true) ON CONFLICT(tenant_id,provider) DO UPDATE SET last_lead_received_at=now()",[lead.tenant_id]);
       if (!awaySent && !lead.ai_paused && tenant?.settings?.whatsapp_away_enabled && tenant.settings.whatsapp_away_message && !lead.opted_out
           && !isWithinBusinessHours(tenant.settings.whatsapp_business_hours, new Date(), localeFromSettings(tenant.settings).timezone)) {

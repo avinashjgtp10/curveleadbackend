@@ -11,13 +11,13 @@ const sendEmail = async ({ to, subject, html, text, fromName, replyTo }) => {
     const result = await axios.post(
       'https://api.resend.com/emails',
       { from, to, subject, html, text, ...(replyTo ? { reply_to: replyTo } : {}) },
-      { headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' } }
+      { timeout: 30000, headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' } }
     );
     return { success: true, messageId: result.data.id };
   } catch (error) {
     const message = error.response?.data?.message || error.message;
     console.error('Email error:', message);
-    return { success: false, error: message };
+    return { success: false, uncertain: !error.response || error.response.status >= 500, transient: error.response?.status === 429, error: message };
   }
 };
 

@@ -53,8 +53,8 @@ const recordOptIn = ({ tenantId, leadId, source, at = new Date(), resubscribe = 
 
 // Sequences stopped for lack of an opt-in pick up where they left off once the lead opts in.
 const resumeBlockedEnrollments = ({ tenantId, leadIds, db = { query } }) => db.query(
-  `UPDATE automation_enrollments SET status = 'active', cancelled_at = NULL, cancelled_reason = NULL, next_send_at = NOW()
-   WHERE tenant_id = $1 AND lead_id = ANY($2::uuid[]) AND status = 'cancelled' AND cancelled_reason = 'blocked_no_opt_in'`,
+  `UPDATE automation_enrollments SET status = 'active', cancelled_at = NULL, cancelled_reason = NULL, blocked_reason=NULL,last_error=NULL, next_send_at = NOW()
+   WHERE tenant_id = $1 AND lead_id = ANY($2::uuid[]) AND ((status = 'cancelled' AND cancelled_reason = 'blocked_no_opt_in') OR (status='blocked' AND blocked_reason='blocked_no_opt_in'))`,
   [tenantId, leadIds]
 );
 

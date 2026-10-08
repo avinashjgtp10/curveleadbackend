@@ -32,7 +32,7 @@ const failure = (error, phoneNumberId) => {
   const meta = error.response?.data?.error;
   const code = meta?.code;
   if (AUTH_ERROR_CODES.has(code) && phoneNumberId) flagAuthFailure(phoneNumberId).catch(() => {});
-  return { success: false, code, error: FRIENDLY_ERRORS[code] || meta?.message || error.message, raw_error: meta?.message || error.message };
+  return { success: false, code, uncertain: !error.response || error.response.status >= 500, transient: !!error.response && (error.response.status === 429 || [130429,131056].includes(code)), error: FRIENDLY_ERRORS[code] || meta?.message || error.message, raw_error: meta?.message || error.message };
 };
 
 // Mark every workspace using this number's shared connection as needing attention.
@@ -87,7 +87,7 @@ const sendTextMessage = async (to, message, credentials = null) => {
         type: 'text',
         text: { body: message },
       },
-      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+      { timeout: 30000, headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     clearAuthFailure(phoneNumberId);
     return { success: true, wa_message_id: response.data.messages?.[0]?.id };
@@ -133,7 +133,7 @@ const sendTemplate = async (to, templateName, languageCode = 'en', parameters = 
           components: components.length ? components : undefined,
         },
       },
-      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+      { timeout: 30000, headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     clearAuthFailure(phoneNumberId);
     return { success: true, wa_message_id: response.data.messages?.[0]?.id };
@@ -190,7 +190,7 @@ const listMessageTemplates = async (wabaId, accessToken) => {
       if (transient && attempt === 0) { await new Promise(resolve => setTimeout(resolve, 250)); continue; }
       if (transient && cached && Date.now() - cached.at < 86400000) return { success: true, templates: cached.templates, stale: true };
       if (!transient) templateCache.delete(key);
-      return { success: false, error: error.response?.data?.error?.message || error.message, code: error.response?.data?.error?.code };
+      return { success: false, transient, error: error.response?.data?.error?.message || error.message, code: error.response?.data?.error?.code };
     }
   }
 };
@@ -225,7 +225,7 @@ const createMessageTemplate = async (wabaId, accessToken, { name, category, lang
     const response = await axios.post(
       `${META_API_URL}/${wabaId}/message_templates`,
       { name, category, language, components },
-      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+      { timeout: 30000, headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     return { success: true, id: response.data.id, status: response.data.status || 'PENDING' };
   } catch (error) {
@@ -288,7 +288,7 @@ const sendMediaMessage = async (to, fileType, mediaUrl, caption = '', credential
     const response = await axios.post(
       `${META_API_URL}/${phoneNumberId}/messages`,
       { messaging_product: 'whatsapp', to: normalizePhone(to), type: waType, [waType]: mediaPayload },
-      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+      { timeout: 30000, headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     clearAuthFailure(phoneNumberId);
     return { success: true, wa_message_id: response.data.messages?.[0]?.id };
