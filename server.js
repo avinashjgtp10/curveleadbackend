@@ -131,6 +131,7 @@ app.get('/api/health', (req, res) => {
 // ============================================
 // API Routes
 // ============================================
+app.use('/api/app', apiLimiter, require('./routes/app')); // public: mobile version check
 app.use('/api/auth', apiLimiter, require('./routes/auth'));
 app.use('/api/leads', apiLimiter, require('./routes/leads'));
 app.use('/api/followups', apiLimiter, require('./routes/followups'));
