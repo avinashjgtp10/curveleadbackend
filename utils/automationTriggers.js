@@ -22,9 +22,12 @@ const ruleTriggerLabel = (rule) => {
 // has opted out of automation / been marked unresponsive.
 const enrollLead = async ({ tenantId, leadId, sequenceId, ruleId = null }) => {
   const leadState = await query(
-    'SELECT opted_out, automation_unresponsive FROM leads WHERE id = $1',
-    [leadId]
+    'SELECT opted_out, automation_unresponsive FROM leads WHERE id = $1 AND tenant_id=$2',
+    [leadId,tenantId]
   );
+  if (!leadState.rows.length) return false;
+  const owned=await query('SELECT id FROM automation_sequences WHERE id=$1 AND tenant_id=$2 AND is_active=true',[sequenceId,tenantId]);
+  if (!owned.rows.length) return false;
   if (leadState.rows[0]?.opted_out || leadState.rows[0]?.automation_unresponsive) return false;
 
   const stepsResult = await query(
@@ -81,7 +84,7 @@ const enrollLead = async ({ tenantId, leadId, sequenceId, ruleId = null }) => {
 const cancelActiveEnrollments = async ({ tenantId, leadId, reason }) => {
   const cancelled = await query(
     `UPDATE automation_enrollments SET status = 'cancelled', cancelled_at = NOW(), cancelled_reason = $3
-     WHERE tenant_id = $1 AND lead_id = $2 AND status = 'active'
+     WHERE tenant_id = $1 AND lead_id = $2 AND status IN ('active','blocked','failed','uncertain','human_review','awaiting_reply')
      RETURNING id, sequence_id`,
     [tenantId, leadId, reason]
   );
@@ -131,14 +134,21 @@ const escalateInsteadOfAutomate = async ({ tenantId, lead }) => {
 const checkNewLeadTriggers = async ({ tenantId, lead }) => {
   if (!lead?.id) return;
 
+  // A product-specific new-lead rule is more specific than generic escalation
+  // or campaign rules. Legacy precedence is unchanged when no product rule matches.
+  const productRules=await query(`SELECT r.id,r.sequence_id FROM automation_rules r JOIN leads l ON l.id=$2 AND l.tenant_id=r.tenant_id
+    WHERE r.tenant_id=$1 AND r.trigger_type='new_lead' AND r.is_active=true AND NULLIF(trim(r.product_interest),'') IS NOT NULL
+    AND lower(trim(r.product_interest))=lower(trim(l.product))`,[tenantId,lead.id]);
+  if(productRules.rows.length){for(const rule of productRules.rows)await enrollLead({tenantId,leadId:lead.id,sequenceId:rule.sequence_id,ruleId:rule.id});return;}
   const escalated = await escalateInsteadOfAutomate({ tenantId, lead });
   if (escalated) return;
 
   if (lead.campaign_id) {
     const campaignRules = await query(
       `SELECT id, sequence_id FROM automation_rules
-       WHERE tenant_id = $1 AND trigger_type = 'campaign' AND campaign_id = $2 AND is_active = true`,
-      [tenantId, lead.campaign_id]
+       WHERE tenant_id = $1 AND trigger_type = 'campaign' AND campaign_id = $2 AND is_active = true
+       AND (NULLIF(trim(product_interest),'') IS NULL OR lower(trim(product_interest))=(SELECT lower(trim(product)) FROM leads WHERE id=$3 AND tenant_id=$1))`,
+      [tenantId, lead.campaign_id,lead.id]
     );
     if (campaignRules.rows.length) {
       for (const rule of campaignRules.rows) {
@@ -152,8 +162,9 @@ const checkNewLeadTriggers = async ({ tenantId, lead }) => {
     const sourceRules = await query(
       `SELECT id, sequence_id FROM automation_rules
        WHERE tenant_id = $1 AND trigger_type = 'lead_source' AND is_active = true
-         AND LOWER(source_value) = LOWER($2)`,
-      [tenantId, lead.source]
+         AND LOWER(source_value) = LOWER($2)
+         AND (NULLIF(trim(product_interest),'') IS NULL OR lower(trim(product_interest))=(SELECT lower(trim(product)) FROM leads WHERE id=$3 AND tenant_id=$1))`,
+      [tenantId, lead.source,lead.id]
     );
     for (const rule of sourceRules.rows) {
       await enrollLead({ tenantId, leadId: lead.id, sequenceId: rule.sequence_id, ruleId: rule.id });
@@ -162,7 +173,7 @@ const checkNewLeadTriggers = async ({ tenantId, lead }) => {
 
   const rules = await query(
     `SELECT id, sequence_id FROM automation_rules
-     WHERE tenant_id = $1 AND trigger_type = 'new_lead' AND is_active = true`,
+     WHERE tenant_id = $1 AND trigger_type = 'new_lead' AND is_active = true AND NULLIF(trim(product_interest),'') IS NULL`,
     [tenantId]
   );
   for (const rule of rules.rows) {
@@ -180,8 +191,9 @@ const checkLeadStatusTriggers = async ({ tenantId, leadId, newStatus }) => {
   const rules = await query(
     `SELECT id, sequence_id FROM automation_rules
      WHERE tenant_id = $1 AND trigger_type = 'lead_status' AND is_active = true
-       AND LOWER(status_value) = LOWER($2)`,
-    [tenantId, newStatus]
+       AND LOWER(status_value) = LOWER($2)
+       AND (NULLIF(trim(product_interest),'') IS NULL OR lower(trim(product_interest))=(SELECT lower(trim(product)) FROM leads WHERE id=$3 AND tenant_id=$1))`,
+    [tenantId, newStatus,leadId]
   );
   for (const rule of rules.rows) {
     await enrollLead({ tenantId, leadId, sequenceId: rule.sequence_id, ruleId: rule.id });
@@ -206,8 +218,9 @@ const checkStageChangeTriggers = async ({ tenantId, leadId, newStage, isLost = f
   const rules = await query(
     `SELECT id, sequence_id FROM automation_rules
      WHERE tenant_id = $1 AND trigger_type = 'stage_change' AND is_active = true
-       AND LOWER(stage_name) = LOWER($2)`,
-    [tenantId, newStage]
+       AND LOWER(stage_name) = LOWER($2)
+       AND (NULLIF(trim(product_interest),'') IS NULL OR lower(trim(product_interest))=(SELECT lower(trim(product)) FROM leads WHERE id=$3 AND tenant_id=$1))`,
+    [tenantId, newStage,leadId]
   );
   for (const rule of rules.rows) {
     await enrollLead({ tenantId, leadId, sequenceId: rule.sequence_id, ruleId: rule.id });

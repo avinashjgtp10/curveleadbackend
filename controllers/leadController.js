@@ -226,7 +226,7 @@ const getLead = async (req, res) => {
 const createLead = async (req, res) => {
   try {
     const {
-      name, phone, email, location, business_name, address, source, source_detail, campaign_id,
+      name, phone, email, location, business_name, address, source, source_detail, campaign_id, product,
       stage, notes, deal_value, expected_close_date, tags, lead_date,
     } = req.body;
 
@@ -236,7 +236,7 @@ const createLead = async (req, res) => {
     if (!String(name || '').trim() || !phone) return res.status(400).json({ error: 'Name and phone required.' });
 
     const ingestion = await ingestLead(req.tenantId, {
-      name, phone, email, location, business_name, address, source, source_detail, campaign_id: campaign_id || null,
+      name, phone, email, location, business_name, address, source, source_detail, product, campaign_id: campaign_id || null,
       stage: stage || 'new', assigned_to, notes, deal_value: deal_value || 0, expected_close_date, tags, lead_date: lead_date || new Date(),
     }, { actorId: req.user.id });
     if (ingestion.duplicate) return res.status(200).json({ message: 'Duplicate submission attached to existing lead.', ...(req.user.role !== 'staff' || ingestion.lead.assigned_to === req.user.id ? { lead: ingestion.lead } : {}), duplicate: true });
@@ -278,7 +278,7 @@ const updateLead = async (req, res) => {
     if (req.body.source !== undefined) req.body.source = normalizeSource(req.body.source);
     if (req.body.name !== undefined) req.body.name = String(req.body.name).normalize('NFKC');
     const allowedFields = [
-      'name', 'phone', 'email', 'location', 'business_name', 'address', 'source', 'source_detail', 'campaign_id',
+      'name', 'phone', 'email', 'location', 'business_name', 'address', 'source', 'source_detail', 'campaign_id', 'product',
       'stage', 'lead_status', 'assigned_to', 'notes', 'deal_value', 'expected_close_date',
       'tags', 'lead_score', 'score_reason', 'lost_reason', 'lead_date', 'advance_received', 'ai_paused',
     ];

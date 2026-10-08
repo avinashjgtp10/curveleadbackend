@@ -17,7 +17,7 @@ const getEnrollments = async (req, res) => {
     const result = await query(
       `SELECT DISTINCT ON (e.lead_id)
               e.lead_id, e.id AS enrollment_id, e.sequence_id, e.current_step, e.status,
-              e.enrolled_at, e.next_send_at, e.completed_at, e.cancelled_at, e.cancelled_reason,
+              e.enrolled_at, e.next_send_at, e.completed_at, e.cancelled_at, e.cancelled_reason, e.last_error, e.awaiting_step,e.awaiting_since,e.awaiting_routes,
               e.rule_id, r.name AS rule_name, r.trigger_type,
               s.name AS sequence_name,
               COALESCE(json_agg(
@@ -83,11 +83,14 @@ const getAutomationLeads = async (req, res) => {
     const base = `WITH scoped AS (
       SELECT l.id, l.name, l.phone, l.won_at, l.lost_at, l.opted_out, e.enrollment,
         CASE WHEN l.won_at IS NOT NULL THEN 'Converted' WHEN l.lost_at IS NOT NULL THEN 'Lost'
+        WHEN e.status = 'blocked' THEN 'Blocked' WHEN e.status = 'failed' THEN 'Failed'
+        WHEN e.status = 'uncertain' THEN 'Uncertain' WHEN e.status = 'human_review' THEN 'Needs Review' WHEN e.status = 'awaiting_reply' THEN 'Awaiting Reply'
         WHEN e.status = 'active' THEN 'In Progress' WHEN e.status = 'completed' THEN 'Completed'
         WHEN e.status = 'cancelled' AND e.cancelled_reason LIKE 'blocked%' THEN 'Blocked'
         WHEN e.status = 'cancelled' THEN 'Cancelled' ELSE 'Not Enrolled' END AS status,
         CASE WHEN e.enrollment IS NULL THEN 'Not Enrolled' ELSE
-          CASE WHEN e.status = 'cancelled' AND e.cancelled_reason = 'blocked_no_opt_in' THEN 'Blocked (no opt-in) — '
+          CASE WHEN e.status IN ('blocked','failed','uncertain','human_review') THEN e.status || ' — '
+               WHEN e.status = 'cancelled' AND e.cancelled_reason = 'blocked_no_opt_in' THEN 'Blocked (no opt-in) — '
                WHEN e.status = 'cancelled' AND e.cancelled_reason LIKE 'blocked%' THEN 'Blocked — '
                WHEN e.status = 'cancelled' THEN 'Cancelled — ' ELSE '' END ||
           'Step ' || (e.current_step + 1) || ' of ' || e.step_count END AS step
@@ -112,4 +115,8 @@ const getAutomationLeads = async (req, res) => {
     res.json({ ...result.rows[0], pagination: { page, limit, total: result.rows[0].total } });
   } catch (error) { console.error('getAutomationLeads:', error); res.status(500).json({ error: 'Unable to load automation leads.' }); }
 };
-module.exports = { getEnrollments, enrollBulk, getAutomationLeads };
+const recoverEnrollment = async (req,res) => {
+ try { res.json(await require('../services/automationRecovery').recoverEnrollment({tenantId:req.tenantId,enrollmentId:req.params.id,action:req.body.action,answer:req.body.answer,providerId:req.body.provider_id,note:req.body.note,userId:req.user.id})); }
+ catch(e){res.status(e.status || 500).json({error:e.status ? e.message : 'Recovery failed.'});}
+};
+module.exports = { getEnrollments, enrollBulk, getAutomationLeads, recoverEnrollment };

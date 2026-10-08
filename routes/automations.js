@@ -22,6 +22,7 @@ router.delete('/rules/:id', requirePermission('automations.manage'), ctrl.delete
 router.get('/enrollments', enrollCtrl.getEnrollments);
 router.post('/enrollments/query', enrollCtrl.getEnrollments);
 router.get('/leads', enrollCtrl.getAutomationLeads);
+router.post('/enrollments/:id/recover', requirePermission('automations.manage'), enrollCtrl.recoverEnrollment);
 router.post('/enroll-bulk', requirePermission('leads.bulk_edit'), enrollCtrl.enrollBulk);
 
 router.get('/assignment-rules', assignCtrl.getAssignmentRules);
