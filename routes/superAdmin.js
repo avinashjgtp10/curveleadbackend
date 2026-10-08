@@ -15,6 +15,11 @@ const {
   getPlatformSettings, updatePlatformSettings,
   getSupportTickets, updateSupportTicket,
 } = require('../controllers/superAdminController');
+const { getAiOverview } = require('../controllers/superAdminAiController');
+const {
+  createTenant, deleteTenant, setCampaignStatus, getCrossTenantTemplates, deleteTemplate,
+} = require('../controllers/superAdminManageController');
+const { getIntegrationsOverview } = require('../controllers/superAdminIntegrationsController');
 const { authenticate, superAdminOnly } = require('../middleware/auth');
 
 router.use(authenticate, superAdminOnly);
@@ -22,7 +27,9 @@ router.use(authenticate, superAdminOnly);
 router.get('/stats', getPlatformStats);
 
 router.get('/tenants', getTenants);
+router.post('/tenants', createTenant);
 router.put('/tenants/:id', updateTenant);
+router.delete('/tenants/:id', deleteTenant);
 router.post('/tenants/:id/extend-trial', extendTrial);
 
 router.get('/plans', getPlans);
@@ -48,6 +55,10 @@ router.get('/trends/revenue', getRevenueTrendData);
 router.get('/automations', getAutomations);
 
 router.get('/campaigns', getCrossTenantCampaigns);
+router.put('/campaigns/:id/status', setCampaignStatus);
+
+router.get('/templates', getCrossTenantTemplates);
+router.delete('/templates/:id', deleteTemplate);
 
 router.get('/bookings', getCrossTenantBookings);
 
@@ -56,6 +67,9 @@ router.put('/settings', updatePlatformSettings);
 
 router.get('/support/tickets', getSupportTickets);
 router.put('/support/tickets/:id', updateSupportTicket);
+
+router.get('/ai/overview', getAiOverview);
+router.get('/integrations/overview', getIntegrationsOverview);
 
 router.get('/whatsapp/conversations', getCrossTenantWhatsAppConversations);
 router.get('/whatsapp/conversations/:id/messages', getCrossTenantWhatsAppMessages);
