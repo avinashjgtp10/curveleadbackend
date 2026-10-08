@@ -1,8 +1,22 @@
+const path = require('path');
 const { query } = require('../config/db');
+const { stageFlagError, checkStageUpdate } = require('../utils/stageRules');
+const { uploadToS3 } = require('../config/s3');
+const { localeFromSettings, validTimezone, validCurrency } = require('../utils/workspaceLocale');
+
+// Money already recorded in the workspace currency. Changing the currency never converts
+// it, so the owner confirms once they know old amounts keep their numbers.
+const hasMoneyData = async (tenantId) => (await query(
+  `SELECT EXISTS (SELECT 1 FROM leads WHERE tenant_id = $1 AND COALESCE(deal_value, 0) <> 0)
+       OR EXISTS (SELECT 1 FROM quotations WHERE tenant_id = $1)
+       OR EXISTS (SELECT 1 FROM campaigns WHERE tenant_id = $1 AND (COALESCE(budget, 0) <> 0 OR COALESCE(actual_spend, 0) <> 0)) AS has`,
+  [tenantId])).rows[0]?.has;
 
 // Surfaces a few settings-JSONB fields at the top level for frontend convenience.
 const withExtras = (row) => ({
   ...row,
+  settings: Object.fromEntries(Object.entries(row?.settings || {}).filter(([key])=> !/token|secret|api_key|password/i.test(key))),
+  dedupe_mode: row?.settings?.dedupe_mode || 'phone',
   bank_details: row?.settings?.bank_details || {},
   daily_report_enabled: !!row?.settings?.daily_report_enabled,
   daily_report_time: row?.settings?.daily_report_time || '08:00',
@@ -12,6 +26,7 @@ const withExtras = (row) => ({
   automation_business_hours_end: row?.settings?.automation_business_hours_end || '20:00',
   automation_daily_cap_enabled: !!row?.settings?.automation_daily_cap_enabled,
   automation_daily_cap: row?.settings?.automation_daily_cap || 1,
+  ...localeFromSettings(row?.settings),
 });
 
 // GET /api/settings
@@ -61,6 +76,33 @@ const updateSettings = async (req, res) => {
 
     // Store bank_details / report / email / automation preferences inside the settings JSONB column
     const settingsPatch = {};
+    const { country, currency, timezone, confirm_currency_change } = req.body;
+    if (country !== undefined) {
+      if (!/^[A-Z]{2}$/.test(country || '')) return res.status(422).json({ error: 'Pick a country.' });
+      settingsPatch.country = country;
+    }
+    if (timezone !== undefined) {
+      if (!validTimezone(timezone)) return res.status(422).json({ error: 'Pick a valid timezone.' });
+      settingsPatch.timezone = timezone;
+    }
+    if (currency !== undefined) {
+      if (!validCurrency(currency)) return res.status(422).json({ error: 'Pick a valid currency.' });
+      const current = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings || {};
+      const from = localeFromSettings(current).currency;
+      if (currency !== from) {
+        if (!confirm_currency_change && await hasMoneyData(req.tenantId)) {
+          return res.status(409).json({ code: 'CURRENCY_CHANGE_CONFIRM', from, to: currency,
+            error: `Amounts you've already recorded (deal values, quotations, budgets) stay as they are — they won't be converted from ${from} to ${currency}. Existing quotations keep ${from}; new amounts will be in ${currency}.` });
+        }
+        settingsPatch.currency = currency;
+        settingsPatch.currency_history = [...(Array.isArray(current.currency_history) ? current.currency_history : []),
+          { from, to: currency, at: new Date().toISOString(), by: req.user?.id || null }];
+      }
+    }
+    if (req.body.dedupe_mode !== undefined) {
+      if (!['phone','phone_or_email','off'].includes(req.body.dedupe_mode)) return res.status(422).json({ error: 'Invalid dedupe mode.' });
+      settingsPatch.dedupe_mode = req.body.dedupe_mode;
+    }
     if (bank_details !== undefined) settingsPatch.bank_details = bank_details;
     if (daily_report_enabled !== undefined) settingsPatch.daily_report_enabled = daily_report_enabled;
     if (daily_report_time !== undefined) settingsPatch.daily_report_time = daily_report_time;
@@ -102,6 +144,9 @@ const createStage = async (req, res) => {
   try {
     const { name, color, is_won, is_lost, meta_event_name } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'Stage name is required.' });
+    const existing = await query('SELECT count(*)::int AS n FROM lead_stages WHERE tenant_id = $1', [req.tenantId]);
+    const flagError = stageFlagError({ isWon: !!is_won, isLost: !!is_lost, isFirst: existing.rows[0].n === 0 });
+    if (flagError) return res.status(422).json({ error: flagError });
 
     const maxPos = await query(
       'SELECT GREATEST(COALESCE(MAX(pos), 0), COALESCE(MAX(position), 0)) + 1 as next_pos FROM lead_stages WHERE tenant_id = $1',
@@ -122,6 +167,8 @@ const createStage = async (req, res) => {
 const updateStage = async (req, res) => {
   try {
     const { name, color, is_active, is_won, is_lost, meta_event_name } = req.body;
+    const flagError = await checkStageUpdate({ tenantId: req.tenantId, stageId: req.params.id, isWon: is_won, isLost: is_lost });
+    if (flagError) return res.status(422).json({ error: flagError });
     const result = await query(
       `UPDATE lead_stages
        SET name = COALESCE($1, name), color = COALESCE($2, color),
@@ -145,4 +192,22 @@ const deleteStage = async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { getSettings, updateSettings, getStages, createStage, updateStage, deleteStage };
+// POST /api/settings/logo — uploads the tenant's business logo and saves it in one step.
+// Used to watermark AI-generated / uploaded WhatsApp template header images.
+const uploadLogo = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+
+    const ext = path.extname(req.file.originalname).toLowerCase() || '.png';
+    const key = `business-logos/${req.tenantId}/${Date.now()}${ext}`;
+    const url = await uploadToS3(req.file.buffer, key, req.file.mimetype);
+
+    await query('UPDATE tenants SET logo_url = $1 WHERE id = $2', [url, req.tenantId]);
+    res.json({ logo_url: url });
+  } catch (error) {
+    console.error('uploadLogo error:', error);
+    res.status(500).json({ error: 'Failed to upload logo.' });
+  }
+};
+
+module.exports = { getSettings, updateSettings, getStages, createStage, updateStage, deleteStage, uploadLogo };

@@ -6,7 +6,7 @@ const CRITICAL_AFTER_HOURS = 120; // 5 days overdue
 
 // pendingFollowup: the lead's current not-completed lead_followups row, or null/undefined.
 function computeFollowupHealth(pendingFollowup) {
-  if (!pendingFollowup || !pendingFollowup.next_followup_at) return 'good';
+  if (!pendingFollowup || pendingFollowup.dismissed_at || !pendingFollowup.next_followup_at) return 'good';
   const overdueHours = (Date.now() - new Date(pendingFollowup.next_followup_at).getTime()) / HOUR_MS;
   if (overdueHours <= 0) return 'good';
   if (overdueHours > CRITICAL_AFTER_HOURS) return 'critical';

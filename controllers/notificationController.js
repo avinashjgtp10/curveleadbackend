@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { NOTIFICATION_GROUPS, isNotificationEnabled, shouldSkipForLostLead } = require('../utils/notificationTypes');
 
 // GET /api/notifications - Get user's notifications
 const getNotifications = async (req, res) => {
@@ -15,7 +16,7 @@ const getNotifications = async (req, res) => {
     );
 
     res.json({ notifications: result.rows, unreadCount: parseInt(unreadCount.rows[0].count) });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Get notifications error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // PUT /api/notifications/:id/read - Mark as read
@@ -26,7 +27,7 @@ const markAsRead = async (req, res) => {
       [req.params.id, req.tenantId, req.user.id]
     );
     res.json({ message: 'Marked as read.' });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Mark notification read error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // PUT /api/notifications/read-all - Mark all as read
@@ -37,7 +38,22 @@ const markAllAsRead = async (req, res) => {
       [req.tenantId, req.user.id]
     );
     res.json({ message: 'All marked as read.' });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Mark all notifications read error:', error); res.status(500).json({ error: 'Failed.' }); }
+};
+
+// PUT /api/notifications/read-visible - Mark a given set of notifications as read
+// (called by the bell dropdown for whatever's currently visible/unread on screen)
+const markVisibleAsRead = async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+    if (ids.length) {
+      await query(
+        'UPDATE notifications SET is_read = true WHERE tenant_id = $1 AND user_id = $2 AND id = ANY($3::uuid[])',
+        [req.tenantId, req.user.id, ids]
+      );
+    }
+    res.json({ message: 'Marked as read.' });
+  } catch (error) { console.error('Mark visible notifications read error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // GET /api/notifications/count - Unread count only
@@ -48,12 +64,27 @@ const getUnreadCount = async (req, res) => {
       [req.tenantId, req.user.id]
     );
     res.json({ count: parseInt(result.rows[0].count) });
-  } catch (error) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) { console.error('Get unread count error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
-// Helper: Create notification
+// Helper: Create notification — skipped if the target user has turned this
+// notification group off (Notification Settings). A missing/unrecognized type
+// is never silently dropped — see isNotificationEnabled's default-enabled fallback.
 const createNotification = async (tenantId, userId, title, message, type = 'info', referenceType = null, referenceId = null) => {
   try {
+    const userResult = await query('SELECT settings FROM users WHERE id = $1', [userId]);
+    const userSettings = userResult.rows[0]?.settings;
+    if (!isNotificationEnabled(userSettings, type)) return;
+
+    if (referenceType === 'lead' && referenceId && shouldSkipForLostLead(userSettings, type)) {
+      const leadIsLost = await query(
+        `SELECT 1 FROM leads l WHERE l.id = $1 AND l.tenant_id = $2
+           AND LOWER(l.stage) IN (SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $2 AND is_lost = true)`,
+        [referenceId, tenantId]
+      );
+      if (leadIsLost.rows.length) return;
+    }
+
     await query(
       `INSERT INTO notifications (tenant_id, user_id, title, message, type, reference_type, reference_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -77,4 +108,13 @@ const notifyNewLeadToAdmins = async (tenantId, lead, excludeUserId = null) => {
   } catch (error) { console.error('Notify admins new lead error:', error); }
 };
 
-module.exports = { getNotifications, markAsRead, markAllAsRead, getUnreadCount, createNotification, notifyNewLeadToAdmins };
+// GET /api/notifications/groups — static list of togglable notification groups,
+// for the Notification Settings UI (kept here so backend and frontend never drift).
+const getNotificationGroups = (req, res) => {
+  res.json({ groups: NOTIFICATION_GROUPS.map(({ key, label, description }) => ({ key, label, description })) });
+};
+
+module.exports = {
+  getNotifications, markAsRead, markAllAsRead, markVisibleAsRead, getUnreadCount, getNotificationGroups,
+  createNotification, notifyNewLeadToAdmins,
+};

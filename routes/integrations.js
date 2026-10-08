@@ -10,6 +10,9 @@ const { tenantContext } = require('../middleware/tenant');
 router.post('/ingest', ctrl.ingestLead);
 router.post('/google-ads/leads/:integrationId', googleAdsCtrl.receiveGoogleAdsLead);
 
+// Minimal read-only sync status does not require integration-management permission.
+router.get('/facebook/sync-status', authenticate, tenantContext, ctrl.facebookSyncStatus);
+
 // Protected routes
 router.use(authenticate, tenantContext, requirePermission('settings.manage'));
 router.get('/settings', ctrl.getSettings);
@@ -32,10 +35,15 @@ router.delete('/google-ads/:id', googleAdsCtrl.deleteIntegration);
 router.post('/facebook/auth', ctrl.facebookAuth);
 router.post('/facebook/connect-page', ctrl.facebookConnectPage);
 router.post('/facebook/sync-leads', ctrl.facebookSyncLeads);
+router.get('/facebook/sync-status', ctrl.facebookSyncStatus);
 router.post('/facebook/subscribe-webhook', ctrl.facebookSubscribeWebhook);
 router.get('/facebook/subscription-status', ctrl.facebookSubscriptionStatus);
 router.get('/facebook/ad-accounts', ctrl.getAdAccounts);
 router.post('/facebook/sync-ad-insights', ctrl.syncAdInsightsNow);
 router.get('/meta/capi-stats', ctrl.getCapiStats);
+
+// WhatsApp one-click connect (Meta Embedded Signup)
+router.post('/whatsapp/embedded-signup', ctrl.whatsappEmbeddedSignup);
+router.post('/whatsapp/reconnect', ctrl.whatsappReconnect);
 
 module.exports = router;

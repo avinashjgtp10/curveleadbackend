@@ -26,10 +26,20 @@ const describeQuality = (c, signal, avgQuality) => {
   return `${(parseFloat(c.hot_rate) || 0).toFixed(1)}% score as hot leads (your avg is ${avgQuality.toFixed(1)}%)`;
 };
 
-const rankCampaigns = (campaignsToAnnotate, baselineCampaigns = campaignsToAnnotate) => {
+// opts.avg: workspace rates { conversion, disqualified, hot } (%) — weighted over all
+// campaign-attributed leads, i.e. the same numbers the KPIs show. Without it, the
+// baseline campaigns' leads are pooled (weighted), never a mean of per-campaign rates.
+const rankCampaigns = (campaignsToAnnotate, baselineCampaigns = campaignsToAnnotate, opts = {}) => {
   const withData = baselineCampaigns.filter(c => c.total_leads >= MIN_LEADS_FOR_BASELINE);
   const signal = pickSignal(withData);
-  const avgQuality = withData.length ? withData.reduce((sum, c) => sum + signal.get(c), 0) / withData.length : 0;
+  const pooled = () => {
+    const leads = withData.reduce((s, c) => s + c.total_leads, 0);
+    return leads ? withData.reduce((s, c) => s + signal.get(c) * c.total_leads, 0) / leads : 0;
+  };
+  const fromOpts = signal.key === 'conversion' ? opts.avg?.conversion
+    : signal.key === 'disqualified' ? (opts.avg?.disqualified != null ? 100 - opts.avg.disqualified : undefined)
+    : opts.avg?.hot;
+  const avgQuality = fromOpts != null ? Number(fromOpts) : pooled();
   const avgVolume = withData.length ? withData.reduce((sum, c) => sum + c.total_leads, 0) / withData.length : 0;
 
   return campaignsToAnnotate.map(c => {

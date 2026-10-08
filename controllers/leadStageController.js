@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { stageFlagError, checkStageUpdate } = require('../utils/stageRules');
 
 // GET /api/lead-stages
 const getStages = async (req, res) => {
@@ -19,6 +20,9 @@ const createStage = async (req, res) => {
   try {
     const { name, color, is_won, is_lost } = req.body;
     if (!name) return res.status(400).json({ error: 'Stage name is required.' });
+    const existing = await query('SELECT count(*)::int AS n FROM lead_stages WHERE tenant_id = $1', [req.tenantId]);
+    const flagError = stageFlagError({ isWon: !!is_won, isLost: !!is_lost, isFirst: existing.rows[0].n === 0 });
+    if (flagError) return res.status(422).json({ error: flagError });
 
     const maxPos = await query(
       'SELECT COALESCE(MAX(pos), 0) + 1 as next_pos FROM lead_stages WHERE tenant_id = $1',
@@ -42,6 +46,8 @@ const createStage = async (req, res) => {
 const updateStage = async (req, res) => {
   try {
     const { name, color, is_won, is_lost, is_active } = req.body;
+    const flagError = await checkStageUpdate({ tenantId: req.tenantId, stageId: req.params.id, isWon: is_won, isLost: is_lost });
+    if (flagError) return res.status(422).json({ error: flagError });
 
     const result = await query(
       `UPDATE lead_stages

@@ -1,3 +1,4 @@
+const { ingestLead } = require('../services/leadIngestion');
 const { query } = require('../config/db');
 const { nextLeadNumber } = require('../utils/leadNumber');
 const { parseUserColumnData } = require('../utils/googleLeadFields');
@@ -248,42 +249,21 @@ const receiveGoogleAdsLead = async (req, res) => {
     const assignedTo = is_test ? null : await resolveAssignee(tenantId, integration);
     const tags = integration.default_group ? [integration.default_group] : null;
 
-    const leadNumber = await nextLeadNumber(tenantId);
-    const inserted = await query(
-      `INSERT INTO leads (
-         tenant_id, lead_number, name, phone, email, source, source_detail, stage, assigned_to,
-         tags, product, is_test_lead,
-         google_lead_id, gclid, google_campaign_id, google_form_id, google_adgroup_id,
-         google_creative_id, google_asset_group_id, lead_submit_time, google_custom_answers,
-         google_ads_integration_id
-       ) VALUES (
-         $1,$2,$3,$4,$5,'google_ads',$6,$7,$8,
-         $9,$10,$11,
-         $12,$13,$14,$15,$16,
-         $17,$18,$19,$20,
-         $21
-       )
-       ON CONFLICT (tenant_id, google_lead_id) WHERE google_lead_id IS NOT NULL DO NOTHING
-       RETURNING *`,
-      [
-        tenantId, leadNumber, name, phone, email || null,
-        `Google Ads — form ${form_id || 'unknown'}`, stage, assignedTo,
-        tags, integration.product || null, !!is_test,
-        lead_id || null, gcl_id || null, campaign_id ? String(campaign_id) : null, form_id ? String(form_id) : null,
-        adgroup_id ? String(adgroup_id) : null, creative_id ? String(creative_id) : null,
-        asset_group_id ? String(asset_group_id) : null,
-        lead_submit_time ? new Date(lead_submit_time) : null,
-        JSON.stringify(custom),
-        integration.id,
-      ]
-    );
+    // The CRM campaign for this Google campaign, once a Google Ads sync has seen it
+    // (the sync also links earlier leads). Never blocks the lead if the lookup fails.
+    const crmCampaignId = campaign_id ? (await query('SELECT id FROM campaigns WHERE tenant_id = $1 AND google_campaign_id = $2', [tenantId, String(campaign_id)])
+      .catch(() => ({ rows: [] }))).rows[0]?.id || null : null;
 
-    const lead = inserted.rows[0];
-    if (!lead) {
-      // No row returned = ON CONFLICT hit (Google retried a lead_id we already have).
-      console.log(`Google Ads webhook: duplicate lead_id for integration ${integrationId}, no-op`);
-      return;
-    }
+    const ingestion = await ingestLead(tenantId, {
+      name, phone, email, source: 'google_ads', ...(crmCampaignId ? { campaign_id: crmCampaignId } : {}), source_detail: `Google Ads — form ${form_id || 'unknown'}`,
+      stage, assigned_to: assignedTo, tags, product: integration.product || null, is_test_lead: !!is_test,
+      google_lead_id: lead_id || null, gclid: gcl_id || null, google_campaign_id: campaign_id ? String(campaign_id) : null,
+      google_form_id: form_id ? String(form_id) : null, google_adgroup_id: adgroup_id ? String(adgroup_id) : null,
+      google_creative_id: creative_id ? String(creative_id) : null, google_asset_group_id: asset_group_id ? String(asset_group_id) : null,
+      lead_submit_time: lead_submit_time ? new Date(lead_submit_time) : null, google_custom_answers: JSON.stringify(custom), google_ads_integration_id: integration.id,
+    }, { submissionKey: lead_id ? `google:${lead_id}` : null });
+    if (ingestion.duplicate) return;
+    const lead = ingestion.lead;
 
     await query(
       `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, metadata, created_by)

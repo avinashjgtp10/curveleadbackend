@@ -1,5 +1,4 @@
 const { query } = require('../config/db');
-const { sendLeadConversionEvent } = require('./metaCapi');
 const { checkStageChangeTriggers } = require('./automationTriggers');
 
 // Reusable core of a stage change: updates the lead, logs history + activity,
@@ -47,13 +46,18 @@ const changeLeadStage = async ({ tenantId, leadId, newStageName, lostReason = nu
     [tenantId, leadId, `Stage changed to ${newStageName}`]
   ).catch(() => {});
 
-  if (lead.meta_lead_id && info.meta_event_name) {
-    sendLeadConversionEvent({ tenantId, lead, eventName: info.meta_event_name }).catch(() => {});
-  }
+
 
   checkStageChangeTriggers({
-    tenantId, leadId, newStage: newStageName, isLost: !!info.is_lost,
+    tenantId, leadId, newStage: newStageName, isLost: !!info.is_lost, isWon: !!info.is_won,
   }).catch(() => {});
 };
 
-module.exports = { changeLeadStage };
+// The workspace's won stage (first active stage flagged is_won, by pipeline position) —
+// workspaces name it "Won", "Converted", "Enrolled"… Falls back to "Won".
+const wonStageName = async (tenantId) => (await query(
+  `SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won AND COALESCE(is_active, true)
+   ORDER BY COALESCE(pos, position) NULLS LAST, name LIMIT 1`, [tenantId]
+)).rows[0]?.name || 'Won';
+
+module.exports = { wonStageName, changeLeadStage };

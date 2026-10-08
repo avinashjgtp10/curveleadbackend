@@ -25,6 +25,14 @@ const getSequences = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
+// Every step must carry a message (or be AI-written): the runner sends the
+// message inside the 24h window, so a template-only step would send blank text.
+const invalidSteps = (steps) => (steps || []).map((s, i) => (s?.ai_generated || s?.message?.trim() ? null : i + 1)).filter(Boolean);
+const stepsError = (steps) => {
+  const bad = invalidSteps(steps);
+  return bad.length ? `Step ${bad.join(', ')} needs a message.` : null;
+};
+
 const saveSteps = async (client, tenantId, sequenceId, steps) => {
   await client.query('DELETE FROM automation_sequence_steps WHERE sequence_id = $1', [sequenceId]);
   for (let i = 0; i < (steps || []).length; i++) {
@@ -46,6 +54,8 @@ const createSequence = async (req, res) => {
   try {
     const { name, description, steps } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'Name is required.' });
+    const stepErr = stepsError(steps);
+    if (stepErr) return res.status(422).json({ error: stepErr });
 
     const sequenceId = await transaction(async (client) => {
       const result = await client.query(
@@ -64,6 +74,8 @@ const createSequence = async (req, res) => {
 const updateSequence = async (req, res) => {
   try {
     const { name, description, is_active, steps } = req.body;
+    const stepErr = steps !== undefined && stepsError(steps);
+    if (stepErr) return res.status(422).json({ error: stepErr });
 
     const owned = await query('SELECT id FROM automation_sequences WHERE id = $1 AND tenant_id = $2', [req.params.id, req.tenantId]);
     if (!owned.rows.length) return res.status(404).json({ error: 'Sequence not found.' });
@@ -110,11 +122,11 @@ const getRules = async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed.' }); }
 };
 
-const TRIGGER_TYPES = ['new_lead', 'stage_change', 'campaign'];
+const TRIGGER_TYPES = ['new_lead', 'stage_change', 'campaign', 'lead_source', 'lead_status'];
 
 const createRule = async (req, res) => {
   try {
-    const { name, trigger_type, stage_name, campaign_id, sequence_id } = req.body;
+    const { name, trigger_type, stage_name, campaign_id, source_value, status_value, sequence_id } = req.body;
     if (!name?.trim() || !trigger_type || !sequence_id) {
       return res.status(400).json({ error: 'Name, trigger type and sequence are required.' });
     }
@@ -127,14 +139,22 @@ const createRule = async (req, res) => {
     if (trigger_type === 'campaign' && !campaign_id) {
       return res.status(400).json({ error: 'Campaign is required for a campaign trigger.' });
     }
+    if (trigger_type === 'lead_source' && !source_value?.trim()) {
+      return res.status(400).json({ error: 'Source is required for a lead-source trigger.' });
+    }
+    if (trigger_type === 'lead_status' && !status_value?.trim()) {
+      return res.status(400).json({ error: 'Status is required for a lead-status trigger.' });
+    }
 
     const result = await query(
-      `INSERT INTO automation_rules (tenant_id, name, trigger_type, stage_name, campaign_id, sequence_id)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      `INSERT INTO automation_rules (tenant_id, name, trigger_type, stage_name, campaign_id, source_value, status_value, sequence_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
       [
         req.tenantId, name.trim(), trigger_type,
         trigger_type === 'stage_change' ? stage_name.trim() : null,
         trigger_type === 'campaign' ? campaign_id : null,
+        trigger_type === 'lead_source' ? source_value.trim() : null,
+        trigger_type === 'lead_status' ? status_value.trim() : null,
         sequence_id,
       ]
     );
@@ -144,7 +164,7 @@ const createRule = async (req, res) => {
 
 const updateRule = async (req, res) => {
   try {
-    const { name, trigger_type, stage_name, campaign_id, sequence_id, is_active } = req.body;
+    const { name, trigger_type, stage_name, campaign_id, source_value, status_value, sequence_id, is_active } = req.body;
     if (trigger_type && !TRIGGER_TYPES.includes(trigger_type)) {
       return res.status(400).json({ error: 'Invalid trigger type.' });
     }
@@ -152,12 +172,15 @@ const updateRule = async (req, res) => {
     const result = await query(
       `UPDATE automation_rules
        SET name = COALESCE($1, name), trigger_type = COALESCE($2, trigger_type),
-           stage_name = CASE WHEN $2 IN ('new_lead', 'campaign') THEN NULL ELSE COALESCE($3, stage_name) END,
-           campaign_id = CASE WHEN $2 IN ('new_lead', 'stage_change') THEN NULL ELSE COALESCE($4, campaign_id) END,
-           sequence_id = COALESCE($5, sequence_id), is_active = COALESCE($6, is_active)
-       WHERE id = $7 AND tenant_id = $8 RETURNING *`,
+           stage_name = CASE WHEN $2 IS NOT NULL AND $2 != 'stage_change' THEN NULL ELSE COALESCE($3, stage_name) END,
+           campaign_id = CASE WHEN $2 IS NOT NULL AND $2 != 'campaign' THEN NULL ELSE COALESCE($4, campaign_id) END,
+           source_value = CASE WHEN $2 IS NOT NULL AND $2 != 'lead_source' THEN NULL ELSE COALESCE($5, source_value) END,
+           status_value = CASE WHEN $2 IS NOT NULL AND $2 != 'lead_status' THEN NULL ELSE COALESCE($6, status_value) END,
+           sequence_id = COALESCE($7, sequence_id), is_active = COALESCE($8, is_active)
+       WHERE id = $9 AND tenant_id = $10 RETURNING *`,
       [
         name ?? null, trigger_type ?? null, stage_name ?? null, campaign_id ?? null,
+        source_value ?? null, status_value ?? null,
         sequence_id ?? null, is_active ?? null, req.params.id, req.tenantId,
       ]
     );

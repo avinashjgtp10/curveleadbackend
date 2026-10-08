@@ -1,15 +1,25 @@
 const { query } = require('../config/db');
-const { sendTextMessage, sendTemplate } = require('../services/whatsappService');
+const { checkTemplateConsent } = require('../services/whatsappConsent');
+const { sendTextMessage, sendTemplate, listMessageTemplates } = require('../services/whatsappService');
 const { sendEmail } = require('../utils/email');
 const { substituteVars } = require('../utils/templateVars');
 const { isSessionOpen } = require('../utils/sessionWindow');
 const { generateFollowUpMessage } = require('../services/groqService');
+const { localeFromSettings, zonedParts, wallTimeToUtc } = require('../utils/workspaceLocale');
 
-// v1 limitation: business hours are compared against server time, not a
-// per-tenant timezone — documented, not solved, until tenants can set a timezone.
+// The reason a send failed, for the chat bubble. Best-effort: error_detail is a later migration.
+const saveSendError = (messageId, result) => (messageId && !result.success
+  ? query('UPDATE whatsapp_messages SET error_detail = $2 WHERE id = $1', [messageId, String(result.error || 'WhatsApp rejected the message.').slice(0, 500)]).catch(() => {})
+  : null);
+
+// Business hours are the workspace's local time (settings.timezone).
+const localHHMM = (settings, now) => {
+  const { minutes } = zonedParts(now, localeFromSettings(settings).timezone);
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+};
 const isWithinBusinessHours = (settings, now) => {
   if (!settings.automation_business_hours_enabled) return true;
-  const hhmm = now.toISOString().slice(11, 16);
+  const hhmm = localHHMM(settings, now);
   const start = settings.automation_business_hours_start || '09:00';
   const end = settings.automation_business_hours_end || '20:00';
   return hhmm >= start && hhmm < end;
@@ -18,11 +28,15 @@ const isWithinBusinessHours = (settings, now) => {
 const nextBusinessWindowStart = (settings, now) => {
   const start = settings.automation_business_hours_start || '09:00';
   const end = settings.automation_business_hours_end || '20:00';
-  const hhmm = now.toISOString().slice(11, 16);
-  const [h, m] = start.split(':').map(Number);
-  const next = new Date(now);
-  next.setUTCHours(h, m, 0, 0);
-  if (hhmm >= end) next.setUTCDate(next.getUTCDate() + 1);
+  const { timezone } = localeFromSettings(settings);
+  const hhmm = localHHMM(settings, now);
+  const today = zonedParts(now, timezone).date;
+  const next = wallTimeToUtc(`${today}T${start}`, timezone);
+  // After today's window has closed, the next start is tomorrow (local calendar).
+  if (hhmm >= end) {
+    const tomorrow = zonedParts(new Date(next.getTime() + 26 * 60 * 60 * 1000), timezone).date;
+    return wallTimeToUtc(`${tomorrow}T${start}`, timezone);
+  }
   return next;
 };
 
@@ -36,7 +50,7 @@ const runAutomationSequences = async () => {
       JOIN leads l ON l.id = e.lead_id
       JOIN tenants t ON t.id = e.tenant_id
       WHERE e.status = 'active' AND e.next_send_at <= NOW()
-        AND l.opted_out = false AND l.automation_unresponsive = false
+        AND COALESCE(l.ai_paused,false) = false AND l.opted_out = false AND l.automation_unresponsive = false
     `);
 
     for (const row of due.rows) {
@@ -78,6 +92,7 @@ const runAutomationSequences = async () => {
         const lead = { name: row.name, phone: row.phone, email: row.email, location: row.location, source: row.source };
         let message = substituteVars(step.message, lead);
 
+        if ((await query('SELECT ai_paused FROM leads WHERE id=$1 AND tenant_id=$2',[row.lead_id,row.tenant_id])).rows[0]?.ai_paused) continue;
         if (step.channel === 'whatsapp' && row.phone) {
           const credentials = settings.whatsapp_phone_number_id && settings.whatsapp_access_token
             ? { phone_number_id: settings.whatsapp_phone_number_id, access_token: settings.whatsapp_access_token }
@@ -117,22 +132,94 @@ const runAutomationSequences = async () => {
             const sendResult = await sendTextMessage(row.phone, message, credentials);
             await query(
               `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, wa_message_id, status, is_automated, is_ai_generated)
-               VALUES ($1,$2,'outbound',$3,'text',$4,$5,true,$6)`,
+               VALUES ($1,$2,'outbound',$3,'text',$4,$5,true,$6) RETURNING id`,
               [row.tenant_id, row.lead_id, message, sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed', aiGeneratedSend]
-            ).catch(() => {});
+            ).then(r => saveSendError(r.rows[0]?.id, sendResult)).catch(() => {});
             await query(
               `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
                VALUES ($1,$2,'automated_whatsapp',$3,$4)`,
               [row.tenant_id, row.lead_id, aiGeneratedSend ? 'Automated message sent (AI-personalized)' : 'Automated message sent', message]
             ).catch(() => {});
           } else if (step.approved_template_name) {
-            const sendResult = await sendTemplate(row.phone, step.approved_template_name, 'en', [], credentials);
+            // Templates aren't always registered under 'en' — Meta's own template
+            // creator commonly defaults to 'en_US', and this WABA has a mix of both.
+            // Sending with the wrong language code fails outright (Meta error 132001,
+            // "template name does not exist in <lang>"), so resolve the template's
+            // actual language before sending rather than assuming. Falls back to 'en'
+            // if the lookup fails (network issue) or the template isn't found there —
+            // same as the previous hardcoded behavior, not a regression.
+            let language = 'en';
+            const templateList = await listMessageTemplates(
+              settings.whatsapp_business_account_id, credentials?.access_token || settings.whatsapp_access_token
+            ).catch(() => null);
+            const matchedTemplate = templateList?.success
+              ? templateList.templates.find(t => t.name === step.approved_template_name)
+              : null;
+            if (matchedTemplate) language = matchedTemplate.language;
+
+            // Templates with a body variable (e.g. "Hi {{1}}") reject a send with
+            // zero parameters outright (Meta error 132000). Fill every {{n}} slot
+            // with the lead's name — covers the near-universal single-variable
+            // "Hi {{1}}" greeting case; templates with multiple distinct variables
+            // would need per-step parameter mapping, which isn't built yet.
+            const bodyComponent = matchedTemplate?.components?.find(c => c.type === 'BODY');
+            const varCount = bodyComponent ? (bodyComponent.text.match(/\{\{\d+\}\}/g) || []).length : 0;
+            const parameters = varCount > 0
+              ? Array(varCount).fill({ type: 'text', text: row.name || 'there' })
+              : [];
+
+            // A template can have a video/image/document header registered via the
+            // Broadcast feature (whatsapp_template_media, keyed by template name) —
+            // look it up so automation sends carry the same media a manual broadcast
+            // send would, instead of silently dropping it.
+            const media = await query(
+              `SELECT media_type, media_url FROM whatsapp_template_media
+               WHERE tenant_id = $1 AND template_name = $2 AND language = $3`,
+              [row.tenant_id, step.approved_template_name, language]
+            );
+            const headerMedia = media.rows[0]
+              ? { type: media.rows[0].media_type.toLowerCase(), link: media.rows[0].media_url }
+              : null;
+            // Consent: marketing templates need an opt-in; an unknown template counts as marketing.
+            const consent = await checkTemplateConsent({ tenantId: row.tenant_id, leadId: row.lead_id, template: matchedTemplate });
+            if (!consent.allowed) {
+              // Couldn't read the template list (network): the category is unknown, so try
+              // again in an hour rather than treat it as marketing and block for good.
+              if (!templateList?.success) {
+                await query(`UPDATE automation_enrollments SET next_send_at = NOW() + INTERVAL '1 hour' WHERE id = $1`, [row.enrollment_id]);
+                continue;
+              }
+              // Consent won't change by itself, so retrying every cycle only floods the timeline
+              // (one lead logged 146 skips). Stop the enrolment once, with a visible reason.
+              const reasonCode = /opted out/i.test(consent.reason) ? 'opted_out' : consent.category === 'MARKETING' ? 'blocked_no_opt_in' : 'blocked_no_consent';
+              await query(
+                `UPDATE automation_enrollments SET status = 'cancelled', cancelled_at = NOW(), cancelled_reason = $2 WHERE id = $1 AND status = 'active'`,
+                [row.enrollment_id, reasonCode]
+              );
+              await query(
+                `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+                 VALUES ($1,$2,'automation_blocked','Automation stopped: template not allowed',$3)`,
+                [row.tenant_id, row.lead_id, `${consent.reason} Template: ${step.approved_template_name}. It resumes automatically when the lead opts in (or switch this step to a Utility template).`]
+              ).catch(() => {});
+              continue;
+            }
+            const sendResult = await sendTemplate(row.phone, step.approved_template_name, language, parameters, credentials, headerMedia);
+            // The actual rendered text (body with the lead's name filled in), same as a
+            // manual broadcast send stores — not the bare "[Template: name]" placeholder,
+            // which left the inbox showing nothing but the template name badge.
+            let renderedMessage = `[Template: ${step.approved_template_name}]`;
+            if (bodyComponent?.text) {
+              renderedMessage = bodyComponent.text;
+              parameters.forEach((p, i) => {
+                renderedMessage = renderedMessage.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), () => p.text);
+              });
+            }
             await query(
               `INSERT INTO whatsapp_messages (tenant_id, lead_id, direction, message, message_type, template_name, wa_message_id, status, is_automated)
-               VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,true)`,
-              [row.tenant_id, row.lead_id, `[Template: ${step.approved_template_name}]`, step.approved_template_name,
+               VALUES ($1,$2,'outbound',$3,'template',$4,$5,$6,true) RETURNING id`,
+              [row.tenant_id, row.lead_id, renderedMessage, step.approved_template_name,
                 sendResult.wa_message_id, sendResult.success ? 'sent' : 'failed']
-            ).catch(() => {});
+            ).then(r => saveSendError(r.rows[0]?.id, sendResult)).catch(() => {});
             await query(
               `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
                VALUES ($1,$2,'automated_whatsapp','Automated template sent',$3)`,
@@ -164,12 +251,21 @@ const runAutomationSequences = async () => {
 
         const nextStep = steps.rows[row.current_step + 1];
         if (nextStep) {
-          await query(
+          const nextSendAt = await query(
             `UPDATE automation_enrollments
              SET current_step = current_step + 1, next_send_at = NOW() + ($1 || ' minutes')::INTERVAL
-             WHERE id = $2`,
+             WHERE id = $2 RETURNING next_send_at`,
             [nextStep.delay_minutes, row.enrollment_id]
           );
+          const nextActionLabel = nextStep.channel === 'email' ? 'Email' : 'WhatsApp Message';
+          await query(
+            `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, metadata)
+             VALUES ($1,$2,'automation_next_scheduled','Follow-up Scheduled',$3,$4)`,
+            [
+              row.tenant_id, row.lead_id, `Next Action: ${nextActionLabel}`,
+              JSON.stringify({ next_action_at: nextSendAt.rows[0].next_send_at }),
+            ]
+          ).catch(() => {});
         } else {
           // Sequence finished — if the lead never replied throughout it, mark them
           // unresponsive so no further automation (any sequence) is attempted.
@@ -181,6 +277,12 @@ const runAutomationSequences = async () => {
             await query('UPDATE leads SET automation_unresponsive = true WHERE id = $1', [row.lead_id]);
           }
           await query(`UPDATE automation_enrollments SET status = 'completed', completed_at = NOW() WHERE id = $1`, [row.enrollment_id]);
+          const sequenceResult = await query('SELECT name FROM automation_sequences WHERE id = $1', [row.sequence_id]);
+          await query(
+            `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+             VALUES ($1,$2,'sequence_completed',$3,$4)`,
+            [row.tenant_id, row.lead_id, sequenceResult.rows[0]?.name || 'Automation', `Completed ${steps.rows.length} of ${steps.rows.length} steps`]
+          ).catch(() => {});
         }
       } catch (stepError) {
         console.error('[AutomationRunner] step error:', stepError.message);
@@ -195,4 +297,4 @@ const runAutomationSequences = async () => {
   }
 };
 
-module.exports = { runAutomationSequences };
+module.exports = { runAutomationSequences, isWithinBusinessHours, nextBusinessWindowStart };

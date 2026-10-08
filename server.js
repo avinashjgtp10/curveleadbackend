@@ -55,7 +55,7 @@ app.set('trust proxy', 1);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 // CORS - parse from env
-const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5174,https://www.curvelead.com,https://curvelead.com')
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:8081,http://localhost:8082,http://localhost:19006,https://www.curvelead.com,https://curvelead.com')
   .split(',').map(o => o.trim()).filter(Boolean);
 
 // Endpoints meant to be embedded on arbitrary third-party business websites
@@ -100,9 +100,19 @@ app.use('/uploads', require('express').static(require('path').join(__dirname, 'u
 // ============================================
 // Rate limiting
 // ============================================
+// Logged-in users get their own bucket. Keyed by IP, a whole office shared 500 requests,
+// and the inbox's background polling alone uses ~200 per open tab — once spent, new
+// WhatsApp messages silently stopped appearing until the window reset.
+const jwt = require('jsonwebtoken');
+const limiterUserId = (req) => {
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Bearer ')) return null;
+  try { return jwt.verify(auth.slice(7), process.env.JWT_SECRET).userId || null; } catch { return null; }
+};
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500,
+  max: (req) => (limiterUserId(req) ? 2000 : 500),
+  keyGenerator: (req) => { const id = limiterUserId(req); return id ? `user:${id}` : req.ip; },
   message: { error: 'Too many requests, please try again later.' },
 });
 
@@ -149,6 +159,12 @@ app.use('/api/ai-calling', apiLimiter, require('./routes/aiCalling'));
 app.use('/api/playbook', apiLimiter, require('./routes/playbook'));
 app.use('/api/automations', apiLimiter, require('./routes/automations'));
 app.use('/api/teams', apiLimiter, require('./routes/teams'));
+app.use('/api/features', apiLimiter, require('./routes/features'));
+app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
+// Google redirects the browser here after consent, so it can't require our login.
+app.get('/api/ads/google/callback', apiLimiter, require('./controllers/googleAdsController').callback);
+app.use('/api/ads', apiLimiter, require('./routes/ads'));
+app.use('/api/social', apiLimiter, require('./routes/social'));
 
 // ============================================
 // 404 handler
@@ -194,16 +210,40 @@ app.listen(PORT, () => {
   setTimeout(runAutomationSequences, 30 * 1000);
   setInterval(runAutomationSequences, 5 * 60 * 1000);
 
+  // Scheduled WhatsApp broadcasts — sends any that have come due, checks every minute
+  const { runScheduledBroadcasts } = require('./jobs/scheduledBroadcasts');
+  setTimeout(runScheduledBroadcasts, 35 * 1000);
+  setInterval(runScheduledBroadcasts, 60 * 1000);
+
+  // Demo/visit reminders to the lead on WhatsApp — checks every 5 minutes
+  const { runBookingReminders } = require('./jobs/bookingReminders');
+  setTimeout(runBookingReminders, 55 * 1000);
+  setInterval(runBookingReminders, 5 * 60 * 1000);
+
   // Meta ad spend/performance sync — runs every 6 hours
   const { runMetaAdInsightsSync } = require('./jobs/metaAdInsightsSync');
   setTimeout(runMetaAdInsightsSync, 45 * 1000);
   setInterval(runMetaAdInsightsSync, 6 * 60 * 60 * 1000);
 
+  // Meta lead sync — safety net for the real-time webhook (which queues leads:ingest-meta
+  // jobs): every 30 minutes, re-checks leads created in the last 24 hours
+  const { runMetaLeadSync } = require('./jobs/metaLeadSync');
+  setTimeout(runMetaLeadSync, 50 * 1000);
+  setInterval(runMetaLeadSync, 30 * 60 * 1000);
+
   // Daily report email — polls every 15 min, only actually sends once per
   // tenant per day (inside the target UTC hour, guarded by last-sent date)
   const { runDailyReportEmail } = require('./jobs/dailyReportEmail');
   setTimeout(runDailyReportEmail, 40 * 1000);
+  setInterval(() => require('./jobs/featureJobs').runFeatureJobs().catch(e => console.error('Feature jobs:', e.message)), 60 * 1000);
   setInterval(runDailyReportEmail, 15 * 60 * 1000);
+
+  // Ads module jobs (insights sync every 4h, daily token checks) — BullMQ when
+  // REDIS_URL is set, otherwise in-process timers.
+  require('./jobs/adsJobs').registerAdsJobs();
+  require('./jobs/metaLeadJobs').registerMetaLeadJobs();
+  require('./jobs/socialJobs').registerSocialJobs();
+  require('./jobs/queues').start().catch(e => console.error('Job queues failed to start:', e.message));
 });
 
 // Graceful shutdown

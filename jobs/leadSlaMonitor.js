@@ -25,7 +25,7 @@ async function notifyAssigneeAtRisk() {
   const result = await query(`
     SELECT l.id, l.tenant_id, l.name, l.assigned_to
     FROM leads l
-    WHERE l.first_response_at IS NULL
+    WHERE l.merged_into_id IS NULL AND l.first_response_at IS NULL
       AND l.assigned_to IS NOT NULL
       AND l.created_at <= NOW() - INTERVAL '${TARGET_RESPONSE_MINUTES} minutes'
       AND NOT EXISTS (
@@ -38,6 +38,11 @@ async function notifyAssigneeAtRisk() {
       l.tenant_id, l.assigned_to, `SLA at risk — ${l.name}`,
       'Still uncontacted 5+ minutes after creation', 'sla_risk', 'lead', l.id
     );
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+       VALUES ($1, $2, 'sla_risk', 'Contact SLA at risk', 'Still uncontacted 5+ minutes after creation.')`,
+      [l.tenant_id, l.id]
+    ).catch(() => {});
   }
   if (result.rows.length > 0) console.log(`[LeadSlaMonitor] Sent ${result.rows.length} sla_risk notification(s)`);
 }
@@ -47,11 +52,13 @@ async function escalateToAdmins() {
   const result = await query(`
     SELECT l.id, l.tenant_id, l.name
     FROM leads l
-    WHERE l.first_response_at IS NULL
+    WHERE l.merged_into_id IS NULL AND l.first_response_at IS NULL
       AND l.created_at <= NOW() - INTERVAL '${ESCALATION_AFTER_MINUTES} minutes'
       AND NOT EXISTS (
-        SELECT 1 FROM notifications n
-        WHERE n.tenant_id = l.tenant_id AND n.type = 'sla_escalated' AND n.reference_id = l.id
+        -- Dedup on our own lead_activities write, not on a notification having gone out —
+        -- a tenant with zero active admins gets zero notifications ever, which left this
+        -- guard permanently open and re-fired every tick.
+        SELECT 1 FROM lead_activities a WHERE a.tenant_id = l.tenant_id AND a.lead_id = l.id AND a.activity_type = 'sla_escalated'
       )
   `);
   let sent = 0;
@@ -64,6 +71,11 @@ async function escalateToAdmins() {
       );
       sent++;
     }
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+       VALUES ($1, $2, 'sla_escalated', 'Contact SLA escalated', 'Still uncontacted 15+ minutes after creation — escalated to admins.')`,
+      [l.tenant_id, l.id]
+    ).catch(() => {});
   }
   if (sent > 0) console.log(`[LeadSlaMonitor] Sent ${sent} sla_escalated notification(s)`);
 }
@@ -73,11 +85,10 @@ async function flagMissedLeads() {
   const result = await query(`
     SELECT l.id, l.tenant_id, l.name
     FROM leads l
-    WHERE l.first_response_at IS NULL
+    WHERE l.merged_into_id IS NULL AND l.first_response_at IS NULL
       AND l.created_at <= NOW() - INTERVAL '${MISSED_AFTER_MINUTES} minutes'
       AND NOT EXISTS (
-        SELECT 1 FROM notifications n
-        WHERE n.tenant_id = l.tenant_id AND n.type = 'sla_missed' AND n.reference_id = l.id
+        SELECT 1 FROM lead_activities a WHERE a.tenant_id = l.tenant_id AND a.lead_id = l.id AND a.activity_type = 'sla_missed'
       )
   `);
   let sent = 0;
@@ -90,6 +101,11 @@ async function flagMissedLeads() {
       );
       sent++;
     }
+    await query(
+      `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description)
+       VALUES ($1, $2, 'sla_missed', 'Contact SLA missed', '24+ hours with no response.')`,
+      [l.tenant_id, l.id]
+    ).catch(() => {});
   }
   if (sent > 0) console.log(`[LeadSlaMonitor] Sent ${sent} sla_missed notification(s)`);
 }
@@ -99,7 +115,7 @@ async function autoReassignStale() {
   const result = await query(`
     SELECT l.id, l.tenant_id, l.name, l.assigned_to
     FROM leads l
-    WHERE l.first_response_at IS NULL
+    WHERE l.merged_into_id IS NULL AND l.first_response_at IS NULL
       AND l.assigned_to IS NOT NULL
       AND l.created_at <= NOW() - INTERVAL '${REASSIGN_AFTER_MINUTES} minutes'
       AND NOT EXISTS (
@@ -113,7 +129,7 @@ async function autoReassignStale() {
       WHERE u.tenant_id = $1 AND u.role = 'staff' AND u.is_active = true AND u.id != $2
       ORDER BY (
         SELECT COUNT(*) FROM leads
-        WHERE assigned_to = u.id AND LOWER(stage) NOT IN (
+        WHERE assigned_to = u.id AND merged_into_id IS NULL AND LOWER(stage) NOT IN (
           SELECT LOWER(name) FROM lead_stages WHERE tenant_id = $1 AND (is_won = true OR is_lost = true)
         )
       ) ASC

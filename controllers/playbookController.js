@@ -1,3 +1,4 @@
+const { metricScope, getMetrics, getBreakdown } = require('../services/metrics');
 const { query } = require('../config/db');
 const { generatePlaybookForTenant } = require('../jobs/playbookGenerator');
 
@@ -9,7 +10,7 @@ const getPlaybook = async (req, res) => {
       [req.tenantId]
     );
     res.json({ playbook: result.rows[0] || null });
-  } catch (e) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) { console.error('getPlaybook:', e); res.status(500).json({ error: 'Failed to load playbook.' }); }
 };
 
 // POST /api/playbook/generate — regenerate now (admin)
@@ -35,7 +36,7 @@ const getCoaching = async (req, res) => {
               COUNT(l.id) FILTER (WHERE LOWER(l.stage) IN (
                 SELECT LOWER(name) FROM lead_stages WHERE tenant_id=$1 AND is_won=true)) as won
        FROM users u
-       LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1
+       LEFT JOIN leads l ON l.assigned_to = u.id AND l.tenant_id = $1 AND l.merged_into_id IS NULL
        WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('admin','staff')
        GROUP BY u.id, u.name ORDER BY u.name ASC`,
       [tid]
@@ -62,7 +63,11 @@ const getCoaching = async (req, res) => {
     const allScores = Object.values(byStaff).flatMap(s => s.scores);
     const teamAvgScore = allScores.length ? allScores.reduce((a, b) => a + b, 0) / allScores.length : null;
 
-    const staff = staffResult.rows.map(row => {
+    const scope = await metricScope(req);
+    const metrics = await getMetrics(scope);
+    const breakdown = await getBreakdown(scope, 'assigned_to');
+    const staff = staffResult.rows.filter(row => !scope.staffId || row.id === scope.staffId).map(original => {
+      const row = { ...original, ...(breakdown.find(m => m.assigned_to === original.id) || { total_leads: 0, won: 0 }) };
       const calls = byStaff[row.id];
       const avgScore = calls?.scores.length ? calls.scores.reduce((a, b) => a + b, 0) / calls.scores.length : null;
       const topMissed = calls
@@ -81,10 +86,10 @@ const getCoaching = async (req, res) => {
       };
     });
 
-    res.json({ staff, team_avg_score: teamAvgScore !== null ? +teamAvgScore.toFixed(1) : null });
+    res.json({ staff, metrics, team_avg_score: teamAvgScore !== null ? +teamAvgScore.toFixed(1) : null });
   } catch (e) {
     console.error('getCoaching error:', e.message);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' });
   }
 };
 

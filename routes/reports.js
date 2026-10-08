@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   getConversionReport, getReportBySource, getReportByStaff, getReportByCampaign, getTimeline, getDashboardSummary,
-  getFunnelReport, getTimeInStageReport, getFollowupTrend,
+  getFunnelReport, getTimeInStageReport, getFollowupTrend, getMessagesReport,
 } = require('../controllers/reportsController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
@@ -18,5 +18,6 @@ router.get('/timeline', getTimeline);
 router.get('/funnel', getFunnelReport);
 router.get('/time-in-stage', getTimeInStageReport);
 router.get('/followup-trend', getFollowupTrend);
+router.get('/messages', getMessagesReport);
 
 module.exports = router;

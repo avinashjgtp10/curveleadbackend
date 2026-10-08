@@ -1,14 +1,6 @@
-const { query } = require('../config/db');
-const { nextLeadNumber } = require('../utils/leadNumber');
-const { formatFieldDataNotes } = require('../utils/metaFieldData');
-const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
-const { checkNewLeadTriggers } = require('../utils/automationTriggers');
-const { applyAssignmentRules } = require('../utils/leadAssignment');
-const { notifyNewLead } = require('../utils/leadNotifyEmail');
-const { notifyNewLeadToAdmins } = require('./notificationController');
-const { findOrCreateMetaCampaign } = require('../utils/metaCampaignMatch');
-const { isMetaLeadDeleted } = require('../utils/deletedLeads');
-const axios = require('axios');
+const queues = require('../jobs/queues');
+const { tenantForPage } = require('../services/metaLeads');
+const { webhookSecrets, verifyMetaWebhookAny } = require('../utils/metaWebhookSignature');
 
 // GET /api/webhook/meta - Verify webhook
 const verifyWebhook = (req, res) => {
@@ -23,117 +15,29 @@ const verifyWebhook = (req, res) => {
   return res.sendStatus(403);
 };
 
-// POST /api/webhook/meta - Receive lead from Meta Ads
+// POST /api/webhook/meta - Lead Ads webhook. Verifies Meta's signature, answers 200
+// straight away and queues one leads:ingest-meta job per lead (every entry, not just
+// the first — Meta batches several pages into one delivery).
 const receiveLeadFormWebhook = async (req, res) => {
-  res.sendStatus(200); // Always respond 200 first
-
-  try {
-    const entry = req.body.entry?.[0];
-    const changes = entry?.changes || [];
-
-    for (const change of changes) {
-      if (change.field !== 'leadgen') continue;
-
-      const leadgenId = change.value.leadgen_id;
-      const pageId = change.value.page_id;
-      const adId = change.value.ad_id;
-
-      // Find tenant by page_id and get their stored access token
-      const tenantResult = await query(
-        `SELECT id, name, settings->>'meta_page_access_token' AS page_access_token
-         FROM tenants WHERE settings->>'meta_page_id' = $1 LIMIT 1`,
-        [pageId]
-      );
-      const tenant = tenantResult.rows[0];
-      if (!tenant) {
-        console.warn(`No tenant found for Meta page ${pageId}`);
-        continue;
-      }
-
-      if (!tenant.page_access_token) {
-        console.warn(`Tenant ${tenant.id} has no page access token for page ${pageId}`);
-        continue;
-      }
-
-      if (await isMetaLeadDeleted(tenant.id, leadgenId)) {
-        console.log(`Meta lead ${leadgenId} was previously deleted, skipping`);
-        continue;
-      }
-
-      // Fetch lead details using the tenant's page access token — including
-      // campaign/adset/ad fields, which Meta returns directly here (verified
-      // live) without needing any ads_read permission or extra API call.
-      let leadData;
-      try {
-        const response = await axios.get(
-          `https://graph.facebook.com/v25.0/${leadgenId}`,
-          {
-            params: {
-              access_token: tenant.page_access_token,
-              fields: 'field_data,ad_id,ad_name,campaign_id,campaign_name,adset_id,adset_name,form_id,created_time,platform',
-            },
-          }
-        );
-        leadData = response.data;
-      } catch (e) {
-        console.error('Failed to fetch lead from Meta:', e.message);
-        continue;
-      }
-
-      // Parse field data
-      const fields = {};
-      (leadData.field_data || []).forEach(f => {
-        fields[f.name] = f.values?.[0];
-      });
-
-      const campaignId = await findOrCreateMetaCampaign({
-        tenantId: tenant.id,
-        campaignId: leadData.campaign_id,
-        campaignName: leadData.campaign_name,
-        adsetId: leadData.adset_id,
-      });
-
-      const phone = fields.phone_number || fields.phone || '';
-      const name = fields.full_name || `${fields.first_name || ''} ${fields.last_name || ''}`.trim();
-      const email = fields.email || '';
-
-      if (!phone) {
-        console.warn(`No phone in Meta lead ${leadgenId}, skipping`);
-        continue;
-      }
-
-      // Check duplicate by meta_lead_id first, then phone
-      const existing = await query(
-        'SELECT id FROM leads WHERE tenant_id = $1 AND (meta_lead_id = $2 OR phone = $3)',
-        [tenant.id, leadgenId, phone]
-      );
-      if (existing.rows.length > 0) {
-        console.log(`Duplicate lead skipped: ${phone}`);
-        continue;
-      }
-
-      const leadNumber = await nextLeadNumber(tenant.id);
-      const notes = formatFieldDataNotes(leadData.field_data, {
-        platform: leadData.platform, tenantName: tenant.name,
-        campaignName: leadData.campaign_name, adsetName: leadData.adset_name, adName: leadData.ad_name,
-      });
-      const inserted = await query(
-        `INSERT INTO leads (tenant_id, lead_number, name, phone, email, source, source_detail, campaign_id, meta_lead_id, meta_ad_id, meta_adset_id, stage, notes)
-         VALUES ($1, $2, $3, $4, $5, 'meta_ads', $6, $7, $8, $9, $10, 'new', $11) RETURNING *`,
-        [tenant.id, leadNumber, name || 'Unknown', phone, email || null, leadData.ad_name || `Ad: ${adId}`,
-         campaignId || null, leadgenId, leadData.ad_id || adId || null, leadData.adset_id || null, notes]
-      );
-      sendWelcomeMessage({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
-      applyAssignmentRules({ tenantId: tenant.id, lead: inserted.rows[0] })
-        .then(() => notifyNewLead({ tenantId: tenant.id, lead: inserted.rows[0] }))
-        .catch(() => {});
-      checkNewLeadTriggers({ tenantId: tenant.id, lead: inserted.rows[0] }).catch(() => {});
-      notifyNewLeadToAdmins(tenant.id, inserted.rows[0]).catch(() => {});
-
-      console.log(`✅ Lead captured from Meta: ${name} (${phone}) for tenant ${tenant.id}`);
+  const changes = (req.body?.entry || []).flatMap(e => (e.changes || []).filter(c => c.field === 'leadgen').map(c => c.value || {}));
+  const secrets = webhookSecrets();
+  if (!(secrets.length && verifyMetaWebhookAny(req.rawBody, req.headers['x-hub-signature-256'], secrets))) {
+    // Lead details are always fetched from Meta with the page's own token, so an unsigned
+    // payload can't inject a lead — it can only name a page. As with the WhatsApp webhook,
+    // unsigned deliveries are accepted for connected pages (pages subscribed through
+    // another Meta app) unless META_WEBHOOK_REQUIRE_SIGNATURE=true.
+    const known = changes.length > 0 && (await Promise.all(changes.map(v => tenantForPage(v.page_id)))).every(Boolean);
+    if (process.env.META_WEBHOOK_REQUIRE_SIGNATURE === 'true' || !known) {
+      console.warn('Meta lead webhook rejected: invalid signature.');
+      return res.status(401).json({ error: 'Invalid webhook signature.' });
     }
-  } catch (error) {
-    console.error('Meta webhook error:', error);
+    console.warn('Meta lead webhook accepted without a verified signature for page(s)', [...new Set(changes.map(v => v.page_id))].join(','));
+  }
+  res.sendStatus(200);
+  for (const v of changes) {
+    if (!v.leadgen_id || !v.page_id) continue;
+    await queues.enqueue('leads:ingest-meta', { pageId: String(v.page_id), leadgenId: String(v.leadgen_id) }, { jobId: `meta-lead-${v.leadgen_id}` })
+      .catch(e => console.error('Could not queue Meta lead', v.leadgen_id, e.message));
   }
 };
 

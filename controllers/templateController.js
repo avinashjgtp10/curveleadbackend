@@ -81,7 +81,7 @@ const generate = async (req, res) => {
             [lead_id, req.tenantId]
           )
         : Promise.resolve({ rows: [] }),
-      query('SELECT name, phone FROM tenants WHERE id=$1', [req.tenantId]),
+      query('SELECT name, phone, settings FROM tenants WHERE id=$1', [req.tenantId]),
     ]);
 
     if (!tmplRes.rows.length) return res.status(404).json({ error: 'Template not found.' });

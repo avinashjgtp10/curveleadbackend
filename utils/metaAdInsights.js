@@ -1,7 +1,8 @@
+const { parseBudgets, fetchAdSetBudgets } = require('./metaBudget');
 const { query } = require('../config/db');
 const { findOrCreateMetaCampaign } = require('./metaCampaignMatch');
 
-const GRAPH = 'https://graph.facebook.com/v25.0';
+const { GRAPH_URL: GRAPH } = require('../config/meta');
 
 // The Ads Manager statuses to pull — Insights only ever returns campaigns that
 // have delivered something, but Ads Manager itself lists every campaign in
@@ -16,7 +17,7 @@ const fetchAllCampaigns = async (adAccountId, accessToken) => {
   const filtering = JSON.stringify([{ field: 'effective_status', operator: 'IN', value: STATUSES }]);
   const campaigns = new Map();
   let url = `${GRAPH}/${adAccountId}/campaigns`
-    + `?fields=id,name,effective_status&filtering=${encodeURIComponent(filtering)}`
+    + `?fields=id,name,effective_status,daily_budget,lifetime_budget&filtering=${encodeURIComponent(filtering)}`
     + `&limit=200&access_token=${encodeURIComponent(accessToken)}`;
 
   while (url) {
@@ -27,7 +28,12 @@ const fetchAllCampaigns = async (adAccountId, accessToken) => {
       throw new Error(data.error.message);
     }
     for (const c of data.data || []) {
-      campaigns.set(c.id, { name: c.name, status: c.effective_status });
+      let budgets = parseBudgets(c);
+      if (!budgets.daily_budget && !budgets.lifetime_budget) {
+        try { budgets = await fetchAdSetBudgets(`${GRAPH}/${c.id}/adsets?fields=daily_budget,lifetime_budget&limit=200&access_token=${encodeURIComponent(accessToken)}`, fetch); }
+        catch (error) { console.error('Ad set budget sync failed:', c.id, error.message); }
+      }
+      campaigns.set(c.id, { name: c.name, status: c.effective_status, ...budgets });
     }
     url = data.paging?.next || null;
   }
@@ -64,8 +70,8 @@ const syncTenantAdInsights = async (tenantId) => {
       const dbId = await findOrCreateMetaCampaign({ tenantId, campaignId, campaignName: info.name });
       if (!dbId) continue;
       await query(
-        `UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2`,
-        [info.status === 'ACTIVE' ? 'active' : 'paused', dbId]
+        `UPDATE campaigns SET status = $1, daily_budget=COALESCE($3,daily_budget), lifetime_budget=COALESCE($4,lifetime_budget), budget=COALESCE(NULLIF($4,0),$3,budget), updated_at = NOW() WHERE id = $2`,
+        [info.status === 'ACTIVE' ? 'active' : 'paused', dbId, info.daily_budget, info.lifetime_budget]
       );
       synced++;
     }

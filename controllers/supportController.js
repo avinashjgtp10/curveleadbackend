@@ -48,4 +48,18 @@ const submitTicket = async (req, res) => {
   } catch (error) { console.error('Submit support ticket error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
-module.exports = { submitTicket };
+// GET /api/support/tickets — the logged-in user's own tickets
+const getMyTickets = async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT id, subject, category, priority, status, created_at, updated_at
+       FROM support_tickets
+       WHERE tenant_id = $1 AND created_by = $2
+       ORDER BY created_at DESC`,
+      [req.tenantId, req.user.id]
+    );
+    res.json({ tickets: result.rows });
+  } catch (error) { console.error('Get my tickets error:', error); res.status(500).json({ error: 'Failed to fetch tickets.' }); }
+};
+
+module.exports = { submitTicket, getMyTickets };

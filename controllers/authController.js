@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs');
+const { localeFromSettings } = require('../utils/workspaceLocale');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { query, transaction } = require('../config/db');
@@ -144,7 +145,7 @@ const login = async (req, res) => {
     const result = await query(
       `SELECT u.id, u.name, u.email, u.role, u.tenant_id, u.is_active, u.password_hash,
               t.name as tenant_name, t.slug, t.business_type, t.subscription_status, t.trial_ends_at,
-              t.subscription_start, t.subscription_end, p.name as plan_name
+              t.subscription_start, t.subscription_end, p.name as plan_name, jsonb_build_object('country', t.settings->'country', 'currency', t.settings->'currency', 'timezone', t.settings->'timezone') as tenant_settings
        FROM users u LEFT JOIN tenants t ON u.tenant_id = t.id
        LEFT JOIN plans p ON t.plan_id = p.id
        WHERE u.email = $1`,
@@ -173,7 +174,7 @@ const login = async (req, res) => {
         id: user.tenant_id, name: user.tenant_name, slug: user.slug, business_type: user.business_type,
         subscriptionStatus: user.subscription_status, trialEndsAt: user.trial_ends_at,
         subscriptionStart: user.subscription_start, subscriptionEnd: user.subscription_end,
-        planName: user.plan_name,
+        planName: user.plan_name, ...localeFromSettings(user.tenant_settings || {}),
       },
     });
   } catch (error) {
@@ -190,9 +191,34 @@ const getProfile = async (req, res) => {
       id: req.user.tenant_id, name: req.user.tenant_name, business_type: req.user.business_type,
       subscriptionStatus: req.user.subscription_status, trialEndsAt: req.user.trial_ends_at,
       subscriptionStart: req.user.subscription_start, subscriptionEnd: req.user.subscription_end,
-      planName: req.user.plan_name,
+      planName: req.user.plan_name, ...localeFromSettings(req.user.tenant_settings || {}),
     },
   });
+};
+
+// GET /api/auth/preferences — per-user app preferences (e.g. hidden pipeline stages),
+// synced across web and mobile so both clients show the same view.
+const getPreferences = async (req, res) => {
+  try {
+    const result = await query('SELECT settings FROM users WHERE id = $1', [req.user.id]);
+    res.json({ preferences: result.rows[0]?.settings || {} });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load preferences.' });
+  }
+};
+
+// PUT /api/auth/preferences — shallow-merges the given keys into the user's stored settings.
+const updatePreferences = async (req, res) => {
+  try {
+    const patch = req.body && typeof req.body === 'object' ? req.body : {};
+    const result = await query(
+      `UPDATE users SET settings = COALESCE(settings, '{}'::jsonb) || $2::jsonb WHERE id = $1 RETURNING settings`,
+      [req.user.id, JSON.stringify(patch)]
+    );
+    res.json({ preferences: result.rows[0]?.settings || {} });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save preferences.' });
+  }
 };
 
 // POST /api/auth/forgot-password
@@ -335,7 +361,7 @@ const acceptInvite = async (req, res) => {
     const user = userResult.rows[0];
     const tenantResult = await query(
       `SELECT t.name, t.slug, t.business_type, t.subscription_status, t.trial_ends_at,
-              t.subscription_start, t.subscription_end, p.name as plan_name
+              t.subscription_start, t.subscription_end, p.name as plan_name, t.settings
        FROM tenants t LEFT JOIN plans p ON t.plan_id = p.id WHERE t.id = $1`,
       [invite.tenant_id]
     );
@@ -350,7 +376,7 @@ const acceptInvite = async (req, res) => {
         id: invite.tenant_id, name: tenant.name, slug: tenant.slug, business_type: tenant.business_type,
         subscriptionStatus: tenant.subscription_status, trialEndsAt: tenant.trial_ends_at,
         subscriptionStart: tenant.subscription_start, subscriptionEnd: tenant.subscription_end,
-        planName: tenant.plan_name,
+        planName: tenant.plan_name, ...localeFromSettings(tenant.settings || {}),
       },
     });
   } catch (error) {
@@ -359,4 +385,4 @@ const acceptInvite = async (req, res) => {
   }
 };
 
-module.exports = { signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite };
+module.exports = { signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite, getPreferences, updatePreferences };

@@ -11,7 +11,10 @@ const REQUIRED_VARS = [
   'EMAIL_FROM_ADDRESS', 'EMAIL_FROM_NAME', 'RESEND_API_KEY',
   'S3_BUCKET_NAME',
   'RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET',
-  'FRONTEND_URL', 'CORS_ALLOWED_ORIGINS',
+  'FRONTEND_URL',
+  // CORS_ALLOWED_ORIGINS deliberately excluded — server.js:58 has a safe
+  // in-code default (localhost + curvelead.com), so a missing value should
+  // degrade gracefully, not hard-stop startup.
 ];
 
 // Names only in the log line — never values — so a missing-secret startup
