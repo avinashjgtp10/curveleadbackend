@@ -3,6 +3,10 @@ const { Pool, types } = require('pg');
 types.setTypeParser(1114, value => new Date(value.replace(' ', 'T') + 'Z'));
 require('dotenv').config();
 
+const useSsl = process.env.DB_SSL
+  ? process.env.DB_SSL === 'true'
+  : !['localhost', '127.0.0.1', '::1'].includes(process.env.DB_HOST);
+
 const POOL_CONFIG = {
   host: process.env.DB_HOST,
   port: process.env.DB_PORT || 5432,
@@ -15,7 +19,8 @@ const POOL_CONFIG = {
   connectionTimeoutMillis: 15000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
-  ssl: { rejectUnauthorized: false },
+  // RDS needs SSL; a local Postgres usually doesn't. DB_SSL=true/false overrides.
+  ssl: useSsl ? { rejectUnauthorized: false } : false,
 };
 
 let _pool = createPool();
