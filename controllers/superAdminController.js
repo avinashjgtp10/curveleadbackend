@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { snapshotUser, recordDeletion } = require('../utils/accountHistory');
 const { sendTextMessage } = require('../services/whatsappService');
 const { resolveWhatsAppCredentials } = require('../utils/whatsappCredentials');
 
@@ -57,14 +58,16 @@ const getTenants = async (req, res) => {
 // PUT /api/super-admin/tenants/:id
 const updateTenant = async (req, res) => {
   try {
-    const { plan_id, subscription_status, trial_ends_at } = req.body;
+    const { plan_id, subscription_status, trial_ends_at, subscription_start, subscription_end } = req.body;
     const before = await query('SELECT name, subscription_status, plan_id FROM tenants WHERE id = $1', [req.params.id]);
     const result = await query(
       `UPDATE tenants SET plan_id = COALESCE($1, plan_id),
        subscription_status = COALESCE($2, subscription_status),
-       trial_ends_at = COALESCE($3, trial_ends_at), updated_at = NOW()
+       trial_ends_at = COALESCE($3, trial_ends_at),
+       subscription_start = COALESCE($5, subscription_start),
+       subscription_end = COALESCE($6, subscription_end), updated_at = NOW()
        WHERE id = $4 RETURNING *`,
-      [plan_id, subscription_status, trial_ends_at, req.params.id]
+      [plan_id, subscription_status, trial_ends_at, req.params.id, subscription_start || null, subscription_end || null]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Tenant not found.' });
 
@@ -175,8 +178,14 @@ const updateUser = async (req, res) => {
 // DELETE /api/super-admin/users/:id
 const deleteUser = async (req, res) => {
   try {
+    const before = await snapshotUser(req.params.id);
     const result = await query('DELETE FROM users WHERE id = $1 RETURNING id, name, tenant_id', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'User not found.' });
+    await recordDeletion({
+      accountType: 'user', name: before?.name, email: before?.email, role: before?.role,
+      tenantId: before?.tenant_id, tenantName: before?.tenant_name,
+      deletedBy: { id: req.user.id, name: req.user.name, email: req.user.email }, reason: req.body?.reason,
+    });
     await logActivity({ tenantId: result.rows[0].tenant_id, actorName: req.user.name, action: `${result.rows[0].name} removed`, module: 'Users', status: 'Warning' });
     res.json({ message: 'Removed.' });
   } catch (error) { console.error('Delete user error:', error); res.status(500).json({ error: 'Failed.' }); }
@@ -365,11 +374,12 @@ const getAutomations = async (req, res) => {
 // GET /api/super-admin/campaigns
 const getCrossTenantCampaigns = async (req, res) => {
   try {
-    const { search, tenant_id, status, source, page = 1, limit = 20 } = req.query;
+    const { search, tenant_id, status, source, days, page = 1, limit = 20 } = req.query;
     const conditions = [];
     const params = [];
     let i = 1;
 
+    if (parseInt(days, 10) > 0) { conditions.push(`c.created_at >= NOW() - ($${i} || ' days')::INTERVAL`); params.push(String(parseInt(days, 10))); i++; }
     if (search) { conditions.push(`c.name ILIKE $${i}`); params.push(`%${search}%`); i++; }
     if (tenant_id) { conditions.push(`c.tenant_id = $${i}`); params.push(tenant_id); i++; }
     if (status) { conditions.push(`c.status = $${i}`); params.push(status); i++; }
@@ -594,11 +604,20 @@ const getSupportTickets = async (req, res) => {
     const params = [];
     let i = 1;
 
-    if (status) { conditions.push(`status = $${i}`); params.push(status); i++; }
-    if (search) { conditions.push(`(name ILIKE $${i} OR email ILIKE $${i} OR message ILIKE $${i})`); params.push(`%${search}%`); i++; }
+    if (status) { conditions.push(`st.status = $${i}`); params.push(status); i++; }
+    if (search) { conditions.push(`(st.name ILIKE $${i} OR st.email ILIKE $${i} OR st.message ILIKE $${i} OR st.subject ILIKE $${i})`); params.push(`%${search}%`); i++; }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    const result = await query(`SELECT * FROM support_tickets ${where} ORDER BY created_at DESC`, params);
+    // subject/category/priority come from migration_support_ticket_details.sql; fall back to the original
+    // columns if it has not been run yet so the list keeps working.
+    let result;
+    try {
+      result = await query(`SELECT st.*, t.name AS tenant_name FROM support_tickets st LEFT JOIN tenants t ON t.id = st.tenant_id ${where} ORDER BY st.created_at DESC`, params);
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      const plain = where.replace(/ OR st\.subject ILIKE \$\d+/, '');
+      result = await query(`SELECT st.*, t.name AS tenant_name FROM support_tickets st LEFT JOIN tenants t ON t.id = st.tenant_id ${plain} ORDER BY st.created_at DESC`, params);
+    }
     res.json({ tickets: result.rows });
   } catch (error) { console.error('Get support tickets error:', error); res.status(500).json({ error: 'Failed.' }); }
 };

@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs');
+const { snapshotUser, recordDeletion } = require('../utils/accountHistory');
 const crypto = require('crypto');
 const { query } = require('../config/db');
 const { sendInviteEmail } = require('../utils/email');
@@ -276,6 +277,7 @@ const deleteStaff = async (req, res) => {
     if (req.params.id === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself.' });
 
     const userId = req.params.id;
+    const before = await snapshotUser(userId);
     // Unassign leads before deleting (ON DELETE SET NULL handles created_by columns;
     // lead_followups has no assigned_to of its own — it follows the lead's)
     await query('UPDATE leads SET assigned_to = NULL WHERE assigned_to = $1', [userId]);
@@ -283,6 +285,11 @@ const deleteStaff = async (req, res) => {
     const result = await query('DELETE FROM users WHERE id = $1 AND tenant_id = $2 RETURNING id',
       [userId, req.tenantId]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Staff not found.' });
+    await recordDeletion({
+      accountType: 'user', name: before?.name, email: before?.email, role: before?.role,
+      tenantId: before?.tenant_id, tenantName: before?.tenant_name,
+      deletedBy: { id: req.user.id, name: req.user.name, email: req.user.email }, reason: req.body?.reason,
+    });
     res.json({ message: 'Deleted.' });
   } catch (error) { console.error('Delete staff error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
