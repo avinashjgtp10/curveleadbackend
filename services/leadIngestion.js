@@ -63,6 +63,13 @@ async function ingestLead(tenantId, input, { submissionKey = input.meta_lead_id 
       const result = await client.query(`INSERT INTO leads (tenant_id, lead_number, ${entries.map(([k]) => k).join(',')}) VALUES ($1,$2,${entries.map((_, i) => '$' + (i + 3)).join(',')}) RETURNING *`,
         [tenantId, number, ...entries.map(([key, value]) => key === 'custom_fields' ? JSON.stringify(value) : value)]);
       lead = await assignInTransaction(client, tenantId, result.rows[0]);
+      // Workspace choice (Settings): treat an enquiry as consent to WhatsApp contact. Off unless the
+      // owner turns it on. Recorded with its own source so implied opt-ins stay distinguishable
+      // from explicit ones, and it never overrides an opt-out or an existing opt-in.
+      if (settings.rows[0]?.settings?.whatsapp_auto_opt_in === true && !lead.whatsapp_opt_in_at && !lead.opted_out) {
+        const opted = await client.query(`UPDATE leads SET whatsapp_opt_in_at = NOW(), whatsapp_opt_in_source = 'enquiry_auto' WHERE id=$1 AND tenant_id=$2 AND whatsapp_opt_in_at IS NULL AND opted_out = false RETURNING *`, [lead.id, tenantId]);
+        if (opted.rows[0]) lead = opted.rows[0];
+      }
     } else {
       await client.query(`INSERT INTO lead_activities (tenant_id,lead_id,activity_type,title,description,metadata,created_by) VALUES ($1,$2,'duplicate',$3,$4,$5,$6)`,
         [tenantId, lead.id, `Duplicate lead received from ${data.source}`, data.notes || null, JSON.stringify({ submission: data }), actorId]);

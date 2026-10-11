@@ -24,6 +24,7 @@ const withExtras = (row) => ({
   automation_business_hours_enabled: !!row?.settings?.automation_business_hours_enabled,
   automation_business_hours_start: row?.settings?.automation_business_hours_start || '09:00',
   automation_business_hours_end: row?.settings?.automation_business_hours_end || '20:00',
+  whatsapp_auto_opt_in: !!row?.settings?.whatsapp_auto_opt_in,
   automation_daily_cap_enabled: !!row?.settings?.automation_daily_cap_enabled,
   automation_daily_cap: row?.settings?.automation_daily_cap || 1,
   ...localeFromSettings(row?.settings),
@@ -102,6 +103,11 @@ const updateSettings = async (req, res) => {
     if (req.body.dedupe_mode !== undefined) {
       if (!['phone','phone_or_email','off'].includes(req.body.dedupe_mode)) return res.status(422).json({ error: 'Invalid dedupe mode.' });
       settingsPatch.dedupe_mode = req.body.dedupe_mode;
+    }
+    if (req.body.whatsapp_auto_opt_in !== undefined) {
+      if (typeof req.body.whatsapp_auto_opt_in !== 'boolean') return res.status(422).json({ error: 'whatsapp_auto_opt_in must be true or false.' });
+      if (req.user?.role === 'staff') return res.status(403).json({ error: 'Only an admin can change this setting.' });
+      settingsPatch.whatsapp_auto_opt_in = req.body.whatsapp_auto_opt_in;
     }
     if (bank_details !== undefined) settingsPatch.bank_details = bank_details;
     if (daily_report_enabled !== undefined) settingsPatch.daily_report_enabled = daily_report_enabled;
