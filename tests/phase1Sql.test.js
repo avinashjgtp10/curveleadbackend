@@ -27,7 +27,7 @@ test('automation SQL paginates over 500 leads, filters outcomes and isolates ten
     };
     const first = await run({ page: 1, limit: 25 });
     assert.equal(first.leads.length, 25); assert.equal(first.total, 550);
-    assert.deepEqual(first.summary, { total: 550, inProgress: 1, converted: 1, lost: 1 });
+    assert.deepEqual(first.summary, { total: 550, inProgress: 1, blocked: 0, failed: 0, needsReview: 0, awaitingReply: 0, converted: 1, lost: 1 });
     assert.equal((await run({ page: 22, limit: 25 })).leads.length, 25);
     assert.equal((await run({ page: 23, limit: 25 })).leads.length, 0);
     const active = await run({ status: 'In Progress' });
