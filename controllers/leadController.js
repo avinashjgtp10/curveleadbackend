@@ -2,7 +2,7 @@ const { buildLeadSearch } = require('../utils/leadSearch');
 const { duplicateGroups } = require('../services/duplicates');
 const { getWorkspaceLocale, formatWhen } = require('../utils/workspaceLocale');
 const { applyMerge } = require('../services/leadMerge');
-const { ingestLead } = require('../services/leadIngestion');
+const { ingestLead, findLeadByPhone } = require('../services/leadIngestion');
 const { normalizePhone, normalizeSource, normalizeLead, statusChangeTitle } = require('../utils/dataQuality');
 const { query, transaction } = require('../config/db');
 const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
@@ -238,8 +238,18 @@ const createLead = async (req, res) => {
     const ingestion = await ingestLead(req.tenantId, {
       name, phone, email, location, business_name, address, source, source_detail, product, campaign_id: campaign_id || null,
       stage: stage || 'new', assigned_to, notes, deal_value: deal_value || 0, expected_close_date, tags, lead_date: lead_date || new Date(),
-    }, { actorId: req.user.id });
-    if (ingestion.duplicate) return res.status(200).json({ message: 'Duplicate submission attached to existing lead.', ...(req.user.role !== 'staff' || ingestion.lead.assigned_to === req.user.id ? { lead: ingestion.lead } : {}), duplicate: true });
+    }, { actorId: req.user.id, rejectDuplicate: true, phoneOnly: true });
+    if (ingestion.duplicate) {
+      // Adding the same mobile number again is refused (409). The lead is only identified to people who may
+      // see it (staff only see their own leads); the check itself is already limited to this workspace.
+      const existing = ingestion.lead;
+      const canView = req.user.role !== 'staff' || existing.assigned_to === req.user.id;
+      return res.status(409).json({
+        error: DUPLICATE_MESSAGE,
+        code: 'DUPLICATE_LEAD',
+        ...(canView ? { existing_id: existing.id, existing_lead: { id: existing.id, lead_number: existing.lead_number, name: existing.name, phone: existing.phone } } : {}),
+      });
+    }
     const result = { rows: [ingestion.lead] };
 
     // Log activity
@@ -267,6 +277,29 @@ const createLead = async (req, res) => {
     res.status(201).json({ message: 'Lead created.', lead: result.rows[0] });
   } catch (error) {
     console.error('Create lead error:', error);
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
+  }
+};
+
+const DUPLICATE_MESSAGE = 'This mobile number already exists.';
+
+// GET /api/leads/check-duplicate?phone=...
+// Lets the Add Lead form warn the moment a number is typed, using the same phone-only rule as createLead
+// (workspace-scoped, merged leads ignored, off when the workspace turned duplicate checking off). Read-only.
+const checkDuplicatePhone = async (req, res) => {
+  try {
+    const settings = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings;
+    if ((settings?.dedupe_mode || 'phone') === 'off') return res.json({ duplicate: false });
+    const { country } = await getWorkspaceLocale(req.tenantId);
+    const phone = normalizePhone(req.query.phone, country);
+    const existing = await findLeadByPhone({ query }, req.tenantId, phone, country);
+    if (!existing) return res.json({ duplicate: false });
+    const canView = req.user.role !== 'staff' || existing.assigned_to === req.user.id;
+    res.json({
+      duplicate: true, code: 'DUPLICATE_LEAD', error: DUPLICATE_MESSAGE,
+      ...(canView ? { existing_id: existing.id, existing_lead: { id: existing.id, lead_number: existing.lead_number, name: existing.name, phone: existing.phone } } : {}),
+    });
+  } catch (error) {
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
 };
@@ -1242,4 +1275,4 @@ const exportLeads = async (req, res) => {
   } catch(error) {console.error('Export leads:',error.message);res.status(500).json({error:'Export failed.'});}
 };
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, getDuplicateLeads, mergeDuplicateLeads, importLeads, getImportTemplate, getLeadStats, exportLeads, logCallClick, markContacted };
+module.exports = { getLeads, getLead, createLead, checkDuplicatePhone, updateLead, deleteLead, addNote, addFollowup, getStages, getTodayFollowups, bulkUpdate, bulkDelete, getDuplicateLeads, mergeDuplicateLeads, importLeads, getImportTemplate, getLeadStats, exportLeads, logCallClick, markContacted };
