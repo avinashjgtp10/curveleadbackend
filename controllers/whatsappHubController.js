@@ -311,7 +311,7 @@ const getClickToWhatsApp = async (req, res) => {
 };
 
 // ── Auto messages (welcome + away) ──────────────────────────────────────────
-const AUTO_KEYS = ['whatsapp_auto_responder_enabled', 'whatsapp_auto_responder_message',
+const AUTO_KEYS = ['whatsapp_auto_responder_enabled', 'whatsapp_auto_responder_message', 'whatsapp_auto_responder_template',
   'whatsapp_away_enabled', 'whatsapp_away_message', 'whatsapp_business_hours'];
 
 const getAutoMessages = async (req, res) => {
@@ -320,6 +320,7 @@ const getAutoMessages = async (req, res) => {
     res.json({
       welcome_enabled: !!s.whatsapp_auto_responder_enabled,
       welcome_message: s.whatsapp_auto_responder_message || '',
+      welcome_template_name: s.whatsapp_auto_responder_template || '',
       away_enabled: !!s.whatsapp_away_enabled,
       away_message: s.whatsapp_away_message || '',
       business_hours: { ...(s.whatsapp_business_hours || { start: '10:00', end: '19:00', days: [1, 2, 3, 4, 5, 6] }), timezone: localeFromSettings(s).timezone },
@@ -329,10 +330,11 @@ const getAutoMessages = async (req, res) => {
 
 const updateAutoMessages = async (req, res) => {
   try {
-    const { welcome_enabled, welcome_message, away_enabled, away_message, business_hours } = req.body;
+    const { welcome_enabled, welcome_message, welcome_template_name, away_enabled, away_message, business_hours } = req.body;
     const patch = {};
     if (welcome_enabled !== undefined) patch.whatsapp_auto_responder_enabled = !!welcome_enabled;
     if (welcome_message !== undefined) patch.whatsapp_auto_responder_message = String(welcome_message).slice(0, 1000);
+    if (welcome_template_name !== undefined) patch.whatsapp_auto_responder_template = String(welcome_template_name || '').trim().slice(0, 200);
     if (away_enabled !== undefined) patch.whatsapp_away_enabled = !!away_enabled;
     if (away_message !== undefined) patch.whatsapp_away_message = String(away_message).slice(0, 1000);
     if (business_hours) {
