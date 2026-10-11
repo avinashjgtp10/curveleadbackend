@@ -1,3 +1,4 @@
+const { stepAttachment, sendKind, mediaError } = require('./sequenceMedia');
 const MAX_ATTEMPTS = 4;
 const normalizeAnswer = value => String(value || '').normalize('NFKC').trim().toLocaleLowerCase().replace(/[.!?]+$/g, '').replace(/\s+/g, ' ');
 function matchRoute(routes, text) {
@@ -54,7 +55,7 @@ function validateSequence(body) {
     if (!Number.isInteger(s.delay_minutes) || s.delay_minutes < 0 || s.delay_minutes > 525600) return `Step ${i+1}: invalid delay.`;
     if (!['whatsapp','email'].includes(s.channel || 'whatsapp')) return 'Invalid step channel.';
     if (s.always_template && (s.channel !== 'whatsapp' || !s.approved_template_name?.trim() || !s.template_language?.trim())) return 'Always-template steps need a WhatsApp template and language.';
-    if (!s.always_template && !s.ai_generated && !s.message?.trim()) return `Step ${i+1} needs a message.`;
+    if (!s.always_template && !s.ai_generated && !s.message?.trim() && !s.media?.length) return `Step ${i+1} needs a message or a file.`;
     if (s.template_parameters && (!Array.isArray(s.template_parameters) || s.template_parameters.some(m => !m || !['name','phone','email','location','source','product','literal'].includes(m.field) || (m.field === 'literal' && !m.value?.trim())))) return 'Invalid template parameter mapping.';
     if (s.reply_routes?.length) {
       questions++;
@@ -71,4 +72,4 @@ function validateSequence(body) {
   }
   return null;
 }
-module.exports = { MAX_ATTEMPTS, normalizeAnswer, matchRoute, stopReason, sendOutcome, templatePlan, validateSequence };
+module.exports = { MAX_ATTEMPTS, normalizeAnswer, matchRoute, stopReason, sendOutcome, templatePlan, validateSequence, stepAttachment, sendKind, mediaError };

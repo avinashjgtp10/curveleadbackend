@@ -29,6 +29,7 @@ const validateTarget = (body) => {
 const createAssignmentRule = async (req, res) => {
   try {
     const { name, sources, campaign_ids, location_contains, assign_to_user_id, assign_to_team_id, sequence_id, staff_ids } = req.body;
+    if (req.body.is_active !== undefined && typeof req.body.is_active !== 'boolean') return res.status(422).json({ error: 'is_active must be true or false.' });
     if (!name?.trim()) return res.status(400).json({ error: 'Name is required.' });
     const targetError = validateTarget(req.body);
     if (targetError) return res.status(400).json({ error: targetError });
@@ -43,14 +44,14 @@ const createAssignmentRule = async (req, res) => {
 
     const result = await query(
       `INSERT INTO assignment_rules
-         (tenant_id, name, priority, sources, campaign_ids, location_contains, assign_to_user_id, assign_to_team_id, sequence_id, staff_ids)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+         (tenant_id, name, priority, sources, campaign_ids, location_contains, assign_to_user_id, assign_to_team_id, sequence_id, staff_ids, is_active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [
         req.tenantId, name.trim(), maxPos.rows[0].next,
         sources?.length ? sources : null,
         campaign_ids?.length ? campaign_ids : null,
         location_contains?.trim() || null,
-        assign_to_user_id || null, assign_to_team_id || null, sequence_id || null, staff_ids || [],
+        assign_to_user_id || null, assign_to_team_id || null, sequence_id || null, staff_ids || [], req.body.is_active ?? true,
       ]
     );
     res.status(201).json({ rule: result.rows[0] });

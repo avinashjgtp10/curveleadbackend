@@ -270,8 +270,9 @@ const MEDIA_TYPE_MAP = { image: 'image', pdf: 'document', doc: 'document', audio
  * @param {string} mediaUrl - a publicly reachable URL (S3) Meta can fetch the file from
  * @param {string} [caption]
  * @param {object} [credentials]
+ * @param {string} [filename] - document file name shown in WhatsApp (defaults to the caption, as before)
  */
-const sendMediaMessage = async (to, fileType, mediaUrl, caption = '', credentials = null) => {
+const sendMediaMessage = async (to, fileType, mediaUrl, caption = '', credentials = null, filename = null) => {
   const { phoneNumberId, accessToken } = resolveCredentials(credentials);
   const waType = MEDIA_TYPE_MAP[fileType] || 'document';
 
@@ -282,7 +283,7 @@ const sendMediaMessage = async (to, fileType, mediaUrl, caption = '', credential
 
   const mediaPayload = { link: mediaUrl };
   if (caption && waType !== 'audio') mediaPayload.caption = caption;
-  if (waType === 'document') mediaPayload.filename = caption || undefined;
+  if (waType === 'document') mediaPayload.filename = filename || caption || undefined;
 
   try {
     const response = await axios.post(

@@ -1,5 +1,8 @@
 const { query, transaction } = require('../config/db');
-const { validateSequence } = require('../utils/automationPolicy');
+const { validateSequence, mediaError } = require('../utils/automationPolicy');
+const { classifyUpload, mediaPrefix } = require('../utils/sequenceMedia');
+const { uploadToS3, getPresignedUrl } = require('../config/s3');
+const { isSchemaError, schemaErrorMessage } = require('../utils/schemaErrors');
 const validateTargets = async (client, tenantId, steps, ownId) => {
  for(const step of steps || [])for(const route of step.reply_routes || []){
   if(route.sequence_id === ownId || !(await client.query('SELECT id FROM automation_sequences WHERE id=$1 AND tenant_id=$2',[route.sequence_id,tenantId])).rows.length){const e=new Error('Reply route target must be another sequence in this workspace.');e.status=422;throw e;}
@@ -19,6 +22,7 @@ const getSequences = async (req, res) => {
                   'approved_template_name', st.approved_template_name,
                   'ai_generated', st.ai_generated, 'ai_instructions', st.ai_instructions,
                   'always_template',st.always_template,'template_language',st.template_language,
+                  'media',COALESCE(to_jsonb(st)->'media','[]'::jsonb),
                   'template_parameters',st.template_parameters,'reply_routes',st.reply_routes
                 ) ORDER BY st.step_order
               ) FILTER (WHERE st.id IS NOT NULL), '[]') AS steps
@@ -33,7 +37,7 @@ const getSequences = async (req, res) => {
   } catch (e) { console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
 };
 
-const stepsError = (body) => validateSequence(body);
+const stepsError = (body, tenantId) => validateSequence(body) || mediaError(body.steps, tenantId);
 
 const saveSteps = async (client, tenantId, sequenceId, steps) => {
   await client.query('DELETE FROM automation_sequence_steps WHERE sequence_id = $1', [sequenceId]);
@@ -49,6 +53,15 @@ const saveSteps = async (client, tenantId, sequenceId, steps) => {
         !!s.always_template,s.template_language || null,JSON.stringify(s.template_parameters || []),JSON.stringify(s.reply_routes || []),
       ]
     );
+    // Written on its own so sequences without files keep saving even before the media
+    // migration has been run; a step that does carry a file reports the schema problem.
+    if (s.media?.length) {
+      const [m] = s.media;
+      await client.query(
+        'UPDATE automation_sequence_steps SET media = $1::jsonb WHERE sequence_id = $2 AND step_order = $3',
+        [JSON.stringify([{ url: m.url, name: String(m.name).slice(0, 200), type: m.type, size: Number(m.size) || null, mime: m.mime || null }]), sequenceId, i]
+      );
+    }
   }
 };
 
@@ -56,7 +69,7 @@ const createSequence = async (req, res) => {
   try {
     const { name, description, steps } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'Name is required.' });
-    const stepErr = stepsError(req.body);
+    const stepErr = stepsError(req.body, req.tenantId);
     if (stepErr) return res.status(422).json({ error: stepErr });
 
     const sequenceId = await transaction(async (client) => {
@@ -71,13 +84,13 @@ const createSequence = async (req, res) => {
     });
 
     res.status(201).json({ id: sequenceId });
-  } catch (e) { console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
+  } catch (e) { console.error(e); if (isSchemaError(e)) return res.status(503).json({ error: schemaErrorMessage(e), code: 'MIGRATION_PENDING' }); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
 };
 
 const updateSequence = async (req, res) => {
   try {
     const { name, description, is_active, steps } = req.body;
-    const stepErr = steps !== undefined && stepsError(req.body);
+    const stepErr = steps !== undefined && stepsError(req.body, req.tenantId);
     if (req.body.stop_conditions && Object.entries(req.body.stop_conditions).some(([k,v])=>!['on_reply','demo_booked','customer_converted'].includes(k)||typeof v!=='boolean'))return res.status(422).json({error:'Invalid stop conditions.'});
     if (stepErr) return res.status(422).json({ error: stepErr });
 
@@ -97,7 +110,7 @@ const updateSequence = async (req, res) => {
     });
 
     res.json({ message: 'Saved.' });
-  } catch (e) { console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
+  } catch (e) { console.error(e); if (isSchemaError(e)) return res.status(503).json({ error: schemaErrorMessage(e), code: 'MIGRATION_PENDING' }); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
 };
 
 const deleteSequence = async (req, res) => {
@@ -209,7 +222,23 @@ const deleteRule = async (req, res) => {
   } catch (e) { console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
 };
 
+// POST /api/automations/media (multipart "file") — stores a photo, document or video for a
+// step to send. Returns the descriptor the step keeps: { url, name, type, size, mime }.
+const uploadStepMedia = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Choose a file to upload.' });
+    const name = String(req.file.originalname || 'file').normalize('NFC');
+    const verdict = classifyUpload(name, req.file.size);
+    if (verdict.error) return res.status(422).json({ error: verdict.error });
+    const ext = (/\.[a-z0-9]+$/i.exec(name) || [''])[0].toLowerCase();
+    const key = `${mediaPrefix(req.tenantId)}${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+    const url = await uploadToS3(req.file.buffer, key, verdict.mime);
+    res.status(201).json({ url, name: name.slice(0, 200), type: verdict.type, size: req.file.size, mime: verdict.mime, preview_url: await getPresignedUrl(url, 3600) });
+  } catch (e) { console.error('Step media upload:', e.message); res.status(500).json({ error: 'Upload failed. Please try again.' }); }
+};
+
 module.exports = {
+  uploadStepMedia,
   getSequences, createSequence, updateSequence, deleteSequence,
   getRules, createRule, updateRule, deleteRule,
 };

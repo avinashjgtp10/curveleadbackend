@@ -89,7 +89,8 @@ const getAutomationLeads = async (req, res) => {
         WHEN e.status = 'cancelled' AND e.cancelled_reason LIKE 'blocked%' THEN 'Blocked'
         WHEN e.status = 'cancelled' THEN 'Cancelled' ELSE 'Not Enrolled' END AS status,
         CASE WHEN e.enrollment IS NULL THEN 'Not Enrolled' ELSE
-          CASE WHEN e.status IN ('blocked','failed','uncertain','human_review') THEN e.status || ' — '
+          CASE WHEN e.status = 'blocked' THEN 'Blocked — ' WHEN e.status = 'failed' THEN 'Failed — '
+               WHEN e.status = 'uncertain' THEN 'Uncertain — ' WHEN e.status = 'human_review' THEN 'Needs Review — '
                WHEN e.status = 'cancelled' AND e.cancelled_reason = 'blocked_no_opt_in' THEN 'Blocked (no opt-in) — '
                WHEN e.status = 'cancelled' AND e.cancelled_reason LIKE 'blocked%' THEN 'Blocked — '
                WHEN e.status = 'cancelled' THEN 'Cancelled — ' ELSE '' END ||
@@ -110,7 +111,7 @@ const getAutomationLeads = async (req, res) => {
     const result = await query(`${base}, filtered AS (SELECT * FROM scoped WHERE ${filter})
       SELECT (SELECT COALESCE(json_agg(p), '[]') FROM (SELECT * FROM filtered ORDER BY name, id LIMIT $${params.length + 1} OFFSET $${params.length + 2}) p) AS leads,
         (SELECT COUNT(*)::int FROM filtered) AS total,
-        (SELECT json_build_object('total', COUNT(*), 'inProgress', COUNT(*) FILTER (WHERE status = 'In Progress'), 'converted', COUNT(*) FILTER (WHERE status = 'Converted'), 'lost', COUNT(*) FILTER (WHERE status = 'Lost')) FROM scoped) AS summary,
+        (SELECT json_build_object('total', COUNT(*), 'inProgress', COUNT(*) FILTER (WHERE status = 'In Progress'), 'blocked', COUNT(*) FILTER (WHERE status = 'Blocked'), 'failed', COUNT(*) FILTER (WHERE status = 'Failed'), 'needsReview', COUNT(*) FILTER (WHERE status IN ('Needs Review','Uncertain')), 'awaitingReply', COUNT(*) FILTER (WHERE status = 'Awaiting Reply'), 'converted', COUNT(*) FILTER (WHERE status = 'Converted'), 'lost', COUNT(*) FILTER (WHERE status = 'Lost')) FROM scoped) AS summary,
         (SELECT COALESCE(json_agg(step ORDER BY step), '[]') FROM (SELECT DISTINCT step FROM scoped) x) AS steps`, [...params, limit, (page - 1) * limit]);
     res.json({ ...result.rows[0], pagination: { page, limit, total: result.rows[0].total } });
   } catch (error) { console.error('getAutomationLeads:', error); res.status(500).json({ error: 'Unable to load automation leads.' }); }

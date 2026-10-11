@@ -1,12 +1,12 @@
 const { query, transaction } = require('../config/db');
 const { randomUUID } = require('crypto');
-const { sendTextMessage, sendTemplate, listMessageTemplates } = require('../services/whatsappService');
+const { sendTextMessage, sendTemplate, sendMediaMessage, listMessageTemplates } = require('../services/whatsappService');
 const { sendEmail } = require('../utils/email');
 const { substituteVars } = require('../utils/templateVars');
 const { generateFollowUpMessage } = require('../services/groqService');
 const { localeFromSettings, zonedParts, wallTimeToUtc } = require('../utils/workspaceLocale');
 const { decideConsent, templateCategory } = require('../services/whatsappConsent');
-const { stopReason, templatePlan, sendOutcome } = require('../utils/automationPolicy');
+const { stopReason, templatePlan, sendOutcome, stepAttachment, sendKind } = require('../utils/automationPolicy');
 
 // Business hours are the workspace's local time (settings.timezone).
 const localHHMM = (settings, now) => {
@@ -76,6 +76,9 @@ async function hold(client,e,status,reason,attemptStatus=status) {
 function createRunner(deps = {}) {
  const db = deps.db || { query, transaction };
  const textSend = deps.sendTextMessage || sendTextMessage;
+ const mediaSend = deps.sendMediaMessage || sendMediaMessage;
+ // Meta fetches the file from this link, so sign it (works whether or not the bucket is public).
+ const signUrl = deps.getPresignedUrl || ((u) => require('../config/s3').getPresignedUrl(u, 3600));
  const templateSend = deps.sendTemplate || sendTemplate;
  const emailSend = deps.sendEmail || sendEmail;
  const templatesList = deps.listMessageTemplates || listMessageTemplates;
@@ -144,6 +147,10 @@ function createRunner(deps = {}) {
      if(liveSettings.automation_daily_cap_enabled){const count=(await client.query(`SELECT count(*) AS n FROM whatsapp_messages WHERE tenant_id=$1 AND lead_id=$2 AND is_automated=true AND sent_at>=CURRENT_DATE`,[e.tenant_id,e.lead_id])).rows[0];if(Number(count.n)>=(liveSettings.automation_daily_cap || 1)){await client.query(`UPDATE automation_enrollments SET next_send_at=now()+interval '1 day',claim_token=NULL,claim_until=NULL WHERE id=$1`,[e.id]);await client.query(`UPDATE automation_send_attempts SET status='ready' WHERE id=$1`,[attempt.id]);return;}}
      const sessionOpen=currentLead.last_inbound && Date.now()-new Date(currentLead.last_inbound).getTime()<86400000;
      let message=substituteVars(step.message || '',currentLead), plan=null, send;
+     // One optional file per step: sent with the step text as its caption, but only inside the
+     // 24-hour window. Outside it WhatsApp allows templates only, so the template goes instead.
+     const attachment=step.channel==='whatsapp' && !step.always_template ? stepAttachment(step) : null;
+     let sentAttachment=null, skippedAttachment=null;
      const credentials=liveSettings.whatsapp_phone_number_id&&liveSettings.whatsapp_access_token?{phone_number_id:liveSettings.whatsapp_phone_number_id,access_token:liveSettings.whatsapp_access_token}:null;
      if(step.channel==='whatsapp'){
       if(!currentLead.phone){await hold(client,e,'blocked','Lead has no WhatsApp phone number.');return;}
@@ -162,10 +169,16 @@ function createRunner(deps = {}) {
        const consent=decideConsent({lead:currentLead,category:templateCategory(plan.template),hasInbound:!!currentLead.last_inbound,hasBooking:currentLead.has_booking});
        if(!consent.allowed){await hold(client,e,'blocked',consent.reason);await client.query('UPDATE automation_enrollments SET blocked_reason=$2 WHERE id=$1',[e.id,templateCategory(plan.template)==='MARKETING'?'blocked_no_opt_in':'blocked_no_consent']);return;}
        message=plan.message;send=()=>templateSend(currentLead.phone,step.approved_template_name,plan.language,plan.parameters,credentials,media);
+       skippedAttachment=attachment;
       }else{
        if(step.ai_generated){if(!aiMessage){await hold(client,e,'blocked','AI generation failed. Retry this step or provide a fixed message.');return;}message=aiMessage;}
-       if(!message.trim()){await hold(client,e,'blocked','Free-text message is empty.');return;}
-       send=()=>textSend(currentLead.phone,message,credentials);
+       if(attachment){
+        sentAttachment=attachment;
+        send=async()=>mediaSend(currentLead.phone,sendKind(attachment.type),await signUrl(attachment.url),message.trim(),credentials,attachment.name);
+       }else{
+        if(!message.trim()){await hold(client,e,'blocked','Free-text message is empty.');return;}
+        send=()=>textSend(currentLead.phone,message,credentials);
+       }
       }
      }else{
       if(!currentLead.email){await hold(client,e,'blocked','Lead has no email address.');return;}
@@ -176,7 +189,8 @@ function createRunner(deps = {}) {
      let result;try{result=await send();}catch(error){result={success:false,uncertain:true,error:'Provider call threw; delivery may have happened. '+error.message};}
      const outcome=sendOutcome(result,n);
      if(outcome.status==='sent'){
-      if(step.channel==='whatsapp')await client.query(`INSERT INTO whatsapp_messages(tenant_id,lead_id,direction,message,message_type,template_name,wa_message_id,status,is_automated,is_ai_generated) VALUES($1,$2,'outbound',$3,$4,$5,$6,'sent',true,$7)`,[e.tenant_id,e.lead_id,message,plan?'template':'text',plan?step.approved_template_name:null,result.wa_message_id,!!step.ai_generated&&!plan]);
+      if(step.channel==='whatsapp')await client.query(`INSERT INTO whatsapp_messages(tenant_id,lead_id,direction,message,message_type,media_url,template_name,wa_message_id,status,is_automated,is_ai_generated) VALUES($1,$2,'outbound',$3,$4,$5,$6,$7,'sent',true,$8)`,[e.tenant_id,e.lead_id,sentAttachment?(message.trim()||sentAttachment.name):message,plan?'template':sentAttachment?sentAttachment.type:'text',sentAttachment?sentAttachment.url:null,plan?step.approved_template_name:null,result.wa_message_id,!!step.ai_generated&&!plan]);
+      if(skippedAttachment)await activity(client,e,'Attachment not sent',`"${skippedAttachment.name}" can only be sent within 24 hours of the customer's last message, so the approved template was sent instead. To reach new leads with a file, use a template with an image, video or document header.`);
       await finishStep(client,e,step,steps,result.wa_message_id);
      }else if(outcome.status==='retry'){
       await client.query(`UPDATE automation_send_attempts SET status='retry',error=$2,updated_at=now() WHERE id=$1`,[attempt.id,outcome.reason]);
