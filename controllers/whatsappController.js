@@ -4,7 +4,7 @@ const { getWorkspaceLocale, localeFromSettings, wallTimeToUtc, formatWhen } = re
 const axios = require('axios');
 const { query } = require('../config/db');
 const { uploadToS3, getPresignedUrl } = require('../config/s3');
-const { sendTextMessage, sendTemplate, sendMediaMessage, listMessageTemplates } = require('../services/whatsappService');
+const { sendTextMessage, sendTemplate, sendMediaMessage, listMessageTemplates, describeStatusError } = require('../services/whatsappService');
 const { qualifyLead } = require('../services/groqService');
 const { recordFirstResponse } = require('../utils/leadResponse');
 const { changeLeadStage } = require('../utils/leadStage');
@@ -502,7 +502,7 @@ const handleWebhook = async (req, res) => {
           await query(`UPDATE whatsapp_messages SET status='read', read_at=COALESCE(read_at,$1), delivered_at=COALESCE(delivered_at,$1) WHERE wa_message_id=$2`, [at, s.id]).catch(() => {});
         } else if (s.status === 'failed') {
           const err = s.errors?.[0];
-          const detail = err ? `${err.code ? `[${err.code}] ` : ''}${err.title || err.message || 'Unknown error'}${err.error_data?.details ? ` — ${err.error_data.details}` : ''}` : null;
+          const detail = describeStatusError(err);
           await query(`UPDATE whatsapp_messages SET status='failed', error_detail=$2 WHERE wa_message_id=$1 AND status NOT IN ('read','delivered')`, [s.id, detail]).catch(() => {});
         }
       }

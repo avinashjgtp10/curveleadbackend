@@ -1,16 +1,20 @@
 const { query } = require('../config/db');
-const vapiService = require('../services/vapiService');
+const { getProvider, providerFor, listProviders, DEFAULT_PROVIDER } = require('../services/voice');
+const { getPresignedUrl } = require('../config/s3');
 
 // ── GET /api/ai-calling/settings ────────────────────────────────────────────
 const getSettings = async (req, res) => {
   try {
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const settings = result.rows[0]?.settings || {};
+    const active = providerFor(settings) || getProvider(DEFAULT_PROVIDER);
     res.json({
       voice_ai_api_key: settings.voice_ai_api_key ? '••••••••' : '',
       voice_ai_phone_number_id: settings.voice_ai_phone_number_id || '',
       voice_ai_configured: !!(settings.voice_ai_api_key && settings.voice_ai_phone_number_id),
-      voice_ai_webhook_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/webhook/voice-ai`,
+      voice_ai_provider: active.id,
+      providers: listProviders(),
+      voice_ai_webhook_url: `${process.env.FRONTEND_URL || 'https://curvelead.com'}/api/webhook/voice-ai${active.id === 'vapi' ? '' : `/${active.id}`}`,
     });
   } catch (e) {
     console.error('getSettings error:', e.message);
@@ -21,13 +25,15 @@ const getSettings = async (req, res) => {
 // ── PUT /api/ai-calling/settings ────────────────────────────────────────────
 const updateSettings = async (req, res) => {
   try {
-    const { voice_ai_api_key, voice_ai_phone_number_id } = req.body;
+    const { voice_ai_api_key, voice_ai_phone_number_id, voice_ai_provider } = req.body;
+    if (voice_ai_provider !== undefined && !getProvider(voice_ai_provider)) return res.status(422).json({ error: 'Choose one of the available calling providers.' });
     const result = await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId]);
     const current = result.rows[0]?.settings || {};
 
     const updated = { ...current };
     if (voice_ai_api_key && !voice_ai_api_key.startsWith('•')) updated.voice_ai_api_key = voice_ai_api_key;
     if (voice_ai_phone_number_id !== undefined) updated.voice_ai_phone_number_id = voice_ai_phone_number_id;
+    if (voice_ai_provider !== undefined) updated.voice_ai_provider = voice_ai_provider;
     if (!updated.voice_ai_webhook_secret) {
       updated.voice_ai_webhook_secret = require('crypto').randomBytes(24).toString('hex');
     }
@@ -38,9 +44,15 @@ const updateSettings = async (req, res) => {
 };
 
 // ── GET /api/ai-calling/voices ──────────────────────────────────────────────
-const getVoices = (req, res) => {
-  res.json({ voices: vapiService.listVoices() });
+const getVoices = async (req, res) => {
+  try {
+    const settings = (await query('SELECT settings FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.settings || {};
+    res.json({ voices: (providerFor(settings) || getProvider(DEFAULT_PROVIDER)).listVoices() });
+  } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
+
+// ── GET /api/ai-calling/providers ───────────────────────────────────────────
+const getProviders = (req, res) => res.json({ providers: listProviders(), default: DEFAULT_PROVIDER });
 
 // ── Agents CRUD ──────────────────────────────────────────────────────────────
 const listAgents = async (req, res) => {
@@ -144,20 +156,20 @@ ${(playbook.best_practices || []).map(p => `- ${p}`).join('\n')}
 Common objections and how to handle them:
 ${(playbook.common_objections || []).map(o => `- "${o.objection}" → ${o.recommended_response}`).join('\n')}` : agent.system_prompt;
 
-    const call = await vapiService.createCall({
-      apiKey: settings.voice_ai_api_key,
-      phoneNumberId: settings.voice_ai_phone_number_id,
+    const provider = providerFor(settings);
+    if (!provider) return res.status(400).json({ error: 'The selected calling provider is no longer available. Choose one under Integrations.' });
+    const call = await provider.createCall({
+      credentials: { apiKey: settings.voice_ai_api_key, phoneNumberId: settings.voice_ai_phone_number_id },
       customerNumber: lead.phone,
-      voiceProvider: agent.voice_provider,
-      voiceId: agent.voice_id,
+      voice: { provider: agent.voice_provider, voiceId: agent.voice_id },
       systemPrompt,
       firstMessage: agent.first_message,
     });
 
     const result = await query(
       `INSERT INTO ai_voice_calls (tenant_id, lead_id, agent_id, initiated_by, provider, provider_call_id, phone_number, status)
-       VALUES ($1,$2,$3,$4,'vapi',$5,$6,'queued') RETURNING *`,
-      [req.tenantId, leadId, agent.id, req.user.id, call.id, lead.phone]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'queued') RETURNING *`,
+      [req.tenantId, leadId, agent.id, req.user.id, provider.id, call.id, lead.phone]
     );
 
     res.status(201).json({ call: result.rows[0] });
@@ -165,6 +177,16 @@ ${(playbook.common_objections || []).map(o => `- "${o.objection}" → ${o.recomm
     console.error('callLead error:', e.response?.data || e.message);
     res.status(500).json({ error: e.response?.data?.message || 'Failed to start call.' });
   }
+};
+
+// Our archived copy (signed link, 1 hour) when we have one, otherwise the provider's own link.
+// The raw storage address is never sent to the browser.
+const withPlayback = async ({ recording_s3_url, ...call }) => {
+  let play = call.recording_url || null;
+  if (recording_s3_url) {
+    try { play = await getPresignedUrl(recording_s3_url, 3600); } catch { /* fall back to the provider link */ }
+  }
+  return { ...call, recording_play_url: play, recording_archived: !!recording_s3_url };
 };
 
 // ── GET /api/ai-calling/leads/:leadId/calls ─────────────────────────────────
@@ -178,7 +200,7 @@ const getLeadCalls = async (req, res) => {
        ORDER BY c.created_at DESC`,
       [req.params.leadId, req.tenantId]
     );
-    res.json({ calls: result.rows });
+    res.json({ calls: await Promise.all(result.rows.map(withPlayback)) });
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
 
@@ -187,12 +209,12 @@ const getCall = async (req, res) => {
   try {
     const result = await query('SELECT * FROM ai_voice_calls WHERE id=$1 AND tenant_id=$2', [req.params.id, req.tenantId]);
     if (!result.rows.length) return res.status(404).json({ error: 'Call not found.' });
-    res.json({ call: result.rows[0] });
+    res.json({ call: await withPlayback(result.rows[0]) });
   } catch (e) { res.status(500).json({ error: 'Failed.' }); }
 };
 
 module.exports = {
-  getSettings, updateSettings, getVoices,
+  getSettings, updateSettings, getVoices, getProviders,
   listAgents, createAgent, updateAgent, deleteAgent,
   callLead, getLeadCalls, getCall,
 };

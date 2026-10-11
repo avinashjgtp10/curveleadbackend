@@ -3,7 +3,7 @@ const router = express.Router();
 const { authenticate, adminOnly } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 const {
-  getSettings, updateSettings, getVoices,
+  getSettings, updateSettings, getVoices, getProviders,
   listAgents, createAgent, updateAgent, deleteAgent,
   callLead, getLeadCalls, getCall,
 } = require('../controllers/aiCallingController');
@@ -13,6 +13,7 @@ router.use(authenticate, tenantContext);
 router.get('/settings', adminOnly, getSettings);
 router.put('/settings', adminOnly, updateSettings);
 
+router.get('/providers', getProviders);
 router.get('/voices', getVoices);
 
 router.get('/agents', listAgents);
