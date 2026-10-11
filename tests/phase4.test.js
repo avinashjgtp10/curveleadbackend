@@ -364,6 +364,7 @@ test("import preview normalizes phones and identifies database and within-file d
       },
     },
     "../utils/dataQuality": quality,
+    "../utils/importPhone": require("../utils/importPhone"),
     xlsx: {
       read: () => ({ Sheets: { s: {} }, SheetNames: ["s"] }),
       utils: {

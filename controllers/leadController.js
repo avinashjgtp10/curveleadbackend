@@ -13,6 +13,7 @@ const { tombstoneMetaLead } = require('../utils/deletedLeads');
 const { createNotification, notifyNewLeadToAdmins } = require('./notificationController');
 const { checkNewLeadTriggers, checkStageChangeTriggers, checkLeadStatusTriggers } = require('../utils/automationTriggers');
 const { recordOptIn } = require('../services/whatsappConsent');
+const { checkPhoneCell } = require('../utils/importPhone');
 const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
@@ -1178,11 +1179,14 @@ const importLeads = async (req, res) => {
       ? new Set((await query('SELECT phone FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL', [req.tenantId])).rows.map(r => r.phone))
       : null;
 
+    const phoneKey = Object.keys(keyMap).find(k => keyMap[k] === 'phone');
+    const nameKey = Object.keys(keyMap).find(k => keyMap[k] === 'name');
     const invalidPhones = rows.flatMap((row, index) => {
-      const phoneKey = Object.keys(keyMap).find(k => keyMap[k] === 'phone');
-      try { normalizePhone(String(row[phoneKey]??'').replace(/^'(?=\+?\d)/,''), country); return []; }
-      catch (error) { return [{ row: index + 2, error: error.message }]; }
+      const checked = checkPhoneCell(row[phoneKey], country);
+      return checked.error ? [{ row: index + 2, name: String(row[nameKey] ?? '').trim(), phone: String(row[phoneKey] ?? '').trim(), error: checked.hint }] : [];
     });
+    // Rows with a bad phone can be skipped on request; without that, the file is refused whole.
+    const skipInvalid = req.body.skip_invalid === 'true';
     if(req.body.dry_run==='true') {
       const mode=(await query('SELECT settings FROM tenants WHERE id=$1',[req.tenantId])).rows[0]?.settings?.dedupe_mode || 'phone';
       const existing=(await query('SELECT phone,email FROM leads WHERE tenant_id=$1 AND merged_into_id IS NULL',[req.tenantId])).rows;
@@ -1190,7 +1194,7 @@ const importLeads = async (req, res) => {
       for(const r of existing) {try {phones.add(normalizePhone(r.phone, country));}catch {} if(r.email)emails.add(r.email.trim().toLowerCase());}
       const preview=rows.map((row,index)=>{
         const lead=Object.fromEntries(Object.entries(keyMap).map(([k,f])=>[f,String(row[k]??'').trim()]));
-        let error=null;try {lead.phone=normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,''), country);}catch(e){error=e.message;}
+        let error=null;{const checked=checkPhoneCell(lead.phone, country);if(checked.error)error=checked.hint;else lead.phone=checked.phone;}
         if(!lead.name)error='Name is required.';
         const duplicate=!error&&mode!=='off'&&(phones.has(lead.phone)||(mode==='phone_or_email'&&lead.email&&emails.has(lead.email.toLowerCase())));
         if(!error) {phones.add(lead.phone);if(lead.email)emails.add(lead.email.toLowerCase());}
@@ -1198,7 +1202,12 @@ const importLeads = async (req, res) => {
       });
       return res.json({dry_run:true,headers:Object.keys(rows[0]),mapping:keyMap,total:rows.length,preview,invalid:preview.filter(r=>r.error).length,duplicates:preview.filter(r=>r.action==='merge').length});
     }
-    if (invalidPhones.length) return res.status(422).json({ error: 'Import contains invalid phone numbers. No rows were imported.', errors: invalidPhones });
+    if (invalidPhones.length && !skipInvalid) {
+      return res.status(422).json({
+        error: `${invalidPhones.length} row${invalidPhones.length === 1 ? ' has' : 's have'} an invalid phone number, so nothing was imported. Fix them in your file, or choose to skip them and import the rest.`,
+        code: 'INVALID_PHONES', can_skip: true, invalid_count: invalidPhones.length, errors: invalidPhones.slice(0, 100),
+      });
+    }
 
     let inserted = 0, skipped = 0, duplicates = 0, invalid = 0;
     const errors = [];
@@ -1225,8 +1234,9 @@ const importLeads = async (req, res) => {
         continue;
       }
 
-      try { lead.phone = normalizePhone(String(lead.phone??'').replace(/^'(?=\+?\d)/,''), country); }
-      catch (error) { errors.push({ row: rowNumber, error: error.message }); addSkip(rowNumber, lead.name, error.message); continue; }
+      { const checked = checkPhoneCell(lead.phone, country);
+        if (checked.error) { invalid++; errors.push({ row: rowNumber, name: lead.name, phone: String(lead.phone ?? ''), error: checked.hint }); addSkip(rowNumber, lead.name, checked.hint); continue; }
+        lead.phone = checked.phone; }
 
       // Validate/default stage — matched case-insensitively, stored with the
       // tenant's actual casing for that stage.
@@ -1263,8 +1273,9 @@ const importLeads = async (req, res) => {
       message: `Import complete: ${inserted} leads added, ${skipped} skipped.`,
       inserted,
       skipped,
-      errors: errors.slice(0, 20),
-      skip_reasons: skipReasons.slice(0, 20),
+      invalid,
+      errors: errors.slice(0, 50),
+      skip_reasons: skipReasons.slice(0, 50),
     });
   } catch (error) {
     console.error('Import leads error:', error);
