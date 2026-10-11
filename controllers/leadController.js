@@ -12,6 +12,8 @@ const { nextLeadNumber, reserveLeadNumbers } = require('../utils/leadNumber');
 const { tombstoneMetaLead } = require('../utils/deletedLeads');
 const { createNotification, notifyNewLeadToAdmins } = require('./notificationController');
 const { checkNewLeadTriggers, checkStageChangeTriggers, checkLeadStatusTriggers } = require('../utils/automationTriggers');
+const { recordOptIn } = require('../services/whatsappConsent');
+const { sendWelcomeMessage } = require('../utils/whatsappAutoResponder');
 const { applyAssignmentRules } = require('../utils/leadAssignment');
 const { notifyNewLead } = require('../utils/leadNotifyEmail');
 
@@ -262,7 +264,21 @@ const createLead = async (req, res) => {
     applyAssignmentRules({ tenantId: req.tenantId, lead: result.rows[0] })
       .then(() => notifyNewLead({ tenantId: req.tenantId, lead: result.rows[0] }))
       .catch(() => {});
-    checkNewLeadTriggers({ tenantId: req.tenantId, lead: result.rows[0] }).catch(() => {});
+    // Staff ticked "customer agreed to WhatsApp messages": record the opt-in first, so marketing
+    // templates and the welcome message are allowed. Then, like every other lead source, send
+    // the welcome message (manual leads used to be skipped here).
+    const newLead = result.rows[0];
+    (async () => {
+      if (req.body.whatsapp_opt_in === true) {
+        await recordOptIn({ tenantId: req.tenantId, leadId: newLead.id, source: 'manual_consent' });
+        await query(
+          `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
+           VALUES ($1, $2, 'opted_in', 'WhatsApp opt-in recorded', 'Added by staff when the lead was created: the customer agreed to receive WhatsApp messages.', $3)`,
+          [req.tenantId, newLead.id, req.user.id]).catch(() => {});
+      }
+      await sendWelcomeMessage({ tenantId: req.tenantId, lead: newLead });
+    })().catch((e) => console.error('Manual lead opt-in/welcome:', e.message));
+    checkNewLeadTriggers({ tenantId: req.tenantId, lead: newLead }).catch(() => {});
 
     res.status(201).json({ message: 'Lead created.', lead: result.rows[0] });
   } catch (error) {
