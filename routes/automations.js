@@ -7,8 +7,15 @@ const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 const { requirePermission } = require('../utils/permissions');
 
+const multer = require('multer');
+const { MAX_UPLOAD_BYTES } = require('../utils/sequenceMedia');
+const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } });
+
 router.use(authenticate, tenantContext);
 
+router.post('/media', requirePermission('automations.manage'), (req, res, next) => mediaUpload.single('file')(req, res, (err) => (err
+  ? res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'That file is too large (16 MB at most).' : 'Upload failed.' })
+  : next())), ctrl.uploadStepMedia);
 router.get('/sequences', ctrl.getSequences);
 router.post('/sequences', requirePermission('automations.manage'), ctrl.createSequence);
 router.put('/sequences/:id', requirePermission('automations.manage'), ctrl.updateSequence);
