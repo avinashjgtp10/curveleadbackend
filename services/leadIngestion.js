@@ -23,7 +23,14 @@ async function survivor(client, lead) {
   return lead;
 }
 
-async function ingestLead(tenantId, input, { submissionKey = input.meta_lead_id ? `meta:${input.meta_lead_id}` : null, actorId = null } = {}) {
+// Options:
+//   rejectDuplicate - a person is adding the lead by hand: if the number already exists return that lead
+//                     untouched ({ duplicate: true }) so the caller can refuse, instead of recording another
+//                     "duplicate received" activity on it (that is what imports/webhooks want).
+//   phoneOnly       - never match on email, whatever the workspace's dedupe_mode says.
+async function ingestLead(tenantId, input, {
+  submissionKey = input.meta_lead_id ? `meta:${input.meta_lead_id}` : null, actorId = null, rejectDuplicate = false, phoneOnly = false,
+} = {}) {
   return transaction(async client => {
     const settings = await client.query('SELECT settings FROM tenants WHERE id=$1', [tenantId]);
     // Phones without a country code are read in the workspace's country.
@@ -41,6 +48,7 @@ async function ingestLead(tenantId, input, { submissionKey = input.meta_lead_id 
       if (seen.rows[0]) return { lead: await survivor(client, seen.rows[0]), duplicate: true };
     }
     const mode = settings.rows[0]?.settings?.dedupe_mode || 'phone';
+    const matchEmail = mode === 'phone_or_email' && !phoneOnly;
     let existing;
     if (mode !== 'off') {
       // Match every stored format of the number (legacy rows may not be E.164 yet); merged leads never match.
@@ -48,12 +56,13 @@ async function ingestLead(tenantId, input, { submissionKey = input.meta_lead_id 
       const candidates = await client.query(`SELECT * FROM leads WHERE tenant_id=$1 AND merged_into_id IS NULL AND
         (regexp_replace(phone, '[^0-9]', '', 'g') = ANY($2::text[])
         OR ($3::boolean AND NULLIF(LOWER(TRIM(email)), '') = $4)) ORDER BY created_at, id FOR UPDATE`,
-      [tenantId, phoneDigitVariants(data.phone), mode === 'phone_or_email', data.email]);
+      [tenantId, phoneDigitVariants(data.phone), matchEmail, data.email]);
       existing = candidates.rows.find(row => {
         try { if (normalizePhone(row.phone, country) === data.phone) return true; } catch {}
-        return mode === 'phone_or_email' && data.email && row.email?.trim().toLowerCase() === data.email;
+        return matchEmail && data.email && row.email?.trim().toLowerCase() === data.email;
       });
     }
+    if (existing && rejectDuplicate) return { lead: existing, duplicate: true };
     let lead = existing;
     if (!lead) {
       const number = await nextLeadNumber(tenantId, client);
@@ -78,4 +87,11 @@ async function ingestLead(tenantId, input, { submissionKey = input.meta_lead_id 
     return { lead, duplicate: !!existing };
   });
 }
-module.exports = { ingestLead };
+// Read-only: the live (not merged) lead in this workspace that already holds this number, in any stored
+// format, or undefined. `db` is anything with query(sql, params). Matches the phone number only.
+async function findLeadByPhone(db, tenantId, e164, country) {
+  const candidates = await db.query(`SELECT * FROM leads WHERE tenant_id=$1 AND merged_into_id IS NULL AND
+    regexp_replace(phone, '[^0-9]', '', 'g') = ANY($2::text[]) ORDER BY created_at, id`, [tenantId, phoneDigitVariants(e164)]);
+  return candidates.rows.find(row => { try { return normalizePhone(row.phone, country) === e164; } catch { return false; } });
+}
+module.exports = { ingestLead, findLeadByPhone };

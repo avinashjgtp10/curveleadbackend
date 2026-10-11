@@ -106,7 +106,6 @@ const updateSettings = async (req, res) => {
     }
     if (req.body.whatsapp_auto_opt_in !== undefined) {
       if (typeof req.body.whatsapp_auto_opt_in !== 'boolean') return res.status(422).json({ error: 'whatsapp_auto_opt_in must be true or false.' });
-      if (req.user?.role === 'staff') return res.status(403).json({ error: 'Only an admin can change this setting.' });
       settingsPatch.whatsapp_auto_opt_in = req.body.whatsapp_auto_opt_in;
     }
     if (bank_details !== undefined) settingsPatch.bank_details = bank_details;
