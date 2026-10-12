@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { getIdentityMode, entityJoinOn } = require('../services/adIdentity');
 const { metricScope, getBreakdown } = require('../services/metrics');
 const queues = require('../jobs/queues');
 const { exchangeForLongLived, inspectToken, fetchPermissions, saveToken, syncAccountsForToken } = require('../services/metaAds/client');
@@ -123,11 +124,12 @@ const listCampaigns = async (req, res) => {
   try {
     const { from, to } = dateRange(req.query);
     const accountId = await resolveAccountId(req.tenantId, req.query.account_id, providerOf(req.query));
+    const mode = await getIdentityMode({ query });
     const { rows } = await query(
       `SELECT c.id, c.external_id, c.campaign_id AS crm_campaign_id, c.name, c.objective, c.status, c.effective_status,
               c.daily_budget_paise, c.lifetime_budget_paise, c.budget_shared, c.special_ad_categories, c.start_time, c.stop_time, ${totals}
        FROM ad_campaigns c
-       LEFT JOIN ad_insights_daily i ON i.tenant_id = c.tenant_id AND i.entity_type = 'campaign' AND i.entity_id = c.external_id AND i.date BETWEEN $3 AND $4
+       LEFT JOIN ad_insights_daily i ON ${entityJoinOn(mode, 'i', 'c', 'campaign')} AND i.date BETWEEN $3 AND $4
        WHERE c.tenant_id = $1 AND c.ad_account_id = $2
        GROUP BY c.id ORDER BY spend DESC, c.name`,
       [req.tenantId, accountId, from, to]
@@ -143,11 +145,12 @@ const listAdsets = async (req, res) => {
     const { from, to } = dateRange(req.query);
     const parent = await query('SELECT id, name, external_id FROM ad_campaigns WHERE tenant_id = $1 AND id = $2', [req.tenantId, req.params.id]);
     if (!parent.rows[0]) return bad(res, 'Campaign not found.', 404);
+    const mode = await getIdentityMode({ query });
     const { rows } = await query(
       `SELECT s.id, s.external_id, s.name, s.status, s.effective_status, s.daily_budget_paise, s.lifetime_budget_paise,
               s.optimization_goal, s.billing_event, ${totals}
        FROM ad_adsets s
-       LEFT JOIN ad_insights_daily i ON i.tenant_id = s.tenant_id AND i.entity_type = 'adset' AND i.entity_id = s.external_id AND i.date BETWEEN $3 AND $4
+       LEFT JOIN ad_insights_daily i ON ${entityJoinOn(mode, 'i', 's', 'adset')} AND i.date BETWEEN $3 AND $4
        WHERE s.tenant_id = $1 AND s.ad_campaign_id = $2
        GROUP BY s.id ORDER BY spend DESC, s.name`,
       [req.tenantId, req.params.id, from, to]
@@ -163,10 +166,12 @@ const listAds = async (req, res) => {
     const { from, to } = dateRange(req.query);
     const parent = await query('SELECT id, name, external_id, ad_campaign_id FROM ad_adsets WHERE tenant_id = $1 AND id = $2', [req.tenantId, req.params.id]);
     if (!parent.rows[0]) return bad(res, 'Ad set not found.', 404);
+    const mode = await getIdentityMode({ query });
+    // Scoped mode: account + canonical key (a Google ad ID is only unique inside its ad group).
     const { rows } = await query(
-      `SELECT a.id, a.external_id, a.name, a.status, a.effective_status, a.creative, ${totals}
+      `SELECT a.id, a.external_id, ${mode === 'scoped' ? 'a.external_key AS entity_key, ' : ''}a.name, a.status, a.effective_status, a.creative, ${totals}
        FROM ad_ads a
-       LEFT JOIN ad_insights_daily i ON i.tenant_id = a.tenant_id AND i.entity_type = 'ad' AND i.entity_id = a.external_id AND i.date BETWEEN $3 AND $4
+       LEFT JOIN ad_insights_daily i ON ${entityJoinOn(mode, 'i', 'a', 'ad')} AND i.date BETWEEN $3 AND $4
        WHERE a.tenant_id = $1 AND a.ad_adset_id = $2
        GROUP BY a.id ORDER BY spend DESC, a.name`,
       [req.tenantId, req.params.id, from, to]
@@ -180,12 +185,23 @@ const dailyInsights = async (req, res) => {
   try {
     const { entity_type, entity_id } = req.query;
     if (!ENTITY_TYPES.includes(entity_type)) return bad(res, `entity_type must be one of: ${ENTITY_TYPES.join(', ')}.`);
-    if (typeof entity_id !== 'string' || !/^(act_)?\d{1,30}$/.test(entity_id)) return bad(res, 'Invalid entity_id.');
+    // A Google ad is addressed by its canonical key "<adGroupId>~<adId>"; every other entity by its plain ID.
+    if (typeof entity_id !== 'string' || !/^(act_)?\d{1,30}(~\d{1,30})?$/.test(entity_id)) return bad(res, 'Invalid entity_id.');
+    if (entity_id.includes('~') && entity_type !== 'ad') return bad(res, 'Invalid entity_id.');
+    if (req.query.account_id != null && !UUID.test(String(req.query.account_id))) return bad(res, 'Invalid account_id.');
     const { from, to } = dateRange(req.query);
+    const mode = await getIdentityMode({ query });
+    // scoped: match the canonical key. Any other mode keeps the legacy column; a composite key is split into
+    // ad id + ad group so the legacy rows (which store the bare ad id) are still addressable unambiguously.
+    const [groupPart, idPart] = entity_id.includes('~') ? entity_id.split('~') : [null, entity_id];
+    const useKey = mode === 'scoped';
     const { rows } = await query(
       `SELECT to_char(date, 'YYYY-MM-DD') AS date, spend::float, impressions, clicks, ctr::float, cpc::float, leads, cpl::float
-       FROM ad_insights_daily WHERE tenant_id = $1 AND entity_type = $2 AND entity_id = $3 AND date BETWEEN $4 AND $5 ORDER BY date`,
-      [req.tenantId, entity_type, entity_id, from, to]
+       FROM ad_insights_daily WHERE tenant_id = $1 AND entity_type = $2
+         AND ${useKey ? 'entity_key = $3' : 'entity_id = $3 AND ($7::text IS NULL OR adset_external_id = $7::text)'}
+         AND ($6::uuid IS NULL OR ad_account_id = $6::uuid) AND date BETWEEN $4 AND $5 ORDER BY date`,
+      useKey ? [req.tenantId, entity_type, entity_id, from, to, req.query.account_id || null]
+        : [req.tenantId, entity_type, idPart, from, to, req.query.account_id || null, groupPart]
     );
     res.json({ entity_type, entity_id, from, to, days: rows });
   } catch (e) { fail('Daily insights')(e, res); }
@@ -200,11 +216,12 @@ const dashboard = async (req, res) => {
     const { from, to } = dateRange(req.query);
     const accountId = await resolveAccountId(req.tenantId, req.query.account_id, providerOf(req.query));
     const account = (await query('SELECT currency, timezone_name FROM ad_accounts WHERE tenant_id = $1 AND id = $2', [req.tenantId, accountId])).rows[0] || {};
+    const mode = await getIdentityMode({ query });
     const ad = await query(
       `SELECT ac.id, ac.external_id, ac.campaign_id AS crm_campaign_id, ac.name, ac.effective_status,
               COALESCE(sum(i.spend), 0)::float AS spend, COALESCE(sum(i.leads), 0)::int AS meta_leads
        FROM ad_campaigns ac
-       LEFT JOIN ad_insights_daily i ON i.tenant_id = ac.tenant_id AND i.entity_type = 'campaign' AND i.entity_id = ac.external_id AND i.date BETWEEN $3 AND $4
+       LEFT JOIN ad_insights_daily i ON ${entityJoinOn(mode, 'i', 'ac', 'campaign')} AND i.date BETWEEN $3 AND $4
        WHERE ac.tenant_id = $1 AND ac.ad_account_id = $2
        GROUP BY ac.id`,
       [req.tenantId, accountId, from, to]

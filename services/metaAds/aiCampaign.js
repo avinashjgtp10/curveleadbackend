@@ -1,4 +1,5 @@
 const { query } = require('../../config/db');
+const { getIdentityMode, insightsJoinOn } = require('../adIdentity');
 const { graphRequest } = require('../../utils/metaGraph');
 const { callGroq } = require('../groqService');
 const { getAccountWithToken } = require('./client');
@@ -24,14 +25,18 @@ const primaryAccount = async (tenantId) => {
 };
 
 // The workspace's best ads by cost per lead (≥ 10 leads, last 90 days) — shown to the model.
-const topAds = async (tenantId) => (await query(
+const topAds = async (tenantId) => (await (async () => {
+  const mode = await getIdentityMode({ query });
+  const adJoin = mode === 'scoped' ? insightsJoinOn(mode, 'i', 'ad') : 'ad.tenant_id = i.tenant_id AND ad.external_id = i.entity_id';
+  return query(
   `SELECT ad.name, ad.creative->>'title' AS title, ad.creative->>'body' AS body,
           sum(i.leads)::int AS leads, round(sum(i.spend) / NULLIF(sum(i.leads), 0), 2)::float AS cpl
-   FROM ad_insights_daily i JOIN ad_ads ad ON ad.tenant_id = i.tenant_id AND ad.external_id = i.entity_id
+   FROM ad_insights_daily i JOIN ad_ads ad ON ${adJoin}
    JOIN ad_accounts a ON a.id = i.ad_account_id AND a.tenant_id = i.tenant_id AND a.provider = 'meta'
    WHERE i.tenant_id = $1 AND i.entity_type = 'ad' AND i.date >= current_date - 90
    GROUP BY ad.id HAVING sum(i.leads) >= 10 ORDER BY cpl ASC NULLS LAST LIMIT 5`, [tenantId]
-)).rows;
+  );
+})()).rows;
 
 const budgetContext = async (tenantId) => {
   const { campaigns, adsets } = await controls.workspaceBudgets(tenantId);
