@@ -97,6 +97,6 @@ test('the migration is additive: no ALTER/UPDATE/DELETE of existing tables, and 
 
 test('merges keep milestone events on their own lead and mute event creation for their transaction', () => {
   const merge = read('services/leadMerge.js');
-  assert.match(merge, /cl\.relname NOT IN \('leads', 'lead_merges', 'lead_milestone_events', 'lead_payments'\)/);
+  assert.match(merge, /cl\.relname NOT IN \('leads', 'lead_merges', 'lead_milestone_events', 'lead_payments', 'lead_attribution', 'lead_attribution_events', 'booking_adjustments'\)/);
   assert.match(merge, /set_config\('curvelead\.skip_milestones', 'on', true\)/);
 });

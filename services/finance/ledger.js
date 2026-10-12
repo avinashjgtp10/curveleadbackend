@@ -212,8 +212,9 @@ const getLeadFinance = async ({ tenantId, leadId }) => {
     query(`SELECT ${COLUMNS} FROM lead_payments WHERE tenant_id = $1 AND lead_id IN (SELECT id FROM leads WHERE tenant_id = $1 AND (id = $2 OR merged_into_id = $2)) ORDER BY created_at, id`, [tenantId, rootId]),
     query(`SELECT currency, net, gross_paid, pending, payments FROM v_person_net_collected WHERE tenant_id = $1 AND root_lead_id = $2 ORDER BY currency`, [tenantId, rootId]),
   ]);
+  const booked = await require('./booking').getBooked({ tenantId, leadId: rootId }).catch(() => null); // null until the booking migration is installed
   return {
-    lead_id: lead.id, root_lead_id: rootId, merged: !!lead.merged_into_id, deal_value: lead.deal_value == null ? null : Number(lead.deal_value),
+    lead_id: lead.id, root_lead_id: rootId, merged: !!lead.merged_into_id, deal_value: lead.deal_value == null ? null : Number(lead.deal_value), booked,
     payments: payments.rows.map((p) => ({ ...p, amount: Number(p.amount) })),
     totals: totals.rows.map((t) => ({ currency: t.currency, net_collected: Number(t.net), gross_paid: Number(t.gross_paid), pending: Number(t.pending), payments: t.payments })),
   };
