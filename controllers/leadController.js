@@ -5,6 +5,7 @@ const { applyMerge } = require('../services/leadMerge');
 const { ingestLead, findLeadByPhone } = require('../services/leadIngestion');
 const { normalizePhone, normalizeSource, normalizeLead, statusChangeTitle } = require('../utils/dataQuality');
 const { query, transaction } = require('../config/db');
+const { cleanLeadInput } = require('../utils/leadFieldInput');
 const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSED_AFTER_MINUTES } = require('../utils/leadSla');
 const { recordFirstResponse } = require('../utils/leadResponse');
@@ -327,6 +328,8 @@ const updateLead = async (req, res) => {
     if (req.body.phone !== undefined) req.body.phone = normalizePhone(req.body.phone, (await getWorkspaceLocale(req.tenantId)).country);
     if (req.body.source !== undefined) req.body.source = normalizeSource(req.body.source);
     if (req.body.name !== undefined) req.body.name = String(req.body.name).normalize('NFKC');
+    const inputError = cleanLeadInput(req.body); // blank number/date/id fields from the edit form must not fail the save
+    if (inputError) return res.status(422).json({ error: inputError });
     const allowedFields = [
       'name', 'phone', 'email', 'location', 'business_name', 'address', 'source', 'source_detail', 'campaign_id', 'product',
       'stage', 'lead_status', 'assigned_to', 'notes', 'deal_value', 'expected_close_date',
