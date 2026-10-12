@@ -51,6 +51,11 @@ test('the ledger is excluded from the generic merge mover (money never changes o
   assert.match(read('services/leadMerge.js'), /NOT IN \('leads', 'lead_merges', 'lead_milestone_events', 'lead_payments'\)/);
 });
 
+test('only a COMPLETED confirmed payment needs its date: pending entries can be cancelled or failed without one', () => {
+  assert.match(code, /paid_on IS NOT NULL OR status <> 'completed'/);
+  assert.doesNotMatch(code, /paid_on IS NOT NULL OR status = 'pending'/);
+});
+
 test('the real-database ledger test is picked up by the harness', () => {
   assert.ok(require('../scripts/runPhase1SqlTests').testFiles().includes('tests/phase1LedgerSql.test.js'));
 });
