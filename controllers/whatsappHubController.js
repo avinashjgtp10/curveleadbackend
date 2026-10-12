@@ -9,6 +9,8 @@ const { fetchWebsiteText } = require('../utils/websiteFetcher');
 const { generateAiAgentKnowledge } = require('../services/groqService');
 
 const { GRAPH_URL: META_API_URL } = require('../config/meta');
+const { adSpend } = require('../services/metrics');
+const { costPerLead } = require('../services/ctwaCost');
 
 const getSettings = async (tenantId) => {
   const r = await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]);
@@ -270,39 +272,43 @@ const getClickToWhatsApp = async (req, res) => {
         `SELECT COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE campaign_id IS NULL) AS unattributed,
                 COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('day', NOW())) AS today
-         FROM leads WHERE tenant_id = $1 AND merged_into_id IS NULL AND source = 'whatsapp' AND meta_ad_id IS NOT NULL
-           AND created_at >= NOW() - ($2 || ' days')::interval`,
+         FROM leads l WHERE tenant_id = $1 AND merged_into_id IS NULL AND source = 'whatsapp' AND meta_ad_id IS NOT NULL
+           AND NOT COALESCE((to_jsonb(l)->>'is_test_lead')::boolean, false) AND created_at >= NOW() - ($2 || ' days')::interval`,
         [req.tenantId, String(days)]
       ),
       query(
         `SELECT c.id AS campaign_id, c.name AS campaign_name, COUNT(l.id) AS leads,
                 COUNT(l.id) FILTER (WHERE l.lead_score = 'hot') AS hot,
-                COUNT(l.id) FILTER (WHERE l.stage IN (SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) AS won,
-                c.actual_spend
+                COUNT(l.id) FILTER (WHERE l.stage IN (SELECT name FROM lead_stages WHERE tenant_id = $1 AND is_won = true)) AS won
          FROM leads l LEFT JOIN campaigns c ON c.id = l.campaign_id
          WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
-           AND l.created_at >= NOW() - ($2 || ' days')::interval
-         GROUP BY c.id, c.name, c.actual_spend ORDER BY leads DESC LIMIT 50`,
+           AND NOT COALESCE((to_jsonb(l)->>'is_test_lead')::boolean, false) AND l.created_at >= NOW() - ($2 || ' days')::interval
+         GROUP BY c.id, c.name ORDER BY leads DESC LIMIT 50`,
         [req.tenantId, String(days)]
       ),
       query(
         `SELECT l.id, l.name, l.phone, l.stage, l.created_at, l.source_detail, c.name AS campaign_name
          FROM leads l LEFT JOIN campaigns c ON c.id = l.campaign_id
          WHERE l.tenant_id = $1 AND l.merged_into_id IS NULL AND l.source = 'whatsapp' AND l.meta_ad_id IS NOT NULL
+           AND NOT COALESCE((to_jsonb(l)->>'is_test_lead')::boolean, false)
          ORDER BY l.created_at DESC LIMIT 25`,
         [req.tenantId]
       ),
     ]);
     const n = (v) => parseInt(v) || 0;
     const s = summary.rows[0];
+    // Spend for exactly the same dates as the leads, from daily insights (not the campaign's lifetime total).
+    const to = new Date();
+    const spendRows = await adSpend({ workspaceId: req.tenantId, from: new Date(to.getTime() - days * 86400000), to, tz: (await getWorkspaceLocale(req.tenantId)).timezone }).catch(() => []);
     res.json({
       days,
       summary: { total: n(s.total), unattributed: n(s.unattributed), today: n(s.today) },
       campaigns: byCampaign.rows.map(r => {
-        const leads = n(r.leads); const spend = parseFloat(r.actual_spend) || 0;
+        const leads = n(r.leads);
+        const cost = r.campaign_id ? costPerLead(spendRows.filter((x) => x.campaign_id === r.campaign_id), leads) : { spend: null, currency: null, cost_per_lead: null, reason: 'unattributed' };
         return {
           campaign_id: r.campaign_id, campaign_name: r.campaign_name || 'Unattributed', leads,
-          hot: n(r.hot), won: n(r.won), spend, cost_per_lead: leads && spend ? +(spend / leads).toFixed(2) : null,
+          hot: n(r.hot), won: n(r.won), spend: cost.spend, currency: cost.currency, cost_per_lead: cost.cost_per_lead, cost_per_lead_reason: cost.reason,
         };
       }),
       recent: recent.rows,
