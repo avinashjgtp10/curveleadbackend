@@ -21,11 +21,21 @@ const FRIENDLY_ERRORS = {
   131005: 'WhatsApp access was denied. Reconnect in Integrations → WhatsApp to restore sending.',
   131047: "It's been more than 24 hours since this customer's last message. Send an approved template instead.",
   131026: "This number can't receive WhatsApp messages.",
-  131049: 'Meta held back this marketing message to protect engagement. Try again later or use a Utility template.',
+  131049: "Meta chose not to deliver this marketing message to this person, to keep WhatsApp useful for them (for example they've had many marketing messages lately, or haven't replied to businesses in a while). Retrying straight away usually fails the same way. Try again in a day or two, wait until they reply, or use a Utility template for confirmations and reminders.",
+  131050: 'This person has chosen to stop receiving marketing messages from your business. Do not send marketing templates to them; Utility messages are still allowed.',
+  130472: "Meta didn't deliver this message as part of a delivery experiment. It isn't a problem with your account; try again later.",
   131056: 'Too many messages to this number in a short time. Wait a moment and try again.',
   132001: "This template doesn't exist in that language on WhatsApp.",
   132000: "The template's variables don't match what was sent.",
   130429: 'WhatsApp rate limit reached. Try again shortly.',
+};
+
+// Failure details Meta sends later, in a delivery-status webhook ("[131049] Title — details").
+// Known codes get the plain-language reason; others keep Meta's own wording.
+const describeStatusError = (err) => {
+  if (!err) return null;
+  const meta = [err.title || err.message || 'Unknown error', err.error_data?.details].filter(Boolean).join(' — ');
+  return `${err.code ? `[${err.code}] ` : ''}${FRIENDLY_ERRORS[err.code] || meta}`;
 };
 
 const failure = (error, phoneNumberId) => {
@@ -300,6 +310,6 @@ const sendMediaMessage = async (to, fileType, mediaUrl, caption = '', credential
 };
 
 module.exports = {
-  sendTextMessage, sendTemplate, sendMediaMessage, verifyWhatsAppNumber, listMessageTemplates,
+  sendTextMessage, sendTemplate, sendMediaMessage, verifyWhatsAppNumber, listMessageTemplates, describeStatusError,
   createMessageTemplate, uploadTemplateMedia,
 };

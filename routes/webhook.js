@@ -8,5 +8,6 @@ router.get('/meta', verifyWebhook);
 router.post('/meta', receiveLeadFormWebhook);
 router.post('/google', receiveGoogleLead);
 router.post('/voice-ai', handleVoiceAiWebhook);
+router.post('/voice-ai/:provider', handleVoiceAiWebhook);
 
 module.exports = router;

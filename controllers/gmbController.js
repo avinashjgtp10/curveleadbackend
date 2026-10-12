@@ -3,6 +3,7 @@ const { generateReviewRequestMessage } = require('../services/groqService');
 const { DEFAULT_TEMPLATE } = require('../utils/googleReviewRequest');
 const { encryptSecret } = require('../utils/cryptoSecrets');
 const { getAuthUrl, parseState, exchangeCodeForTokens, fetchGmbAccounts } = require('../utils/googleOAuth');
+const { refreshGmbConnection } = require('../services/gmbConnection');
 
 const getSettings = async (tenantId) => {
   const r = await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]);
@@ -26,6 +27,7 @@ const getGmbSettings = async (req, res) => {
       gmb_connected: !!s.gmb_refresh_token_encrypted,
       gmb_account_name: s.gmb_account_name || null,
       gmb_locations_loaded: !!s.gmb_account_id,
+      gmb_location_count: s.gmb_location_count || 0,
     });
   } catch (e) { console.error('getGmbSettings:', e.message); res.status(500).json({ error: 'Failed.' }); }
 };
@@ -125,10 +127,26 @@ const gmbOauthCallback = async (req, res) => {
 const disconnectGmb = async (req, res) => {
   try {
     const current = await getSettings(req.tenantId);
-    const { gmb_refresh_token_encrypted, gmb_connected_at, gmb_account_id, gmb_account_name, ...rest } = current;
+    const { gmb_refresh_token_encrypted, gmb_connected_at, gmb_account_id, gmb_account_name, gmb_location_count, ...rest } = current;
     await query('UPDATE tenants SET settings = $1 WHERE id = $2', [JSON.stringify(rest), req.tenantId]);
     res.json({ ok: true });
   } catch (e) { console.error('disconnectGmb:', e.message); res.status(500).json({ error: 'Failed to disconnect.' }); }
 };
 
-module.exports = { getGmbSettings, updateGmbSettings, draftReviewMessage, connectGmb, gmbOauthCallback, disconnectGmb };
+// POST /api/gmb/refresh — "Check again": re-reads the Google accounts and locations for a workspace
+// that connected before CurveLead's Google access was approved, without disconnecting.
+const refreshGmb = async (req, res) => {
+  try {
+    const settings = await getSettings(req.tenantId);
+    if (!settings.gmb_refresh_token_encrypted) return res.status(400).json({ error: 'Connect Google first.' });
+    const r = await refreshGmbConnection(settings);
+    if (!r.ok) {
+      console.warn(`refreshGmb (${req.tenantId}) ${r.code}: ${r.detail}`); // Google's diagnosis stays in the log
+      return res.status(r.code === 'reconnect' ? 401 : 200).json({ ok: false, code: r.code, message: r.message });
+    }
+    await saveSettings(req.tenantId, { gmb_account_id: r.accountId, gmb_location_count: r.locations.length });
+    res.json({ ok: true, locations: r.locations.length, message: `Connected. ${r.locations.length} business location${r.locations.length === 1 ? '' : 's'} found.` });
+  } catch (e) { console.error('refreshGmb:', e.message); res.status(500).json({ error: 'Failed to check Google.' }); }
+};
+
+module.exports = { getGmbSettings, updateGmbSettings, draftReviewMessage, connectGmb, gmbOauthCallback, disconnectGmb, refreshGmb };

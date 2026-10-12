@@ -80,6 +80,8 @@ const parseWebhookEvent = (payload) => {
     transcript: message.transcript || message.artifact?.transcript || null,
     recordingUrl: message.recordingUrl || message.artifact?.recordingUrl || null,
     costUsd: typeof message.cost === 'number' ? message.cost : null,
+    // Vapi's own end-of-call summary, kept as a fallback when our analysis can't run.
+    providerSummary: message.analysis?.summary || message.summary || null,
   };
 };
 
