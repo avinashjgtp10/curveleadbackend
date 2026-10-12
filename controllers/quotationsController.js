@@ -190,24 +190,31 @@ const sendQuotation = async (req, res) => {
 };
 
 // POST /api/quotations/:id/accept
+// Accepting a quotation, moving its lead to Won and recording the deal value are ONE transaction: if the
+// Won transition fails the quotation is not left accepted. Activity log / automations run after the commit.
 const acceptQuotation = async (req, res) => {
   try {
-    const result = await query(
-      `UPDATE quotations SET status = 'accepted', accepted_at = NOW()
-       WHERE id = $1 AND tenant_id = $2 RETURNING *`,
-      [req.params.id, req.tenantId]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found.' });
-
-    // Move the lead to the workspace's won stage (history, won_at and CAPI included).
-    if (result.rows[0].lead_id) {
-      const { changeLeadStage, wonStageName } = require('../utils/leadStage');
-      await changeLeadStage({ tenantId: req.tenantId, leadId: result.rows[0].lead_id, newStageName: await wonStageName(req.tenantId) });
-      await query('UPDATE leads SET deal_value = $1 WHERE id = $2 AND tenant_id = $3', [result.rows[0].total, result.rows[0].lead_id, req.tenantId]);
-    }
-
-    res.json({ quotation: result.rows[0] });
+    const { changeLeadStage, wonStageName } = require('../utils/leadStage');
+    const accepted = await transaction(async (client) => {
+      const result = await client.query(
+        `UPDATE quotations SET status = 'accepted', accepted_at = NOW()
+         WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+        [req.params.id, req.tenantId]
+      );
+      if (result.rows.length === 0) return null;
+      let afterCommit = null;
+      if (result.rows[0].lead_id) {
+        const moved = await changeLeadStage({ client, tenantId: req.tenantId, leadId: result.rows[0].lead_id, newStageName: await wonStageName(req.tenantId) });
+        afterCommit = moved.afterCommit;
+        await client.query('UPDATE leads SET deal_value = $1 WHERE id = $2 AND tenant_id = $3', [result.rows[0].total, result.rows[0].lead_id, req.tenantId]);
+      }
+      return { quotation: result.rows[0], afterCommit };
+    });
+    if (!accepted) return res.status(404).json({ error: 'Not found.' });
+    if (accepted.afterCommit) await accepted.afterCommit();
+    res.json({ quotation: accepted.quotation });
   } catch (error) {
+    console.error('Accept quotation error:', error.message);
     res.status(500).json({ error: 'Failed.' });
   }
 };
