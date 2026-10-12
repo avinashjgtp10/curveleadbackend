@@ -92,13 +92,14 @@ const loadContext = async (db, tenantId, ids) => {
 const quote = (name) => `"${String(name).replace(/"/g, '""')}"`;
 
 // Tables with a lead foreign key (except the merge bookkeeping itself, and milestone events, which stay with the
-// lead they happened to: a merge must never move or duplicate a customer milestone).
+// lead they happened to: a merge must never move or duplicate a customer milestone; and lead_payments: money never
+// changes owner, reports resolve a merged lead to its root instead).
 const childTables = async (db) => (await db.query(
   `SELECT DISTINCT ns.nspname AS schema, cl.relname AS table_name, a.attname AS column_name
    FROM pg_constraint c JOIN pg_class cl ON cl.oid = c.conrelid JOIN pg_namespace ns ON ns.oid = cl.relnamespace
    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
    WHERE c.contype = 'f' AND c.confrelid = 'leads'::regclass AND array_length(c.conkey, 1) = 1
-     AND cl.relname NOT IN ('leads', 'lead_merges', 'lead_milestone_events')
+     AND cl.relname NOT IN ('leads', 'lead_merges', 'lead_milestone_events', 'lead_payments')
    ORDER BY 2`
 )).rows;
 
