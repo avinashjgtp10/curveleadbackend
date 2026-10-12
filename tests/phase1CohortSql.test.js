@@ -31,7 +31,7 @@ test('cohort reporting end to end on PostgreSQL', { skip }, async (t) => {
         won_at timestamp, updated_at timestamp DEFAULT now(), created_at timestamptz DEFAULT now(), campaign_id uuid REFERENCES campaigns(id) ON DELETE SET NULL,
         source text, source_detail text, meta_lead_id text, meta_ad_id text, meta_adset_id text, meta_form_id text, google_lead_id text, google_campaign_id text, google_adgroup_id text,
         google_creative_id text, gclid text, merged_into_id uuid, merged_at timestamptz, is_test_lead boolean NOT NULL DEFAULT false, lead_score text, assigned_to uuid);
-      CREATE TABLE lead_stages(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, pos int, is_won boolean DEFAULT false, is_lost boolean DEFAULT false, is_qualified boolean DEFAULT false, is_active boolean DEFAULT true);
+      CREATE TABLE lead_stages(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, pos int, position int, is_won boolean DEFAULT false, is_lost boolean DEFAULT false, is_qualified boolean DEFAULT false, is_active boolean DEFAULT true);
       CREATE TABLE lead_stage_history(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, prev_stage text, new_stage text, changed_at timestamp DEFAULT now());
       CREATE TABLE ad_accounts(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, currency text);
       CREATE TABLE ad_campaigns(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, ad_account_id uuid, external_id text, campaign_id uuid);

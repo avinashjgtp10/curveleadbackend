@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Fills lead_milestone_events for leads that became qualified / won BEFORE the milestone trigger existed.
 // DRY-RUN BY DEFAULT.
-//   MILESTONE_BACKFILL_URL=postgres://... node scripts/backfillMilestones.js --i-have-authorization [--apply] [--batch=500]
+//   MILESTONE_BACKFILL_URL=postgres://... node scripts/backfillMilestones.js --i-have-authorization [--tenant=<workspace uuid>] [--apply] [--batch=500]
 //
 // Guarantees (same shape as the ad identity backfill)
 //  - Cannot stop early: leads are walked by primary key with a strictly increasing cursor; the loop ends only
@@ -25,7 +25,7 @@ const QUALIFIED_AT = `COALESCE(
 
 // One batch of leads strictly after the cursor. $1 cursor (nullable), $2 size.
 const BATCH = `SELECT id, tenant_id, stage, won_at, updated_at FROM leads
-  WHERE merged_into_id IS NULL AND ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT $2`;
+  WHERE merged_into_id IS NULL AND ($1::uuid IS NULL OR id > $1::uuid) AND ($3::uuid IS NULL OR tenant_id = $3::uuid) ORDER BY id LIMIT $2`;
 
 // What each batch would add / adds. `batch` is a CTE of the lead ids being processed ($1 = array of ids).
 const candidates = (milestone, expr) => `
@@ -39,7 +39,7 @@ const INSERT_SQL = (milestone, expr) => `
   SELECT c.tenant_id, c.lead_id, c.milestone, c.at, 'backfill' FROM (${candidates(milestone, expr)}) c WHERE c.at IS NOT NULL
   ON CONFLICT DO NOTHING`;
 
-const run = async ({ client, apply = false, batch = 500, log = () => {} }) => {
+const run = async ({ client, apply = false, batch = 500, tenantId = null, log = () => {} }) => {
   batch = Number(batch);
   if (!Number.isInteger(batch) || batch < 1 || batch > 5000) throw new Error('batch must be an integer between 1 and 5000');
   const report = { scanned: 0, batches: 0, won: { would_add: 0, added: 0 }, qualified: { would_add: 0, added: 0 } };
@@ -50,7 +50,7 @@ const run = async ({ client, apply = false, batch = 500, log = () => {} }) => {
   try {
     let cursor = null;
     for (;;) {
-      const leads = (await client.query(BATCH, [cursor, batch])).rows;
+      const leads = (await client.query(BATCH, [cursor, batch, tenantId])).rows;
       if (!leads.length) break; // the only exit
       const ids = leads.map((l) => l.id);
       const last = leads[leads.length - 1].id;
@@ -80,11 +80,12 @@ const main = async () => {
   const url = process.env.MILESTONE_BACKFILL_URL;
   if (!url) { console.error('Refusing: set MILESTONE_BACKFILL_URL (this script ignores DATABASE_URL).'); process.exit(2); }
   const batch = Number((args.find((a) => a.startsWith('--batch=')) || '--batch=500').split('=')[1]);
+  const tenantId = ((args.find((a) => a.startsWith('--tenant=')) || '').slice(9)) || null;
   const { Client } = require('pg');
   const client = new Client({ connectionString: url });
   await client.connect();
   let code = 0;
-  try { console.log(JSON.stringify({ mode: args.includes('--apply') ? 'APPLY' : 'DRY-RUN', ...(await run({ client, apply: args.includes('--apply'), batch, log: console.error })) }, null, 2)); }
+  try { console.log(JSON.stringify({ mode: args.includes('--apply') ? 'APPLY' : 'DRY-RUN', ...(await run({ client, apply: args.includes('--apply'), batch, tenantId, log: console.error })) }, null, 2)); }
   catch (e) { console.error(`Backfill stopped: ${e.message}`); if (e.partialReport) console.error(`Committed before stopping (rerun continues): ${JSON.stringify(e.partialReport)}`); code = 1; }
   finally { await client.end(); }
   process.exit(code);
