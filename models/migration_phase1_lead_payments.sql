@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS lead_payments (
   CHECK ((kind IN ('refund', 'reversal')) = (parent_id IS NOT NULL)),
   CHECK ((kind = 'adjustment') = (adjustment_direction IS NOT NULL)),
   CHECK (kind NOT IN ('refund', 'reversal', 'adjustment') OR (reason IS NOT NULL AND btrim(reason) <> '')),
-  CHECK (kind <> 'payment' OR paid_on_basis <> 'confirmed' OR paid_on IS NOT NULL OR status = 'pending'),
+  CHECK (kind <> 'payment' OR paid_on_basis <> 'confirmed' OR paid_on IS NOT NULL OR status <> 'completed'),   -- only a COMPLETED confirmed payment needs its date
   CHECK (btrim(idempotency_key) <> '')
 );
 

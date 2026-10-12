@@ -6,6 +6,11 @@ const { ingestLead, findLeadByPhone } = require('../services/leadIngestion');
 const { normalizePhone, normalizeSource, normalizeLead, statusChangeTitle } = require('../utils/dataQuality');
 const { query, transaction } = require('../config/db');
 const { cleanLeadInput } = require('../utils/leadFieldInput');
+
+// A lead with recorded payments is never hard-deleted (the ledger keeps its rows forever): the database refuses it,
+// and we turn that refusal into a message that says what to do instead.
+const HAS_PAYMENTS_MESSAGE = 'This lead has recorded payments and cannot be deleted. Mark it as Lost to archive it instead.';
+const hasPaymentsError = (e) => !!e && (e.code === '23001' || e.code === '23503') && /lead_payments/.test(`${e.constraint || ''} ${e.table || ''} ${e.message || ''}`);
 const { computeFollowupHealth, MISSED_AFTER_HOURS, CRITICAL_AFTER_HOURS } = require('../utils/followupHealth');
 const { computeLeadSla, TARGET_RESPONSE_MINUTES, ESCALATION_AFTER_MINUTES, MISSED_AFTER_MINUTES } = require('../utils/leadSla');
 const { recordFirstResponse } = require('../utils/leadResponse');
@@ -352,6 +357,10 @@ const updateLead = async (req, res) => {
     const advanceReceivedChanged = req.body.advance_received !== undefined
       && Number(req.body.advance_received) !== Number(prev.advance_received || 0);
     if (advanceReceivedChanged) {
+      // Once the payment ledger is on for the workspace, money is recorded as payments, not typed into this field.
+      if (await require('../utils/financeFlags').ledgerEnabled(req.tenantId)) {
+        return res.status(409).json({ error: 'Payments are now recorded in the lead\'s Finance section, so this field can no longer be edited.', code: 'use_payments' });
+      }
       const effectiveStage = req.body.stage || prev.stage;
       const stageInfo = await query(
         'SELECT is_won FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
@@ -482,6 +491,7 @@ const deleteLead = async (req, res) => {
     tombstoneMetaLead(req.tenantId, result.rows[0].meta_lead_id).catch(() => {});
     res.json({ message: 'Lead deleted.' });
   } catch (error) {
+    if (hasPaymentsError(error)) return res.status(409).json({ error: HAS_PAYMENTS_MESSAGE, code: 'has_payments' });
     console.error('Delete lead error:', error);
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
@@ -1009,6 +1019,7 @@ const bulkDelete = async (req, res) => {
 
     res.json({ deleted: result.rowCount });
   } catch (error) {
+    if (hasPaymentsError(error)) return res.status(409).json({ error: HAS_PAYMENTS_MESSAGE, code: 'has_payments' });
     console.error('Bulk delete error:', error);
     res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed.' });
   }
