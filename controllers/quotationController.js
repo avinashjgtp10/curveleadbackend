@@ -372,24 +372,32 @@ const getPdf = async (req, res) => {
 
 const accept = async (req, res) => {
   try {
-    const result = await query(
-      `UPDATE quotations SET status='accepted', updated_at=NOW() WHERE id=$1 AND tenant_id=$2 RETURNING lead_id`,
-      [req.params.id, req.tenantId]
-    );
-    if (!result.rows.length) return res.status(404).json({ error: 'Not found.' });
-
-    const leadId = result.rows[0].lead_id;
-    if (leadId) {
-      const { changeLeadStage, wonStageName } = require('../utils/leadStage');
-      await changeLeadStage({ tenantId: req.tenantId, leadId, newStageName: await wonStageName(req.tenantId) });
-      await query(
-        `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
-         VALUES ($1,$2,'quotation','Quotation Accepted','Lead moved to Won stage',$3)`,
-        [req.tenantId, leadId, req.user.id]
+    // Accepting, moving the lead to Won and logging the quotation activity are ONE transaction.
+    const { changeLeadStage, wonStageName } = require('../utils/leadStage');
+    const { transaction } = require('../config/db');
+    const accepted = await transaction(async (client) => {
+      const result = await client.query(
+        `UPDATE quotations SET status='accepted', updated_at=NOW() WHERE id=$1 AND tenant_id=$2 RETURNING lead_id`,
+        [req.params.id, req.tenantId]
       );
-    }
+      if (!result.rows.length) return null;
+      const leadId = result.rows[0].lead_id;
+      let afterCommit = null;
+      if (leadId) {
+        const moved = await changeLeadStage({ client, tenantId: req.tenantId, leadId, newStageName: await wonStageName(req.tenantId) });
+        afterCommit = moved.afterCommit;
+        await client.query(
+          `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, description, created_by)
+           VALUES ($1,$2,'quotation','Quotation Accepted','Lead moved to Won stage',$3)`,
+          [req.tenantId, leadId, req.user.id]
+        );
+      }
+      return { afterCommit };
+    });
+    if (!accepted) return res.status(404).json({ error: 'Not found.' });
+    if (accepted.afterCommit) await accepted.afterCommit();
     res.json({ message: 'Quotation accepted.' });
-  } catch (e) { res.status(500).json({ error: 'Failed.' }); }
+  } catch (e) { console.error('Accept quotation error:', e.message); res.status(500).json({ error: 'Failed.' }); }
 };
 
 const reject = async (req, res) => {
