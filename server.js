@@ -166,6 +166,8 @@ app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
 app.get('/api/ads/google/callback', apiLimiter, require('./controllers/googleAdsController').callback);
 app.use('/api/ads', apiLimiter, require('./routes/ads'));
 app.use('/api/social', apiLimiter, require('./routes/social'));
+app.use('/api/attribution', apiLimiter, require('./routes/attribution'));
+app.use('/api/cohort', apiLimiter, require('./routes/cohort')); // cohort reporting: 404 feature_off until a workspace sets reporting_cohort
 app.use('/api/finance', apiLimiter, require('./routes/finance')); // payment ledger: 404 feature_off until a workspace turns it on
 
 // ============================================

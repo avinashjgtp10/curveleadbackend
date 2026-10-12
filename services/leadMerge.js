@@ -99,7 +99,7 @@ const childTables = async (db) => (await db.query(
    FROM pg_constraint c JOIN pg_class cl ON cl.oid = c.conrelid JOIN pg_namespace ns ON ns.oid = cl.relnamespace
    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
    WHERE c.contype = 'f' AND c.confrelid = 'leads'::regclass AND array_length(c.conkey, 1) = 1
-     AND cl.relname NOT IN ('leads', 'lead_merges', 'lead_milestone_events', 'lead_payments')
+     AND cl.relname NOT IN ('leads', 'lead_merges', 'lead_milestone_events', 'lead_payments', 'lead_attribution', 'lead_attribution_events', 'booking_adjustments')
    ORDER BY 2`
 )).rows;
 
@@ -124,6 +124,41 @@ const moveRows = async (client, child, keepId, mergedIds) => {
     catch (e) { await client.query('ROLLBACK TO SAVEPOINT move_row'); if (e.code !== '23505') throw e; left.push(r.row); }
   }
   return { moved, left };
+};
+
+// First touch (the oldest lead's attribution) is kept; every absorbed lead's attribution is recorded on the survivor as a
+// 'merged_in' event, not adopted. Skipped silently where attribution is not installed yet.
+const installed = async (client, name) => (await client.query('SELECT to_regclass($1) IS NOT NULL AS ok', [name])).rows[0].ok;
+const recordMergedAttribution = async (client, tenantId, keepId, mergedIds) => {
+  if (!(await installed(client, 'lead_attribution_events'))) return;
+  await client.query(
+    `INSERT INTO lead_attribution_events (tenant_id, lead_id, event, after, reason)
+     SELECT $1, $2, 'merged_in', jsonb_build_object('merged_lead_id', a.lead_id, 'status', a.status, 'source', a.original_source, 'crm_campaign_id', a.effective_crm_campaign_id),
+            'a duplicate lead was merged in; the first touch of the surviving lead is kept'
+     FROM lead_attribution a WHERE a.lead_id = ANY($3::uuid[]) AND a.tenant_id = $1`, [tenantId, keepId, mergedIds]);
+};
+
+// Booked value: the survivor keeps its own booking. If it has none, it inherits the EARLIEST absorbed booking (labelled).
+// If both were booked, nothing is summed or discarded: the conflict is written to the financial audit log for review.
+const reconcileBooking = async (client, tenantId, keepId, mergedIds, userId) => {
+  if (!(await installed(client, 'booking_adjustments'))) return;
+  const rows = (await client.query(
+    `SELECT id, booked_value, booked_currency, booked_at, booked_basis FROM leads WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND booked_at IS NOT NULL ORDER BY booked_at, id`, [tenantId, [keepId, ...mergedIds]])).rows;
+  const keep = rows.find((r) => r.id === keepId);
+  const others = rows.filter((r) => r.id !== keepId);
+  if (!others.length) return;
+  if (!keep) {
+    const first = others[0];
+    await client.query(`UPDATE leads SET booked_value = $2, booked_currency = $3, booked_at = $4, booked_basis = 'inherited_from_merge', booked_source = 'merge' WHERE id = $1`,
+      [keepId, first.booked_value, first.booked_currency, first.booked_at]);
+  }
+  for (const o of others.filter((r) => keep || r !== others[0])) {
+    await client.query(
+      `INSERT INTO financial_audit_log (tenant_id, lead_id, entity, entity_id, action, before, after, reason, actor) VALUES ($1,$2,'booking',$2,'merge_booking_conflict',$3,$4,$5,$6)`,
+      [tenantId, keepId, JSON.stringify({ value: keep ? keep.booked_value : null, currency: keep ? keep.booked_currency : null }),
+        JSON.stringify({ merged_lead_id: o.id, value: o.booked_value, currency: o.booked_currency }),
+        'Both leads were booked before the merge. The surviving lead keeps its own booking; review this one.', userId]);
+  }
 };
 
 /**
@@ -155,6 +190,8 @@ const applyMerge = async (client, { tenantId, leads, reason, userId = null, ctx 
     );
   }
   await client.query('UPDATE leads SET merged_into_id = $3, merged_at = now() WHERE tenant_id = $1 AND id = ANY($2::uuid[])', [tenantId, plan.mergedIds, plan.keepId]);
+  await recordMergedAttribution(client, tenantId, plan.keepId, plan.mergedIds);
+  await reconcileBooking(client, tenantId, plan.keepId, plan.mergedIds, userId);
 
   for (const mergedId of plan.mergedIds) {
     await client.query(

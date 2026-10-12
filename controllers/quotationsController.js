@@ -204,9 +204,10 @@ const acceptQuotation = async (req, res) => {
       if (result.rows.length === 0) return null;
       let afterCommit = null;
       if (result.rows[0].lead_id) {
+        // The quote is set BEFORE the lead moves to Won, so the booked-value snapshot taken at the first Won captures this total.
+        await client.query('UPDATE leads SET deal_value = $1 WHERE id = $2 AND tenant_id = $3', [result.rows[0].total, result.rows[0].lead_id, req.tenantId]);
         const moved = await changeLeadStage({ client, tenantId: req.tenantId, leadId: result.rows[0].lead_id, newStageName: await wonStageName(req.tenantId) });
         afterCommit = moved.afterCommit;
-        await client.query('UPDATE leads SET deal_value = $1 WHERE id = $2 AND tenant_id = $3', [result.rows[0].total, result.rows[0].lead_id, req.tenantId]);
       }
       return { quotation: result.rows[0], afterCommit };
     });

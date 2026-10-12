@@ -18,6 +18,7 @@ router.post('/payments/:id/reverse', requirePermission('finance.manage'), ctrl.r
 router.post('/payments/:id/complete', requirePermission('finance.manage'), ctrl.completePayment);
 router.post('/payments/:id/cancel', requirePermission('finance.manage'), ctrl.cancelPayment);
 router.post('/payments/:id/correct', requirePermission('finance.manage'), ctrl.correctPayment);
+router.post('/leads/:id/booked-value/adjust', requirePermission('finance.manage'), ctrl.adjustBooking);
 router.patch('/payments/:id/details', requirePermission('finance.manage'), ctrl.amendPayment);
 
 module.exports = router;
