@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getGmbSettings, updateGmbSettings, draftReviewMessage, connectGmb, gmbOauthCallback, disconnectGmb } = require('../controllers/gmbController');
+const { getGmbSettings, updateGmbSettings, draftReviewMessage, connectGmb, gmbOauthCallback, disconnectGmb, refreshGmb } = require('../controllers/gmbController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 const { requirePermission } = require('../utils/permissions');
@@ -20,5 +20,6 @@ router.put('/settings', admin, updateGmbSettings);
 router.post('/draft-message', admin, draftReviewMessage);
 router.get('/oauth/connect', admin, connectGmb);
 router.post('/oauth/disconnect', admin, disconnectGmb);
+router.post('/refresh', admin, refreshGmb);
 
 module.exports = router;

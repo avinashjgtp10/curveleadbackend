@@ -6,14 +6,23 @@ const { decryptSecret } = require('../../utils/cryptoSecrets');
 // Needs Business Profile API access, which Google grants separately from OAuth.
 
 class GbpError extends Error {
-  constructor(message, { retryable = false, status } = {}) { super(message); this.name = 'GbpError'; this.retryable = retryable; this.status = status; }
+  constructor(message, { retryable = false, status, reason, activationUrl, service } = {}) {
+    super(message); this.name = 'GbpError'; this.retryable = retryable; this.status = status;
+    this.reason = reason; this.activationUrl = activationUrl; this.service = service; // Google's own diagnosis, for logs
+  }
 }
 
 const wrap = (e, what) => {
   if (e instanceof GbpError) return e;
   const status = e.response?.status;
   const msg = e.response?.data?.error?.message || e.message;
-  if (status === 403) return new GbpError(`Google refused ${what}: ${msg}. The Business Profile API must be enabled and approved for CurveLead's Google project.`, { status });
+  if (status === 403) {
+    // Google says WHY in error.details: SERVICE_DISABLED (API not switched on in the Cloud project),
+    // or PERMISSION_DENIED / not allowlisted (project not approved for this API).
+    const detail = (e.response?.data?.error?.details || []).find(d => d.reason) || {};
+    return new GbpError(`Google refused ${what}: ${msg}. The Business Profile API must be enabled and approved for CurveLead's Google project.`,
+      { status, reason: detail.reason || e.response?.data?.error?.status, activationUrl: detail.metadata?.activationUrl, service: detail.metadata?.serviceTitle || detail.metadata?.service });
+  }
   if (status === 401) return new GbpError('The Google connection has expired — reconnect Google in Integrations.', { status });
   return new GbpError(`Google ${what} failed: ${msg}`, { retryable: !status || status === 429 || status >= 500, status });
 };
