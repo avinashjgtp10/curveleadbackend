@@ -77,6 +77,7 @@ const gatherCampaignSnapshot = async (tenantId) => {
             COUNT(l.id) as total_leads
      FROM campaigns c
      LEFT JOIN leads l ON l.campaign_id = c.id AND l.merged_into_id IS NULL
+       AND NOT COALESCE((to_jsonb(l)->>'is_test_lead')::boolean, false)
      WHERE c.tenant_id = $1 AND c.status = 'active'
      GROUP BY c.id
      ORDER BY c.actual_spend DESC NULLS LAST

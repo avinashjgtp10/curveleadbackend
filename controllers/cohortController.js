@@ -1,4 +1,6 @@
 const cohort = require('../services/cohortMetrics');
+const timeline = require('../services/revenueTimeline');
+const advisor = require('../services/budgetAdvisor');
 const { reportingMode } = require('../utils/reportingFlags');
 
 // Cohort reporting API (Phase 1). Behind the workspace mode (off by default) and finance.view. Read-only.
@@ -34,6 +36,31 @@ const metrics = async (req, res) => {
   } catch (e) { fail(res, e); }
 };
 
+// GET /api/cohort/timeline?period=…: booked and collected money per week or month (same flag and permission as metrics).
+const revenueTimeline = async (req, res) => {
+  try {
+    const mode = await reportingMode(req.tenantId);
+    if (mode === 'off') return res.status(404).json({ error: 'feature_off' });
+    if (mode === 'shadow' && !isAdmin(req.user)) return res.status(403).json({ error: 'Cohort reporting is in preview for administrators only.' });
+    res.json({ mode, ...(await timeline.getTimeline(req)) });
+  } catch (e) { fail(res, e); }
+};
+
+// GET /api/cohort/recommendations?period=…&currency=INR: budget SUGGESTIONS from the cohort metrics. Read-only; never changes a budget,
+// and (unlike /metrics) never writes to the shadow log.
+const recommendations = async (req, res) => {
+  try {
+    const mode = await reportingMode(req.tenantId);
+    if (mode === 'off') return res.status(404).json({ error: 'feature_off' });
+    if (!isAdmin(req.user)) return res.status(403).json({ error: 'Budget suggestions are for administrators.' });
+    const { cohort: result } = await cohort.getCohortMetrics(req, { campaignIds: null });
+    const asked = String(req.query.currency || '').toUpperCase();
+    const currency = /^[A-Z]{3}$/.test(asked) ? asked : (result.totals.spend && result.totals.spend.currency) || (result.totals.booked[0] && result.totals.booked[0].currency) || null;
+    if (!currency) return res.json({ mode, currency: null, recommendations: [], warnings: ['No spend or bookings in this period yet.'], applied_automatically: false });
+    res.json({ mode, from: result.from, to: result.to, ...advisor.advise({ campaigns: result.campaigns, quality: result.quality, currency }) });
+  } catch (e) { fail(res, e); }
+};
+
 // GET /api/cohort/health (administrators): can the numbers be trusted yet?
 const health = async (req, res) => {
   try {
@@ -43,4 +70,4 @@ const health = async (req, res) => {
   } catch (e) { fail(res, e); }
 };
 
-module.exports = { metrics, health, parseCampaigns };
+module.exports = { metrics, revenueTimeline, recommendations, health, parseCampaigns };
