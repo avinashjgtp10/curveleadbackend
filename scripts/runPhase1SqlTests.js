@@ -41,7 +41,8 @@ const childEnv = (testUrl) => {
     DB_SSL: u.searchParams.has('sslmode') && u.searchParams.get('sslmode') !== 'disable' ? 'true' : 'false',
   };
 };
-const testFiles = () => fs.readdirSync(path.join(__dirname, '..', 'tests')).filter((f) => /^phase1.*Sql\.test\.js$/.test(f)).map((f) => `tests/${f}`).sort();
+// phase1Sql.test.js is an older test that needs a full production schema; only the new phase1<Name>Sql tests run here.
+const testFiles = () => fs.readdirSync(path.join(__dirname, '..', 'tests')).filter((f) => /^phase1.+Sql\.test\.js$/.test(f)).map((f) => `tests/${f}`).sort();
 
 const main = async () => {
   if (!process.argv.includes('--i-have-authorization')) { console.error('Refusing: pass --i-have-authorization.'); process.exit(2); }
