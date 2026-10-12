@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { getIdentityMode, entityJoinOn } = require('./adIdentity');
 const { localeFromSettings } = require('../utils/workspaceLocale');
 
 // ONE definition of lead / spend / conversion metrics, used by every screen (Batch 1 A):
@@ -99,10 +100,11 @@ const day = (d, tz) => new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'Asia/
 
 // Spend + platform-reported leads per CRM campaign for the range, from daily insights.
 const adSpend = async (scope, campaignIds = null) => {
+  const mode = await getIdentityMode({ query });
   const r = await query(
     `SELECT ac.campaign_id, a.currency, COALESCE(sum(i.spend), 0)::float AS spend, COALESCE(sum(i.leads), 0)::int AS platform_leads
      FROM ad_campaigns ac JOIN ad_accounts a ON a.id = ac.ad_account_id AND a.tenant_id = ac.tenant_id
-     LEFT JOIN ad_insights_daily i ON i.tenant_id = ac.tenant_id AND i.entity_type = 'campaign' AND i.entity_id = ac.external_id
+     LEFT JOIN ad_insights_daily i ON ${entityJoinOn(mode, 'i', 'ac', 'campaign')}
        AND i.date BETWEEN $2::date AND $3::date
      WHERE ac.tenant_id = $1 AND ac.campaign_id IS NOT NULL AND ($4::uuid[] IS NULL OR ac.campaign_id = ANY($4::uuid[]))
      GROUP BY ac.campaign_id, a.currency`,

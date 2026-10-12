@@ -35,16 +35,18 @@ test('Aug2026 campaign: card, detail, Meta Ads and Reports agree for the same ra
     }
     const campaign = (await db.query(`INSERT INTO campaigns (tenant_id, name, source, status, meta_campaign_id, actual_spend) VALUES ($1,'Salonox_LeadGen_India_Model_Aug2026','meta_ads','active','M-AUG',42135.77) RETURNING id`, [t])).rows[0].id;
     const account = (await db.query(`INSERT INTO ad_accounts (tenant_id, external_id, name, currency, timezone_name, is_primary) VALUES ($1,'act_1','Salonox','INR',$2,true) RETURNING id`, [t, TZ])).rows[0].id;
-    await db.query(`INSERT INTO ad_campaigns (tenant_id, ad_account_id, external_id, campaign_id, name, status, effective_status) VALUES ($1,$2,'M-AUG',$3,'Salonox_LeadGen_India_Model_Aug2026','ACTIVE','ACTIVE')`, [t, account, campaign]);
+    // Once the ad identity keys are enforced (CHECK constraints) a raw insert must carry them, like the real writers do.
+    const keyed = (await db.query(`SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'ad_insights_daily' AND column_name = 'entity_key'`)).rows.length > 0;
+    await db.query(`INSERT INTO ad_campaigns (tenant_id, ad_account_id, external_id, campaign_id, name, status, effective_status${keyed ? ', external_key, provider' : ''}) VALUES ($1,$2,'M-AUG',$3,'Salonox_LeadGen_India_Model_Aug2026','ACTIVE','ACTIVE'${keyed ? ", 'M-AUG', 'meta'" : ''})`, [t, account, campaign]);
 
     // Meta: 69 leads and ₹28,083 (₹407 / lead) over the last 30 days; more spend before that.
     const now = Date.now();
     for (let d = 0; d < 30; d++) {
-      await db.query(`INSERT INTO ad_insights_daily (tenant_id, ad_account_id, entity_type, entity_id, date, spend, leads) VALUES ($1,$2,'campaign','M-AUG',$3,$4,$5)`,
+      await db.query(`INSERT INTO ad_insights_daily (tenant_id, ad_account_id, entity_type, entity_id, date, spend, leads${keyed ? ', entity_key, provider' : ''}) VALUES ($1,$2,'campaign','M-AUG',$3,$4,$5${keyed ? ", 'M-AUG', 'meta'" : ''})`,
         [t, account, ymd(new Date(now - d * DAY)), d < 29 ? 936.1 : 936.1 + 28083 - 936.1 * 30, d < 9 ? 3 : 2]);
     }
     for (let d = 30; d < 60; d++) {
-      await db.query(`INSERT INTO ad_insights_daily (tenant_id, ad_account_id, entity_type, entity_id, date, spend, leads) VALUES ($1,$2,'campaign','M-AUG',$3,470,5)`, [t, account, ymd(new Date(now - d * DAY))]);
+      await db.query(`INSERT INTO ad_insights_daily (tenant_id, ad_account_id, entity_type, entity_id, date, spend, leads${keyed ? ', entity_key, provider' : ''}) VALUES ($1,$2,'campaign','M-AUG',$3,470,5${keyed ? ", 'M-AUG', 'meta'" : ''})`, [t, account, ymd(new Date(now - d * DAY))]);
     }
 
     // CRM: 225 leads in total — 4 this month, more earlier in the last 30 days, the rest older.

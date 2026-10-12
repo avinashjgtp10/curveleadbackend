@@ -2,6 +2,7 @@ const { query, transaction } = require('../../config/db');
 const gads = require('../../utils/googleAds');
 const { getGoogleAccountWithToken } = require('./accounts');
 const { syncRange } = require('../metaAds/sync');
+const { GOOGLE, adEntityKey, getIdentityMode, conflictTarget, writesKeys, dualWriteSet } = require('../adIdentity');
 
 // Google Ads sync for one account: campaigns → ad groups → ads into ad_campaigns /
 // ad_adsets / ad_ads, daily cost/impressions/clicks/conversions into ad_insights_daily,
@@ -95,88 +96,117 @@ const findOrCreateGoogleCampaign = async (db, { tenantId, googleCampaignId, name
    ON CONFLICT (tenant_id, google_campaign_id) WHERE google_campaign_id IS NOT NULL DO UPDATE SET updated_at = campaigns.updated_at
    RETURNING id`, [tenantId, name || `Google Ads campaign ${googleCampaignId}`, googleCampaignId])).rows[0].id;
 
-const saveHierarchy = async ({ tenantId, adAccountId, campaigns, adGroups, ads }) => transaction(async (client) => {
-  const campaignIds = new Map(), groupIds = new Map();
-  for (const c of campaigns) {
-    const crmId = await findOrCreateGoogleCampaign(client, { tenantId, googleCampaignId: c.external_id, name: c.name });
-    const { rows } = await client.query(
-      `INSERT INTO ad_campaigns (tenant_id, ad_account_id, external_id, campaign_id, name, objective, status, effective_status, daily_budget_paise, lifetime_budget_paise,
-                                 budget_resource, budget_shared, synced_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
-       ON CONFLICT (tenant_id, external_id) DO UPDATE SET ad_account_id = EXCLUDED.ad_account_id, campaign_id = COALESCE(ad_campaigns.campaign_id, EXCLUDED.campaign_id),
-         name = EXCLUDED.name, objective = EXCLUDED.objective, status = EXCLUDED.status, effective_status = EXCLUDED.effective_status,
-         daily_budget_paise = EXCLUDED.daily_budget_paise, lifetime_budget_paise = EXCLUDED.lifetime_budget_paise,
-         budget_resource = EXCLUDED.budget_resource, budget_shared = EXCLUDED.budget_shared, synced_at = now()
-       RETURNING id, campaign_id`,
-      [tenantId, adAccountId, c.external_id, crmId, c.name, c.objective, c.status, c.effective_status, c.daily_budget_paise, c.lifetime_budget_paise,
-        c.budget_resource || null, !!c.budget_shared]);
-    campaignIds.set(c.external_id, rows[0].id);
-    await client.query(
-      `UPDATE campaigns SET status = $3, daily_budget = COALESCE($4, daily_budget), lifetime_budget = COALESCE($5, lifetime_budget),
-              budget = COALESCE(NULLIF($5::numeric, 0), $4::numeric, budget), updated_at = now()
-       WHERE tenant_id = $1 AND id = $2`,
-      [tenantId, rows[0].campaign_id, c.effective_status === 'ACTIVE' ? 'active' : 'paused',
-        c.daily_budget_paise != null ? c.daily_budget_paise / 100 : null, c.lifetime_budget_paise != null ? c.lifetime_budget_paise / 100 : null]);
-    // Lead-form leads that arrived before the campaign was known.
-    await client.query(
-      'UPDATE leads SET campaign_id = $3 WHERE tenant_id = $1 AND google_campaign_id = $2 AND campaign_id IS NULL AND merged_into_id IS NULL',
-      [tenantId, c.external_id, rows[0].campaign_id]);
-  }
-  for (const g of adGroups) {
-    const parent = campaignIds.get(g.campaign_external_id);
-    if (!parent) continue;
-    const { rows } = await client.query(
-      `INSERT INTO ad_adsets (tenant_id, ad_campaign_id, external_id, name, status, effective_status, optimization_goal, synced_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7, now())
-       ON CONFLICT (tenant_id, external_id) DO UPDATE SET ad_campaign_id = EXCLUDED.ad_campaign_id, name = EXCLUDED.name, status = EXCLUDED.status,
-         effective_status = EXCLUDED.effective_status, optimization_goal = EXCLUDED.optimization_goal, synced_at = now()
-       RETURNING id`, [tenantId, parent, g.external_id, g.name, g.status, g.effective_status, g.optimization_goal]);
-    groupIds.set(g.external_id, rows[0].id);
-  }
-  for (const a of ads) {
-    const parent = groupIds.get(a.adset_external_id);
-    if (!parent) continue;
-    await client.query(
-      `INSERT INTO ad_ads (tenant_id, ad_adset_id, external_id, name, status, effective_status, creative, synced_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7, now())
-       ON CONFLICT (tenant_id, external_id) DO UPDATE SET ad_adset_id = EXCLUDED.ad_adset_id, name = EXCLUDED.name, status = EXCLUDED.status,
-         effective_status = EXCLUDED.effective_status, creative = EXCLUDED.creative, synced_at = now()`,
-      [tenantId, parent, a.external_id, a.name, a.status, a.effective_status, JSON.stringify(a.creative)]);
-  }
-});
+const saveHierarchy = async ({ tenantId, adAccountId, campaigns, adGroups, ads }) => {
+  // The mode is read on the pool BEFORE the transaction so a failed probe can never poison it.
+  const mode = await getIdentityMode({ query });
+  const dual = writesKeys(mode); // 'dual_write' and 'scoped' both fill the new key columns
+  return transaction(async (client) => {
+    const campaignIds = new Map(), groupIds = new Map();
+    for (const c of campaigns) {
+      const crmId = await findOrCreateGoogleCampaign(client, { tenantId, googleCampaignId: c.external_id, name: c.name });
+      const { rows } = await client.query(
+        `INSERT INTO ad_campaigns (tenant_id, ad_account_id, external_id, campaign_id, name, objective, status, effective_status, daily_budget_paise, lifetime_budget_paise,
+                                   budget_resource, budget_shared, synced_at${dual ? ', provider, external_key' : ''})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now()${dual ? ", 'google', $3" : ''})
+         ON CONFLICT ${conflictTarget(mode, 'ad_campaigns')} DO UPDATE SET ad_account_id = EXCLUDED.ad_account_id, campaign_id = COALESCE(ad_campaigns.campaign_id, EXCLUDED.campaign_id),
+           name = EXCLUDED.name, objective = EXCLUDED.objective, status = EXCLUDED.status, effective_status = EXCLUDED.effective_status,
+           daily_budget_paise = EXCLUDED.daily_budget_paise, lifetime_budget_paise = EXCLUDED.lifetime_budget_paise,
+           budget_resource = EXCLUDED.budget_resource, budget_shared = EXCLUDED.budget_shared, synced_at = now()${dualWriteSet(mode, 'ad_campaigns')}
+         RETURNING id, campaign_id`,
+        [tenantId, adAccountId, c.external_id, crmId, c.name, c.objective, c.status, c.effective_status, c.daily_budget_paise, c.lifetime_budget_paise,
+          c.budget_resource || null, !!c.budget_shared]);
+      campaignIds.set(c.external_id, rows[0].id);
+      await client.query(
+        `UPDATE campaigns SET status = $3, daily_budget = COALESCE($4, daily_budget), lifetime_budget = COALESCE($5, lifetime_budget),
+                budget = COALESCE(NULLIF($5::numeric, 0), $4::numeric, budget), updated_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, rows[0].campaign_id, c.effective_status === 'ACTIVE' ? 'active' : 'paused',
+          c.daily_budget_paise != null ? c.daily_budget_paise / 100 : null, c.lifetime_budget_paise != null ? c.lifetime_budget_paise / 100 : null]);
+      // Lead-form leads that arrived before the campaign was known.
+      await client.query(
+        'UPDATE leads SET campaign_id = $3 WHERE tenant_id = $1 AND google_campaign_id = $2 AND campaign_id IS NULL AND merged_into_id IS NULL',
+        [tenantId, c.external_id, rows[0].campaign_id]);
+    }
+    for (const g of adGroups) {
+      const parent = campaignIds.get(g.campaign_external_id);
+      if (!parent) continue;
+      const { rows } = await client.query(
+        `INSERT INTO ad_adsets (tenant_id, ad_campaign_id, external_id, name, status, effective_status, optimization_goal, synced_at${dual ? ', ad_account_id, provider, external_key' : ''})
+         VALUES ($1,$2,$3,$4,$5,$6,$7, now()${dual ? ", $8, 'google', $3" : ''})
+         ON CONFLICT ${conflictTarget(mode, 'ad_adsets')} DO UPDATE SET ad_campaign_id = EXCLUDED.ad_campaign_id, name = EXCLUDED.name, status = EXCLUDED.status,
+           effective_status = EXCLUDED.effective_status, optimization_goal = EXCLUDED.optimization_goal, synced_at = now()${dualWriteSet(mode, 'ad_adsets')}
+         RETURNING id`, [tenantId, parent, g.external_id, g.name, g.status, g.effective_status, g.optimization_goal, ...(dual ? [adAccountId] : [])]);
+      groupIds.set(g.external_id, rows[0].id);
+    }
+    let unkeyed = 0;
+    for (const a of ads) {
+      const parent = groupIds.get(a.adset_external_id);
+      if (!parent) continue;
+      // Google ad IDs are scoped to the ad group: external_key is "<adGroupId>~<adId>".
+      const adKey = adEntityKey(GOOGLE, 'ad', { id: a.external_id, adGroupId: a.adset_external_id });
+      if (dual && !adKey) { unkeyed++; continue; } // never store a keyless row once keys are being written
+      await client.query(
+        `INSERT INTO ad_ads (tenant_id, ad_adset_id, external_id, name, status, effective_status, creative, synced_at${dual ? ', ad_account_id, provider, external_key' : ''})
+         VALUES ($1,$2,$3,$4,$5,$6,$7, now()${dual ? ", $8, 'google', $9" : ''})
+         ON CONFLICT ${conflictTarget(mode, 'ad_ads')} DO UPDATE SET ad_adset_id = EXCLUDED.ad_adset_id, name = EXCLUDED.name, status = EXCLUDED.status,
+           effective_status = EXCLUDED.effective_status, creative = EXCLUDED.creative, synced_at = now()${dualWriteSet(mode, 'ad_ads')}`,
+        [tenantId, parent, a.external_id, a.name, a.status, a.effective_status, JSON.stringify(a.creative), ...(dual ? [adAccountId, adKey] : [])]);
+    }
+    if (unkeyed) console.warn(`[adIdentity] google hierarchy: ${unkeyed} ad(s) had no ad group id and were not stored (account ${adAccountId})`);
+  });
+};
 
 // Campaign rows come straight from Google (so Performance Max, which has no ad groups
 // or ads, is counted); ad group and ad rows are the drill-down; the account row is the
 // sum of campaigns.
-const saveDailyMetrics = async ({ tenantId, adAccountId, externalAccountId, since, until, rows }) => transaction(async (client) => {
-  await client.query('DELETE FROM ad_insights_daily WHERE tenant_id = $1 AND ad_account_id = $2 AND date BETWEEN $3 AND $4', [tenantId, adAccountId, since, until]);
-  let saved = 0;
-  for (const [level, list] of Object.entries(rows)) {
-    if (!list.length) continue;
+// Canonical account-scoped key for a daily row. Google ad IDs are only unique inside their ad group.
+const dailyEntityKey = (level, r) => (level === 'ad'
+  ? adEntityKey(GOOGLE, 'ad', { id: r.entity_id, adGroupId: r.adset_external_id })
+  : adEntityKey(GOOGLE, level, { id: r.entity_id }));
+
+const saveDailyMetrics = async ({ tenantId, adAccountId, externalAccountId, since, until, rows }) => {
+  const mode = await getIdentityMode({ query });
+  const dual = writesKeys(mode);
+  return transaction(async (client) => {
+    await client.query('DELETE FROM ad_insights_daily WHERE tenant_id = $1 AND ad_account_id = $2 AND date BETWEEN $3 AND $4', [tenantId, adAccountId, since, until]);
+    let saved = 0, unkeyed = 0;
+    for (const [level, list] of Object.entries(rows)) {
+      if (!list.length) continue;
+      let keyed = list.map((r) => ({ ...r, entity_key: dailyEntityKey(level, r) }));
+      if (dual) {
+        // A row without a canonical key (Google ad with no ad group id) is counted and logged, not stored with a NULL
+        // or guessed key: a NULL key would sit outside the unique index and be rejected once the constraints are validated.
+        const before = keyed.length;
+        keyed = keyed.filter((r) => r.entity_key);
+        unkeyed += before - keyed.length;
+        if (!keyed.length) continue;
+      }
+      await client.query(
+        `INSERT INTO ad_insights_daily (tenant_id, ad_account_id, entity_type, entity_id, date, spend, impressions, clicks, ctr, cpc, leads, cpl, actions, campaign_external_id, adset_external_id${dual ? ', entity_key, provider' : ''})
+         SELECT $1, $2, $3, r.entity_id, r.date, r.spend, r.impressions, r.clicks, r.ctr, r.cpc, r.leads, r.cpl, r.actions, r.campaign_external_id, r.adset_external_id${dual ? ", r.entity_key, 'google'" : ''}
+         FROM jsonb_to_recordset($4::jsonb) AS r(entity_id text, ${dual ? 'entity_key text, ' : ''}date date, spend numeric, impressions bigint, clicks bigint, ctr numeric, cpc numeric,
+              leads int, cpl numeric, actions jsonb, campaign_external_id text, adset_external_id text)
+         ON CONFLICT ${conflictTarget(mode, 'ad_insights_daily')} DO UPDATE SET ad_account_id = EXCLUDED.ad_account_id, spend = EXCLUDED.spend,
+           impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks, ctr = EXCLUDED.ctr, cpc = EXCLUDED.cpc, leads = EXCLUDED.leads, cpl = EXCLUDED.cpl,
+           actions = EXCLUDED.actions, campaign_external_id = EXCLUDED.campaign_external_id, adset_external_id = EXCLUDED.adset_external_id, synced_at = now()${dualWriteSet(mode, 'ad_insights_daily')}`,
+        [tenantId, adAccountId, level, JSON.stringify(keyed)]);
+      saved += keyed.length;
+    }
     await client.query(
-      `INSERT INTO ad_insights_daily (tenant_id, ad_account_id, entity_type, entity_id, date, spend, impressions, clicks, ctr, cpc, leads, cpl, actions, campaign_external_id, adset_external_id)
-       SELECT $1, $2, $3, r.entity_id, r.date, r.spend, r.impressions, r.clicks, r.ctr, r.cpc, r.leads, r.cpl, r.actions, r.campaign_external_id, r.adset_external_id
-       FROM jsonb_to_recordset($4::jsonb) AS r(entity_id text, date date, spend numeric, impressions bigint, clicks bigint, ctr numeric, cpc numeric,
-            leads int, cpl numeric, actions jsonb, campaign_external_id text, adset_external_id text)
-       ON CONFLICT (tenant_id, entity_type, entity_id, date) DO UPDATE SET ad_account_id = EXCLUDED.ad_account_id, spend = EXCLUDED.spend,
-         impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks, ctr = EXCLUDED.ctr, cpc = EXCLUDED.cpc, leads = EXCLUDED.leads, cpl = EXCLUDED.cpl,
-         actions = EXCLUDED.actions, campaign_external_id = EXCLUDED.campaign_external_id, adset_external_id = EXCLUDED.adset_external_id, synced_at = now()`,
-      [tenantId, adAccountId, level, JSON.stringify(list)]);
-    saved += list.length;
-  }
-  await client.query(
-    `INSERT INTO ad_insights_daily (tenant_id, ad_account_id, entity_type, entity_id, date, spend, impressions, clicks, ctr, cpc, leads, cpl)
-     SELECT $1, $2, 'account', $5, date, sum(spend), sum(impressions), sum(clicks),
-            CASE WHEN sum(impressions) > 0 THEN round(sum(clicks)::numeric * 100 / sum(impressions), 4) END,
-            CASE WHEN sum(clicks) > 0 THEN round(sum(spend) / sum(clicks), 4) END,
-            sum(leads), CASE WHEN sum(leads) > 0 THEN round(sum(spend) / sum(leads), 2) END
-     FROM ad_insights_daily WHERE tenant_id = $1 AND ad_account_id = $2 AND entity_type = 'campaign' AND date BETWEEN $3 AND $4
-     GROUP BY date
-     ON CONFLICT (tenant_id, entity_type, entity_id, date) DO UPDATE SET spend = EXCLUDED.spend, impressions = EXCLUDED.impressions,
-       clicks = EXCLUDED.clicks, ctr = EXCLUDED.ctr, cpc = EXCLUDED.cpc, leads = EXCLUDED.leads, cpl = EXCLUDED.cpl, synced_at = now()`,
-    [tenantId, adAccountId, since, until, externalAccountId]);
-  return saved;
-});
+      `INSERT INTO ad_insights_daily (tenant_id, ad_account_id, entity_type, entity_id, date, spend, impressions, clicks, ctr, cpc, leads, cpl${dual ? ', entity_key, provider' : ''})
+       SELECT $1, $2, 'account', $5, date, sum(spend), sum(impressions), sum(clicks),
+              CASE WHEN sum(impressions) > 0 THEN round(sum(clicks)::numeric * 100 / sum(impressions), 4) END,
+              CASE WHEN sum(clicks) > 0 THEN round(sum(spend) / sum(clicks), 4) END,
+              sum(leads), CASE WHEN sum(leads) > 0 THEN round(sum(spend) / sum(leads), 2) END${dual ? ", $5, 'google'" : ''}
+       FROM ad_insights_daily WHERE tenant_id = $1 AND ad_account_id = $2 AND entity_type = 'campaign' AND date BETWEEN $3 AND $4
+       GROUP BY date
+       ON CONFLICT ${conflictTarget(mode, 'ad_insights_daily')} DO UPDATE SET spend = EXCLUDED.spend, impressions = EXCLUDED.impressions,
+         clicks = EXCLUDED.clicks, ctr = EXCLUDED.ctr, cpc = EXCLUDED.cpc, leads = EXCLUDED.leads, cpl = EXCLUDED.cpl, synced_at = now()${dualWriteSet(mode, 'ad_insights_daily')}`,
+      [tenantId, adAccountId, since, until, externalAccountId]);
+    if (unkeyed) console.warn(`[adIdentity] google daily metrics: ${unkeyed} row(s) had no ad group id and were not stored (account ${adAccountId})`);
+    return saved;
+  });
+};
 
 const syncGoogleAccount = async ({ tenantId, adAccountId }, deps = {}) => {
   const found = await (deps.getGoogleAccountWithToken || getGoogleAccountWithToken)(tenantId, adAccountId);
@@ -217,4 +247,5 @@ const syncGoogleAccount = async ({ tenantId, adAccountId }, deps = {}) => {
   }
 };
 
-module.exports = { syncGoogleAccount, saveHierarchy, parseCampaign, parseAdGroup, parseAd, parseMetrics, effectiveStatus, findOrCreateGoogleCampaign, GAQL };
+module.exports = {
+  dailyEntityKey, syncGoogleAccount, saveHierarchy, saveDailyMetrics, parseCampaign, parseAdGroup, parseAd, parseMetrics, effectiveStatus, findOrCreateGoogleCampaign, GAQL };
