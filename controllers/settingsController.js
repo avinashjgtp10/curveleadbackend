@@ -1,6 +1,6 @@
 const path = require('path');
 const { query } = require('../config/db');
-const { stageFlagError, checkStageUpdate } = require('../utils/stageRules');
+const { stageFlagError, checkStageUpdate, stageNameError, duplicateStageName, checkStageEdit, checkStageDelete } = require('../utils/stageRules');
 const { uploadToS3 } = require('../config/s3');
 const { localeFromSettings, validTimezone, validCurrency } = require('../utils/workspaceLocale');
 
@@ -148,7 +148,9 @@ const getStages = async (req, res) => {
 const createStage = async (req, res) => {
   try {
     const { name, color, is_won, is_lost, meta_event_name } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: 'Stage name is required.' });
+    const nameError = stageNameError(name);
+    if (nameError) return res.status(400).json({ error: nameError });
+    if (await duplicateStageName({ tenantId: req.tenantId, name })) return res.status(409).json({ error: 'A stage with this name already exists.' });
     const existing = await query('SELECT count(*)::int AS n FROM lead_stages WHERE tenant_id = $1', [req.tenantId]);
     const flagError = stageFlagError({ isWon: !!is_won, isLost: !!is_lost, isFirst: existing.rows[0].n === 0 });
     if (flagError) return res.status(422).json({ error: flagError });
@@ -174,6 +176,9 @@ const updateStage = async (req, res) => {
     const { name, color, is_active, is_won, is_lost, meta_event_name } = req.body;
     const flagError = await checkStageUpdate({ tenantId: req.tenantId, stageId: req.params.id, isWon: is_won, isLost: is_lost });
     if (flagError) return res.status(422).json({ error: flagError });
+    // Phase 1 stage integrity: a rename, deactivation or delete must not orphan leads or history.
+    const edit = await checkStageEdit({ tenantId: req.tenantId, stageId: req.params.id, patch: { name, is_active, is_won, is_lost } });
+    if (edit.error) return res.status(edit.status || 422).json({ error: edit.error });
     const result = await query(
       `UPDATE lead_stages
        SET name = COALESCE($1, name), color = COALESCE($2, color),
@@ -183,13 +188,15 @@ const updateStage = async (req, res) => {
       [name ?? null, color ?? null, is_active ?? null, is_won ?? null, is_lost ?? null, meta_event_name ?? null, req.params.id, req.tenantId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Stage not found.' });
-    res.json({ stage: result.rows[0] });
+    res.json({ stage: result.rows[0], ...(edit.warnings && edit.warnings.length ? { warnings: edit.warnings } : {}) });
   } catch (error) { console.error('updateStage error:', error); res.status(500).json({ error: 'Failed.' }); }
 };
 
 // DELETE /api/settings/stages/:id
 const deleteStage = async (req, res) => {
   try {
+    const guard = await checkStageDelete({ tenantId: req.tenantId, stageId: req.params.id });
+    if (guard.error) return res.status(guard.status || 409).json({ error: guard.error });
     const result = await query('DELETE FROM lead_stages WHERE id = $1 AND tenant_id = $2 RETURNING id',
       [req.params.id, req.tenantId]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Stage not found.' });

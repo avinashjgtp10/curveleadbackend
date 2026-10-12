@@ -162,7 +162,7 @@ const reviewFollowup = async (req,res) => {
    if(req.body.action==='lost') {
     const stage=(await c.query('SELECT name FROM lead_stages WHERE tenant_id=$1 AND is_lost=true AND is_active=true ORDER BY pos LIMIT 1',[req.tenantId])).rows[0];
     if(!stage) throw Object.assign(new Error('Configure a Lost stage first.'),{status:422});
-    await c.query('UPDATE leads SET stage=$1,updated_at=now() WHERE id=$2 AND tenant_id=$3',[stage.name,row.lead_id,req.tenantId]);
+    await c.query("UPDATE leads SET stage=$1,updated_at=now(),lost_at=CASE WHEN lower(coalesce(stage,''))<>lower($1) THEN now() ELSE lost_at END WHERE id=$2 AND tenant_id=$3",[stage.name,row.lead_id,req.tenantId]);
     await c.query('UPDATE lead_followups SET dismissed_at=now() WHERE lead_id=$1 AND tenant_id=$2 AND is_completed=false',[row.lead_id,req.tenantId]);
    } else await c.query('UPDATE lead_followups SET dismissed_at=now() WHERE id=$1 AND tenant_id=$2',[row.id,req.tenantId]);
    await c.query(`INSERT INTO lead_activities(tenant_id,lead_id,activity_type,title,description,created_by)

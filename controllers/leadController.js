@@ -390,9 +390,11 @@ const updateLead = async (req, res) => {
       );
       stageIsLost = !!stageInfo.rows[0]?.is_lost;
       stageIsWon = !!stageInfo.rows[0]?.is_won;
-      if (stageInfo.rows[0]?.is_won && req.body.stage !== prev.stage) updates.push('won_at = NOW()');
+      // won_at is the FIRST time the lead reached a won stage: COALESCE means won-to-won, or lost-to-won, never moves it.
+      if (stageInfo.rows[0]?.is_won && req.body.stage !== prev.stage) updates.push('won_at = COALESCE(won_at, NOW())');
       if (stageInfo.rows[0]?.is_lost) {
-        updates.push('lost_at = NOW()');
+        // lost_at only moves on a real change into a lost stage, not when other fields of a lost lead are edited.
+        if (req.body.stage !== prev.stage) updates.push('lost_at = NOW()');
         if (!req.body.lost_reason) {
           return res.status(400).json({ error: 'A reason is required when marking a lead as lost.', requires_lost_reason: true });
         }
@@ -947,7 +949,18 @@ const bulkUpdate = async (req, res) => {
     const params = [req.tenantId];
     let i = 2;
 
-    if (stage !== undefined) { sets.push(`stage = $${i++}`); params.push(stage); }
+    // The stage and its milestone columns are set in ONE statement (atomic with the history trigger):
+    // won_at keeps the FIRST won date, lost_at moves only on a real change. Same rules as updateLead.
+    let stageName = stage;
+    if (stage !== undefined) {
+      const info = (await query('SELECT name, is_won, is_lost FROM lead_stages WHERE tenant_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1', [req.tenantId, stage])).rows[0];
+      stageName = info?.name || stage;
+      const at = i;
+      sets.push(`stage = $${i++}`); params.push(stageName);
+      const changing = `LOWER(COALESCE(stage, '')) <> LOWER($${at})`;
+      if (info?.is_won) sets.push(`won_at = CASE WHEN ${changing} THEN COALESCE(won_at, NOW()) ELSE won_at END`);
+      if (info?.is_lost) sets.push(`lost_at = CASE WHEN ${changing} THEN NOW() ELSE lost_at END`);
+    }
     if (assigned_to !== undefined) { sets.push(`assigned_to = $${i++}`); params.push(assigned_to || null); }
     if (!sets.length) return res.status(400).json({ error: 'Nothing to update.' });
 
@@ -961,11 +974,11 @@ const bulkUpdate = async (req, res) => {
     );
 
     if (stage) {
-      await Promise.all(previous.rows.filter(row => row.stage !== stage).map(row =>
+      await Promise.all(previous.rows.filter(row => row.stage !== stageName).map(row =>
         query(
           `INSERT INTO lead_activities (tenant_id, lead_id, activity_type, title, created_by)
            VALUES ($1,$2,'stage_change',$3,$4)`,
-          [req.tenantId, row.id, statusChangeTitle(row.stage, stage, 'Stage'), req.user.id]
+          [req.tenantId, row.id, statusChangeTitle(row.stage, stageName, 'Stage'), req.user.id]
         ).catch(() => {})
       ));
     }
