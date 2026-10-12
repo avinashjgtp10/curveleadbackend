@@ -41,6 +41,7 @@ const resolveCampaignFromAdId = async ({ tenantId, adId }) => {
   const local = await query(
     `SELECT ac.external_id AS campaign_external_id, ac.name AS campaign_name, s.external_id AS adset_id, s.name AS adset_name, ad.name AS ad_name
      FROM ad_ads ad JOIN ad_adsets s ON s.id = ad.ad_adset_id JOIN ad_campaigns ac ON ac.id = s.ad_campaign_id
+     JOIN ad_accounts acc ON acc.id = ac.ad_account_id AND acc.tenant_id = ac.tenant_id AND acc.provider = 'meta'
      WHERE ad.tenant_id = $1 AND ad.external_id = $2`, [tenantId, String(adId)]
   ).catch(() => ({ rows: [] }));
   if (local.rows[0]) {

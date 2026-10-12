@@ -1,6 +1,7 @@
 const { normalizeSource } = require('../utils/dataQuality');
 const { metricScope, getMetrics, getBreakdown } = require('../services/metrics');
 const { query } = require('../config/db');
+const { getIdentityMode, entityJoinOn } = require('../services/adIdentity');
 const { rankCampaigns } = require('../utils/campaignInsights');
 
 // GET /api/campaigns - List all campaigns with metrics
@@ -133,6 +134,7 @@ const getCampaignAds = async (req, res) => {
 
     // Ads module (Ads Manager) data: ads under this CRM campaign with spend summed over the
     // synced days. Falls back to the legacy meta_ads table for workspaces not migrated yet.
+    const mode = await getIdentityMode({ query });
     const modern = await query(
       `SELECT ad.id, ad.external_id AS meta_ad_id, ad.name, ad.effective_status,
               COALESCE(sum(i.spend), 0)::float AS spend, COALESCE(sum(i.impressions), 0)::bigint AS impressions,
@@ -144,7 +146,7 @@ const getCampaignAds = async (req, res) => {
        FROM ad_campaigns ac
        JOIN ad_adsets s ON s.ad_campaign_id = ac.id AND s.tenant_id = ac.tenant_id
        JOIN ad_ads ad ON ad.ad_adset_id = s.id AND ad.tenant_id = ac.tenant_id
-       LEFT JOIN ad_insights_daily i ON i.tenant_id = ad.tenant_id AND i.entity_type = 'ad' AND i.entity_id = ad.external_id
+       LEFT JOIN ad_insights_daily i ON ${entityJoinOn(mode, 'i', 'ad', 'ad')}
        WHERE ac.tenant_id = $2 AND ac.campaign_id = $1
        GROUP BY ad.id ORDER BY spend DESC, ad.name`,
       [req.params.id, req.tenantId]

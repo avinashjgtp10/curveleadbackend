@@ -2,6 +2,7 @@ const { query, transaction } = require('../../config/db');
 const { graphPaged } = require('../../utils/metaGraph');
 const { findOrCreateMetaCampaign } = require('../../utils/metaCampaignMatch');
 const { parseBudgetPaise } = require('./parseInsights');
+const { getIdentityMode, conflictTarget, writesKeys, dualWriteSet } = require('../adIdentity');
 
 // Campaign → adset → ad, with creative, in one field-expanded request per page of
 // campaigns. Nested lists over 100 items are completed with their own paging.
@@ -46,17 +47,20 @@ const saveHierarchy = async ({ tenantId, adAccountId, campaigns }) => {
   const crmIds = new Map();
   for (const c of campaigns) crmIds.set(c.id, await findOrCreateMetaCampaign({ tenantId, campaignId: c.id, campaignName: c.name }));
 
+  // Read on the pool before the transaction so a failed probe can never poison it.
+  const mode = await getIdentityMode({ query });
+  const dual = writesKeys(mode); // 'dual_write' and 'scoped' both fill the new key columns
   await transaction(async (client) => {
     for (const c of campaigns) {
       const { rows: [camp] } = await client.query(
         `INSERT INTO ad_campaigns (tenant_id, ad_account_id, external_id, campaign_id, name, objective, status, effective_status,
-                                   daily_budget_paise, lifetime_budget_paise, special_ad_categories, start_time, stop_time, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
-         ON CONFLICT (tenant_id, external_id) DO UPDATE SET
+                                   daily_budget_paise, lifetime_budget_paise, special_ad_categories, start_time, stop_time, synced_at${dual ? ', provider, external_key' : ''})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now()${dual ? ", 'meta', $3" : ''})
+         ON CONFLICT ${conflictTarget(mode, 'ad_campaigns')} DO UPDATE SET
            ad_account_id = EXCLUDED.ad_account_id, campaign_id = COALESCE(EXCLUDED.campaign_id, ad_campaigns.campaign_id),
            name = EXCLUDED.name, objective = EXCLUDED.objective, status = EXCLUDED.status, effective_status = EXCLUDED.effective_status,
            daily_budget_paise = EXCLUDED.daily_budget_paise, lifetime_budget_paise = EXCLUDED.lifetime_budget_paise,
-           special_ad_categories = EXCLUDED.special_ad_categories, start_time = EXCLUDED.start_time, stop_time = EXCLUDED.stop_time, synced_at = now()
+           special_ad_categories = EXCLUDED.special_ad_categories, start_time = EXCLUDED.start_time, stop_time = EXCLUDED.stop_time, synced_at = now()${dualWriteSet(mode, 'ad_campaigns')}
          RETURNING id`,
         [tenantId, adAccountId, c.id, crmIds.get(c.id) || null, c.name || null, c.objective || null, c.status || null, c.effective_status || null,
           parseBudgetPaise(c.daily_budget), parseBudgetPaise(c.lifetime_budget), c.special_ad_categories || [], c.start_time || null, c.stop_time || null]
@@ -74,26 +78,26 @@ const saveHierarchy = async ({ tenantId, adAccountId, campaigns }) => {
       for (const s of c.adsets || []) {
         const { rows: [set] } = await client.query(
           `INSERT INTO ad_adsets (tenant_id, ad_campaign_id, external_id, name, status, effective_status, daily_budget_paise, lifetime_budget_paise,
-                                  optimization_goal, billing_event, targeting, promoted_object, synced_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
-           ON CONFLICT (tenant_id, external_id) DO UPDATE SET
+                                  optimization_goal, billing_event, targeting, promoted_object, synced_at${dual ? ', ad_account_id, provider, external_key' : ''})
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now()${dual ? ", $13, 'meta', $3" : ''})
+           ON CONFLICT ${conflictTarget(mode, 'ad_adsets')} DO UPDATE SET
              ad_campaign_id = EXCLUDED.ad_campaign_id, name = EXCLUDED.name, status = EXCLUDED.status, effective_status = EXCLUDED.effective_status,
              daily_budget_paise = EXCLUDED.daily_budget_paise, lifetime_budget_paise = EXCLUDED.lifetime_budget_paise,
              optimization_goal = EXCLUDED.optimization_goal, billing_event = EXCLUDED.billing_event,
-             targeting = EXCLUDED.targeting, promoted_object = EXCLUDED.promoted_object, synced_at = now()
+             targeting = EXCLUDED.targeting, promoted_object = EXCLUDED.promoted_object, synced_at = now()${dualWriteSet(mode, 'ad_adsets')}
            RETURNING id`,
           [tenantId, camp.id, s.id, s.name || null, s.status || null, s.effective_status || null,
             parseBudgetPaise(s.daily_budget), parseBudgetPaise(s.lifetime_budget), s.optimization_goal || null, s.billing_event || null,
-            s.targeting ? JSON.stringify(s.targeting) : null, s.promoted_object ? JSON.stringify(s.promoted_object) : null]
+            s.targeting ? JSON.stringify(s.targeting) : null, s.promoted_object ? JSON.stringify(s.promoted_object) : null, ...(dual ? [adAccountId] : [])]
         );
         for (const ad of s.ads || []) {
           await client.query(
-            `INSERT INTO ad_ads (tenant_id, ad_adset_id, external_id, name, status, effective_status, creative_id, creative, synced_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
-             ON CONFLICT (tenant_id, external_id) DO UPDATE SET
+            `INSERT INTO ad_ads (tenant_id, ad_adset_id, external_id, name, status, effective_status, creative_id, creative, synced_at${dual ? ', ad_account_id, provider, external_key' : ''})
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now()${dual ? ", $9, 'meta', $3" : ''})
+             ON CONFLICT ${conflictTarget(mode, 'ad_ads')} DO UPDATE SET
                ad_adset_id = EXCLUDED.ad_adset_id, name = EXCLUDED.name, status = EXCLUDED.status, effective_status = EXCLUDED.effective_status,
-               creative_id = EXCLUDED.creative_id, creative = EXCLUDED.creative, synced_at = now()`,
-            [tenantId, set.id, ad.id, ad.name || null, ad.status || null, ad.effective_status || null, ad.creative?.id || null, JSON.stringify(creativeOf(ad))]
+               creative_id = EXCLUDED.creative_id, creative = EXCLUDED.creative, synced_at = now()${dualWriteSet(mode, 'ad_ads')}`,
+            [tenantId, set.id, ad.id, ad.name || null, ad.status || null, ad.effective_status || null, ad.creative?.id || null, JSON.stringify(creativeOf(ad)), ...(dual ? [adAccountId] : [])]
           );
         }
       }

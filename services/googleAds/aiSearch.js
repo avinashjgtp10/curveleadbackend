@@ -1,4 +1,5 @@
 const db = require('../../config/db');
+const { getIdentityMode, insightsJoinOn } = require('../adIdentity');
 const gads = require('../../utils/googleAds');
 const { callGroq } = require('../groqService');
 const { getWorkspaceLocale } = require('../../utils/workspaceLocale');
@@ -27,14 +28,19 @@ const primaryGoogleAccount = async (tenantId) => {
 };
 
 // The workspace's best Google search ads by cost per conversion (≥ 3 conversions, last 90 days).
-const topSearchAds = async (tenantId) => (await query(
+const topSearchAds = async (tenantId) => (await (async () => {
+  const mode = await getIdentityMode({ query });
+  // Scoped mode matches account + "<adGroupId>~<adId>"; the bare ad ID alone is ambiguous in Google.
+  const adJoin = mode === 'scoped' ? insightsJoinOn(mode, 'i', 'ad') : 'ad.tenant_id = i.tenant_id AND ad.external_id = i.entity_id';
+  return db.query(
   `SELECT ad.creative->'headlines' AS headlines, ad.creative->'descriptions' AS descriptions,
           sum(i.leads)::int AS conversions, round(sum(i.spend) / NULLIF(sum(i.leads), 0), 2)::float AS cost_per_conversion
    FROM ad_insights_daily i
-   JOIN ad_ads ad ON ad.tenant_id = i.tenant_id AND ad.external_id = i.entity_id
+   JOIN ad_ads ad ON ${adJoin}
    JOIN ad_accounts a ON a.id = i.ad_account_id AND a.tenant_id = i.tenant_id AND a.provider = 'google'
    WHERE i.tenant_id = $1 AND i.entity_type = 'ad' AND i.date >= current_date - 90 AND ad.creative->>'type' = 'RESPONSIVE_SEARCH_AD'
-   GROUP BY ad.id HAVING sum(i.leads) >= 3 ORDER BY cost_per_conversion ASC NULLS LAST LIMIT 3`, [tenantId])).rows;
+   GROUP BY ad.id HAVING sum(i.leads) >= 3 ORDER BY cost_per_conversion ASC NULLS LAST LIMIT 3`, [tenantId]);
+})()).rows;
 
 const budgetContext = async (tenantId) => {
   const { campaigns, adsets } = await metaControls.workspaceBudgets(tenantId);

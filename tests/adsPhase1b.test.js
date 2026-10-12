@@ -60,7 +60,7 @@ test('campaign ads come from Ads Manager tables, falling back to legacy meta_ads
       if (sql.includes('FROM ad_campaigns ac')) return { rows: modernRows };
       return { rows: [{ id: 'legacy', spend: '100', total_leads: '4', won_leads: '1' }] };
     } };
-    const ctrl = load('controllers/campaignController.js', { '../config/db': db });
+    const ctrl = load('controllers/campaignController.js', { '../config/db': db, '../services/adIdentity': require('../services/adIdentity') });
     const r = res();
     await ctrl.getCampaignAds({ params: { id: 'c1' }, tenantId: 't' }, r);
     return { r, sqls };
