@@ -47,6 +47,10 @@ const tenantForPage = async (pageId) => {
 // The lead ticked a consent checkbox on the form (custom disclaimer) → WhatsApp opt-in.
 const formConsent = (lead) => (lead.custom_disclaimer_responses || []).some(r => r.is_checked === true || r.is_checked === '1' || r.is_checked === 1);
 
+// Meta's Lead Ads Testing Tool fills every answer with "<test lead: dummy data for ...>". Such a lead stays visible
+// in the CRM but must never count towards leads, customers or cost per lead.
+const isMetaTestLead = (lead) => (lead.field_data || []).some((x) => (x.values || []).some((v) => /^\s*<test lead\b/i.test(String(v))));
+
 const fieldsOf = (lead) => {
   const f = {};
   for (const x of lead.field_data || []) f[x.name] = x.values?.[0] || '';
@@ -71,6 +75,7 @@ const processMetaLead = async (ctx, lead, { formName } = {}) => {
       source_detail: lead.ad_name || formName || (lead.ad_id ? `Ad: ${lead.ad_id}` : 'Meta lead form'),
       campaign_id: campaignId || null, meta_lead_id: lead.id, meta_ad_id: lead.ad_id || null,
       meta_adset_id: lead.adset_id || null, meta_form_id: lead.form_id || null, stage: 'new',
+      ...(isMetaTestLead(lead) ? { is_test_lead: true } : {}),
       ...(formConsent(lead) ? { whatsapp_opt_in_at: lead.created_time ? new Date(lead.created_time) : new Date(), whatsapp_opt_in_source: 'meta_lead_form' } : {}),
       ...(lead.created_time ? { created_at: new Date(lead.created_time) } : {}),
       notes: formatFieldDataNotes(lead.field_data, {
@@ -211,5 +216,5 @@ const pollRecentLeads = async (tenantId, hours = 24) => {
 
 module.exports = {
   LEAD_FIELDS, FRESH_LEAD_WINDOW_MS, formConsent, pageContext, tenantForPage, processMetaLead, processLeads,
-  ingestWebhookLead, listForms, backfillForm, pollRecentLeads,
+  ingestWebhookLead, listForms, backfillForm, pollRecentLeads, isMetaTestLead,
 };
