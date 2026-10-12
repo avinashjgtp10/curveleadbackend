@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const ledger = require('../services/finance/ledger');
+const booking = require('../services/finance/booking');
 const { hasPermission } = require('../utils/permissions');
 
 // Finance endpoints (payment ledger). Mounted under /api/finance, behind the finance.ledger workspace flag and the
@@ -76,6 +77,16 @@ const correctPayment = onPayment(async (base, b, req) => ledger.correct({ ...bas
 const amendPayment = onPayment(async (base, b) => ledger.amendDetails({ ...base, reason: b.reason,
   patch: { paidOn: b.paid_on, paidOnBasis: b.paid_on_basis, method: b.method, reference: b.reference, notes: b.notes } }));
 
+// POST /api/finance/leads/:id/booked-value/adjust { value, currency?, reason, evidence_ref? }
+const adjustBooking = async (req, res) => {
+  try {
+    if (!UUID.test(req.params.id)) return bad(res, 'Invalid lead id.');
+    if (!(await canSeeLead(req, req.params.id))) return bad(res, 'Lead not found.', 404);
+    const b = req.body || {};
+    res.json(await booking.adjust({ tenantId: req.tenantId, leadId: req.params.id, userId: req.user.id, value: b.value, currency: b.currency, reason: b.reason, evidenceRef: b.evidence_ref }));
+  } catch (e) { fail(res, e); }
+};
+
 // GET /api/finance/audit?lead_id=
 const audit = async (req, res) => {
   try {
@@ -87,4 +98,4 @@ const audit = async (req, res) => {
   } catch (e) { fail(res, e); }
 };
 
-module.exports = { getFinance, createPayment, refundPayment, reversePayment, completePayment, cancelPayment, correctPayment, amendPayment, audit };
+module.exports = { adjustBooking, getFinance, createPayment, refundPayment, reversePayment, completePayment, cancelPayment, correctPayment, amendPayment, audit };

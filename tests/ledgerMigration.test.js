@@ -48,7 +48,7 @@ test('only completed entries count in the net, and merged leads resolve to their
 });
 
 test('the ledger is excluded from the generic merge mover (money never changes owner)', () => {
-  assert.match(read('services/leadMerge.js'), /NOT IN \('leads', 'lead_merges', 'lead_milestone_events', 'lead_payments'\)/);
+  assert.match(read('services/leadMerge.js'), /NOT IN \('leads', 'lead_merges', 'lead_milestone_events', 'lead_payments', 'lead_attribution', 'lead_attribution_events', 'booking_adjustments'\)/);
 });
 
 test('only a COMPLETED confirmed payment needs its date: pending entries can be cancelled or failed without one', () => {
