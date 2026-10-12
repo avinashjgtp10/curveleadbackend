@@ -37,6 +37,7 @@ test('it only runs the phase1*Sql tests', () => {
   const files = h.testFiles();
   assert.ok(files.length >= 1 && files.every((f) => /^tests\/phase1.*Sql\.test\.js$/.test(f)));
   assert.ok(files.includes('tests/phase1MilestonesSql.test.js'));
+  assert.ok(!files.includes('tests/phase1Sql.test.js'), 'the older phase1Sql.test.js needs a full production schema and is excluded');
 });
 
 test('the script refuses without authorization, without its own URL, and with an application database URL', () => {
