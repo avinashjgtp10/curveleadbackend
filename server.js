@@ -166,6 +166,7 @@ app.use('/api/gmb', apiLimiter, require('./routes/gmb'));
 app.get('/api/ads/google/callback', apiLimiter, require('./controllers/googleAdsController').callback);
 app.use('/api/ads', apiLimiter, require('./routes/ads'));
 app.use('/api/social', apiLimiter, require('./routes/social'));
+app.use('/api/finance', apiLimiter, require('./routes/finance')); // payment ledger: 404 feature_off until a workspace turns it on
 
 // ============================================
 // 404 handler

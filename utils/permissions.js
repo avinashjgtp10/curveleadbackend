@@ -13,6 +13,8 @@ const PERMISSIONS = {
   'automations.manage': 'Build automation sequences and rules',
   'ads.manage': 'Connect ad accounts, change budgets and pause/resume ads',
   'social.publish': 'Create, schedule and publish social posts',
+  'finance.view': 'See payments, collected revenue, outstanding balances and the finance audit trail',
+  'finance.manage': 'Record, refund, reverse and correct customer payments',
 };
 
 // Role defaults, used when a user has no explicit override row for a key.

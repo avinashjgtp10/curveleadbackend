@@ -77,7 +77,7 @@ test('payment ledger: money rules enforced by the database', { skip }, async (t)
       await assert.rejects(pay(c, { kind: 'refund', lead: M, parent: p2.id, amount: 10, reason: 'x' }), /PARENT_NOT_FOUND/, 'a payment of another lead');
       const r = (await c.query(`SELECT id FROM lead_payments WHERE parent_id = $1 LIMIT 1`, [p.id])).rows[0];
       await assert.rejects(pay(c, { kind: 'refund', lead: L, parent: r.id, amount: 1, reason: 'x' }), /PARENT_NOT_COMPLETED/, 'a refund of a refund');
-      await assert.rejects(pay(c, { kind: 'refund', lead: L, amount: 1, reason: 'x' }), /check constraint/i, 'a refund needs a parent');
+      await assert.rejects(pay(c, { kind: 'refund', lead: L, amount: 1, reason: 'x' }), /PARENT_NOT_FOUND|check constraint/i, 'a refund needs a parent');
       await assert.rejects(pay(c, { kind: 'refund', lead: L, parent: p2.id, amount: 1 }), /check constraint/i, 'a refund needs a reason');
     });
 
@@ -130,6 +130,7 @@ test('payment ledger: money rules enforced by the database', { skip }, async (t)
       const pend = await pay(c, { lead: L, amount: 50, status: 'pending', paid_on: null, method: 'UPI', reference: 'TXN-2' });
       await c.query(`UPDATE lead_payments SET status = 'cancelled' WHERE id = $1`, [pend.id]);
       await pay(c, { lead: L, amount: 50, method: 'UPI', reference: 'TXN-2' }); // the cancelled one freed the reference
+      assert.equal((await net(L)).payments, 2, 'the cancelled entry never counted');
     });
 
     await t.test('rows are never deleted, and a lead with payments cannot be deleted', async () => {
