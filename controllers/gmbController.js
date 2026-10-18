@@ -3,7 +3,7 @@ const { generateReviewRequestMessage } = require('../services/groqService');
 const { DEFAULT_TEMPLATE } = require('../utils/googleReviewRequest');
 const { encryptSecret } = require('../utils/cryptoSecrets');
 const { getAuthUrl, parseState, exchangeCodeForTokens, fetchGmbAccounts } = require('../utils/googleOAuth');
-const { refreshGmbConnection } = require('../services/gmbConnection');
+const { refreshGmbConnection, loadProfiles, loadInsights } = require('../services/gmbConnection');
 
 const getSettings = async (tenantId) => {
   const r = await query('SELECT settings FROM tenants WHERE id = $1', [tenantId]);
@@ -149,4 +149,27 @@ const refreshGmb = async (req, res) => {
   } catch (e) { console.error('refreshGmb:', e.message); res.status(500).json({ error: 'Failed to check Google.' }); }
 };
 
-module.exports = { getGmbSettings, updateGmbSettings, draftReviewMessage, connectGmb, gmbOauthCallback, disconnectGmb, refreshGmb };
+// GET /api/gmb/profiles: each location's profile details and completeness checklist (read-only).
+const getProfiles = async (req, res) => {
+  try {
+    const settings = await getSettings(req.tenantId);
+    if (!settings.gmb_refresh_token_encrypted) return res.status(400).json({ error: 'Connect Google first.' });
+    const r = await loadProfiles(settings);
+    if (!r.ok) { console.warn(`getProfiles (${req.tenantId}) ${r.code}: ${r.detail}`); return res.status(r.code === 'reconnect' ? 401 : 200).json({ ok: false, code: r.code, message: r.message }); }
+    res.json(r);
+  } catch (e) { console.error('getProfiles:', e.message); res.status(500).json({ error: 'Failed to load your Google profile.' }); }
+};
+
+// GET /api/gmb/insights?location=locations/123&days=30
+const getInsights = async (req, res) => {
+  try {
+    const settings = await getSettings(req.tenantId);
+    if (!settings.gmb_refresh_token_encrypted) return res.status(400).json({ error: 'Connect Google first.' });
+    if (!/^locations\/\d+$/.test(String(req.query.location || ''))) return res.status(422).json({ error: 'Choose one of your business locations.' });
+    const r = await loadInsights(settings, { location: String(req.query.location), days: req.query.days });
+    if (!r.ok) { console.warn(`getInsights (${req.tenantId}) ${r.code}: ${r.detail}`); return res.status(r.code === 'reconnect' ? 401 : 200).json({ ok: false, code: r.code, message: r.message }); }
+    res.json(r);
+  } catch (e) { console.error('getInsights:', e.message); res.status(500).json({ error: 'Failed to load insights.' }); }
+};
+
+module.exports = { getProfiles, getInsights, getGmbSettings, updateGmbSettings, draftReviewMessage, connectGmb, gmbOauthCallback, disconnectGmb, refreshGmb };
