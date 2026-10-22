@@ -41,6 +41,12 @@ const dispatchPendingPushes = async () => {
   // switches are applied here too - whatever created the notification, a switched-off group never reaches the phone.
   const settingsRows = (await query('SELECT id, settings FROM users WHERE id = ANY($1::uuid[])', [userIds])).rows;
   const settingsByUser = new Map(settingsRows.map((row) => [row.id, row.settings]));
+  // iPhone shows this number on the app icon. It counts everything still unread, including the notifications being sent now.
+  const unreadRows = (await query(
+    'SELECT user_id, COUNT(*)::int AS unread FROM notifications WHERE user_id = ANY($1::uuid[]) AND is_read = false GROUP BY user_id',
+    [userIds]
+  )).rows;
+  const unreadByUser = new Map(unreadRows.map((row) => [row.user_id, row.unread]));
   const tokenRows = (await query('SELECT token, user_id FROM push_tokens WHERE user_id = ANY($1::uuid[])', [userIds])).rows;
   if (!tokenRows.length) return 0;
   const tokensByUser = new Map();
@@ -82,6 +88,7 @@ const dispatchPendingPushes = async () => {
         body: row.message || '',
         data,
         sound: 'default',
+        badge: unreadByUser.get(row.user_id) || 1,
         priority: 'high',
         channelId: 'lead-alerts',
       });
