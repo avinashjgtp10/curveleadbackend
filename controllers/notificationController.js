@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { isExpoToken } = require('../services/pushNotifications');
 const { NOTIFICATION_GROUPS, isNotificationEnabled, shouldSkipForLostLead } = require('../utils/notificationTypes');
 
 // GET /api/notifications - Get user's notifications
@@ -114,7 +115,36 @@ const getNotificationGroups = (req, res) => {
   res.json({ groups: NOTIFICATION_GROUPS.map(({ key, label, description }) => ({ key, label, description })) });
 };
 
+// POST /api/notifications/push-tokens - remember this phone so it can receive pushes. A token belongs to whoever
+// signed in on the phone last, so it moves to the new user when someone else logs in on the same device.
+const registerPushToken = async (req, res) => {
+  try {
+    const { token, platform, device_id } = req.body || {};
+    if (!isExpoToken(token)) return res.status(422).json({ error: 'A valid Expo push token is required.' });
+    await query(
+      `INSERT INTO push_tokens (tenant_id, user_id, token, platform, device_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (token) DO UPDATE SET tenant_id = EXCLUDED.tenant_id, user_id = EXCLUDED.user_id,
+         platform = EXCLUDED.platform, device_id = EXCLUDED.device_id, updated_at = NOW()`,
+      [req.tenantId, req.user.id, token, ['ios', 'android'].includes(platform) ? platform : null, device_id ? String(device_id).slice(0, 255) : null]
+    );
+    res.json({ message: 'Push token saved.' });
+  } catch (error) { console.error('Register push token error:', error); res.status(500).json({ error: 'Could not save the push token.' }); }
+};
+
+// DELETE /api/notifications/push-tokens - stop pushing to this phone. Deliberately works without a login: the app
+// calls it while signing out, when its session is already gone, and the token itself is the secret.
+const unregisterPushToken = async (req, res) => {
+  try {
+    const token = req.body && req.body.token;
+    if (!isExpoToken(token)) return res.status(422).json({ error: 'A valid Expo push token is required.' });
+    await query('DELETE FROM push_tokens WHERE token = $1', [token]);
+    res.json({ message: 'Push token removed.' });
+  } catch (error) { console.error('Unregister push token error:', error); res.status(500).json({ error: 'Could not remove the push token.' }); }
+};
+
 module.exports = {
+  registerPushToken, unregisterPushToken,
   getNotifications, markAsRead, markAllAsRead, markVisibleAsRead, getUnreadCount, getNotificationGroups,
   createNotification, notifyNewLeadToAdmins,
 };

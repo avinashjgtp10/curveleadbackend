@@ -248,6 +248,11 @@ app.listen(PORT, () => {
   require('./jobs/metaLeadJobs').registerMetaLeadJobs();
   require('./jobs/socialJobs').registerSocialJobs();
   require('./jobs/queues').start().catch(e => console.error('Job queues failed to start:', e.message));
+
+  // Push notifications: every few seconds, send new in-app notifications to the users' phones.
+  const { runPushDispatcher } = require('./services/pushNotifications');
+  setTimeout(runPushDispatcher, 20 * 1000);
+  setInterval(runPushDispatcher, 10 * 1000);
 });
 
 // Graceful shutdown
