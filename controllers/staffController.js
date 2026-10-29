@@ -14,11 +14,20 @@ const sendInvite = async ({ tenantId, tenantName, inviterName, invitedBy, email,
   const inviteUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/accept-invite?token=${token}`;
   await sendInviteEmail(email, inviteUrl, tenantName, inviterName).catch(e => console.error('Invite email failed:', e.message));
 
-  return query(
-    `INSERT INTO invitations (tenant_id, email, name, phone, role, team_id, token, invited_by, expires_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-    [tenantId, email, name || null, phone || null, role || 'staff', teamId || null, token, invitedBy || null, expiresAt]
-  );
+  try {
+    return await query(
+      `INSERT INTO invitations (tenant_id, email, name, phone, role, team_id, token, invited_by, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [tenantId, email, name || null, phone || null, role || 'staff', teamId || null, token, invitedBy || null, expiresAt]
+    );
+  } catch (e) {
+    if (e.code !== '42703') throw e; // phone column not migrated yet (models/migration_invitations_phone.sql): invite without it
+    return query(
+      `INSERT INTO invitations (tenant_id, email, name, role, team_id, token, invited_by, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [tenantId, email, name || null, role || 'staff', teamId || null, token, invitedBy || null, expiresAt]
+    );
+  }
 };
 
 // GET /api/staff
