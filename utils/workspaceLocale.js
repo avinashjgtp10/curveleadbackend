@@ -36,12 +36,22 @@ const formatMoney = (amount, { currency = DEFAULT_LOCALE.currency, country, disp
 
 const formatNumber = (n, { country } = {}) => new Intl.NumberFormat(intlLocale(country)).format(Number(n) || 0);
 
+// Intl throws "Invalid option : option" when dateStyle/timeStyle are combined with timeZoneName. Callers ask for
+// "medium date, short time, zone named", so spell the same thing out field by field.
+const DATE_STYLES = { short: { day: 'numeric', month: 'numeric', year: '2-digit' }, medium: { day: 'numeric', month: 'short', year: 'numeric' } };
+const TIME_STYLES = { short: { hour: 'numeric', minute: '2-digit' }, medium: { hour: 'numeric', minute: '2-digit', second: '2-digit' } };
+const withoutStyleClash = (opts) => {
+  if (!opts.timeZoneName || (!opts.dateStyle && !opts.timeStyle)) return opts;
+  const { dateStyle, timeStyle, ...rest } = opts;
+  return { ...rest, ...(DATE_STYLES[dateStyle] || {}), ...(TIME_STYLES[timeStyle] || {}) };
+};
+
 // A moment shown in the workspace's timezone, with the zone named so nobody has to guess.
 const formatWhen = (value, { timezone = DEFAULT_LOCALE.timezone, country } = {}, opts = { dateStyle: 'medium', timeStyle: 'short' }) => {
   const d = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(d.getTime())) return 'No date';
   const tz = validTimezone(timezone) ? timezone : DEFAULT_LOCALE.timezone;
-  return new Intl.DateTimeFormat(intlLocale(country), { ...opts, timeZone: tz }).format(d);
+  return new Intl.DateTimeFormat(intlLocale(country), { ...withoutStyleClash(opts), timeZone: tz }).format(d);
 };
 const formatDate = (value, locale = {}, opts = { day: 'numeric', month: 'short', year: 'numeric' }) => formatWhen(value, locale, opts);
 
