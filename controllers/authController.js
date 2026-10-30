@@ -136,21 +136,34 @@ const signup = async (req, res) => {
   }
 };
 
+// Shared by password login and email-OTP login so both return exactly the same session.
+const LOGIN_SELECT = `SELECT u.id, u.name, u.email, u.role, u.tenant_id, u.is_active, u.password_hash,
+              t.name as tenant_name, t.slug, t.business_type, t.subscription_status, t.trial_ends_at,
+              t.subscription_start, t.subscription_end, p.name as plan_name, jsonb_build_object('country', t.settings->'country', 'currency', t.settings->'currency', 'timezone', t.settings->'timezone') as tenant_settings
+       FROM users u LEFT JOIN tenants t ON u.tenant_id = t.id
+       LEFT JOIN plans p ON t.plan_id = p.id`;
+
+const sessionPayload = (user) => ({
+  message: 'Login successful',
+  token: generateToken(user.id),
+  user: {
+    id: user.id, name: user.name, email: user.email, role: user.role, tenant_id: user.tenant_id,
+  },
+  tenant: {
+    id: user.tenant_id, name: user.tenant_name, slug: user.slug, business_type: user.business_type,
+    subscriptionStatus: user.subscription_status, trialEndsAt: user.trial_ends_at,
+    subscriptionStart: user.subscription_start, subscriptionEnd: user.subscription_end,
+    planName: user.plan_name, ...localeFromSettings(user.tenant_settings || {}),
+  },
+});
+
 // POST /api/auth/login
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required.' });
 
-    const result = await query(
-      `SELECT u.id, u.name, u.email, u.role, u.tenant_id, u.is_active, u.password_hash,
-              t.name as tenant_name, t.slug, t.business_type, t.subscription_status, t.trial_ends_at,
-              t.subscription_start, t.subscription_end, p.name as plan_name, jsonb_build_object('country', t.settings->'country', 'currency', t.settings->'currency', 'timezone', t.settings->'timezone') as tenant_settings
-       FROM users u LEFT JOIN tenants t ON u.tenant_id = t.id
-       LEFT JOIN plans p ON t.plan_id = p.id
-       WHERE u.email = $1`,
-      [email]
-    );
+    const result = await query(`${LOGIN_SELECT} WHERE u.email = $1`, [email]);
 
     if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials.' });
     const user = result.rows[0];
@@ -161,22 +174,7 @@ const login = async (req, res) => {
 
     await query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
 
-    const token = generateToken(user.id);
-    delete user.password_hash;
-
-    res.json({
-      message: 'Login successful',
-      token,
-      user: {
-        id: user.id, name: user.name, email: user.email, role: user.role, tenant_id: user.tenant_id,
-      },
-      tenant: {
-        id: user.tenant_id, name: user.tenant_name, slug: user.slug, business_type: user.business_type,
-        subscriptionStatus: user.subscription_status, trialEndsAt: user.trial_ends_at,
-        subscriptionStart: user.subscription_start, subscriptionEnd: user.subscription_end,
-        planName: user.plan_name, ...localeFromSettings(user.tenant_settings || {}),
-      },
-    });
+    res.json(sessionPayload(user));
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed.' });
@@ -385,4 +383,99 @@ const acceptInvite = async (req, res) => {
   }
 };
 
-module.exports = { signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite, getPreferences, updatePreferences };
+// ---- Email OTP login ------------------------------------------------------------------------------
+// Codes live in password_reset_tokens as "otp:<sha256(userId:code)>" - the prefix keeps them from ever matching a
+// real reset token, and only a hash is stored. Wrong guesses are counted per email; after OTP_MAX_ATTEMPTS the code dies.
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_RESEND_GAP_MS = 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const otpFailures = new Map(); // email -> { count, resetAt }
+
+const otpHash = (userId, code) => `otp:${crypto.createHash('sha256').update(`${userId}:${code}`).digest('hex')}`;
+const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
+
+// POST /api/auth/request-otp
+const requestOtp = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body && req.body.email);
+    if (!email) return res.status(400).json({ error: 'Email required.' });
+    const generic = { message: 'If the account exists, a code has been sent to your email.' };
+
+    const userResult = await query('SELECT id, name, email, is_active FROM users WHERE LOWER(email) = $1', [email]);
+    const user = userResult.rows[0];
+    if (!user || !user.is_active) return res.json(generic); // same answer either way - no account probing
+
+    const recent = await query(
+      "SELECT 1 FROM password_reset_tokens WHERE user_id = $1 AND token LIKE 'otp:%' AND created_at > $2 LIMIT 1",
+      [user.id, new Date(Date.now() - OTP_RESEND_GAP_MS)]
+    );
+    if (recent.rows.length) return res.json(generic);
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    await query("UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND token LIKE 'otp:%'", [user.id]);
+    await query(
+      'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.id, otpHash(user.id, code), new Date(Date.now() + OTP_TTL_MS)]
+    );
+    otpFailures.delete(email);
+
+    if (process.env.NODE_ENV !== 'production') console.log(`Login code for ${email}: ${code}`);
+    try {
+      const { sendOtpEmail } = require('../utils/email');
+      await sendOtpEmail(user.email, code, Math.round(OTP_TTL_MS / 60000));
+    } catch (e) {
+      console.error('OTP email send failed:', e.message);
+    }
+    res.json(generic);
+  } catch (error) {
+    console.error('Request OTP error:', error);
+    res.status(500).json({ error: 'Could not send the code.' });
+  }
+};
+
+// POST /api/auth/verify-otp
+const verifyOtp = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body && req.body.email);
+    const code = String((req.body && req.body.otp) || '').trim();
+    if (!email || !code) return res.status(400).json({ error: 'Email and code required.' });
+    const invalid = () => res.status(401).json({ error: 'Invalid or expired code.' });
+
+    const failures = otpFailures.get(email);
+    if (failures && failures.resetAt > Date.now() && failures.count >= OTP_MAX_ATTEMPTS) {
+      return res.status(429).json({ error: 'Too many wrong codes. Request a new code and try again.' });
+    }
+
+    const result = await query(`${LOGIN_SELECT} WHERE LOWER(u.email) = $1`, [email]);
+    const user = result.rows[0];
+    if (!user) return invalid();
+    if (!user.is_active) return res.status(403).json({ error: 'Account inactive.' });
+
+    const stored = await query(
+      "SELECT id, token FROM password_reset_tokens WHERE user_id = $1 AND token LIKE 'otp:%' AND used = false AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+      [user.id]
+    );
+    const row = stored.rows[0];
+    const expected = Buffer.from(otpHash(user.id, code));
+    const actual = Buffer.from(row ? row.token : '');
+    const ok = !!row && expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+
+    if (!ok) {
+      const current = failures && failures.resetAt > Date.now() ? failures : { count: 0, resetAt: Date.now() + OTP_TTL_MS };
+      current.count += 1;
+      otpFailures.set(email, current);
+      if (row && current.count >= OTP_MAX_ATTEMPTS) await query('UPDATE password_reset_tokens SET used = true WHERE id = $1', [row.id]);
+      return invalid();
+    }
+
+    await query('UPDATE password_reset_tokens SET used = true WHERE id = $1', [row.id]);
+    otpFailures.delete(email);
+    await query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
+    res.json(sessionPayload(user));
+  } catch (error) {
+    console.error('Verify OTP error:', error);
+    res.status(500).json({ error: 'Login failed.' });
+  }
+};
+
+module.exports = { requestOtp, verifyOtp, signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite, getPreferences, updatePreferences };

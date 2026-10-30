@@ -36,6 +36,22 @@ const sendPasswordResetEmail = async (email, resetUrl, businessName) => {
   });
 };
 
+const sendOtpEmail = async (email, code, minutes) => {
+  return sendEmail({
+    to: email,
+    subject: `${code} is your CurveLead login code`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
+        <h2>Your login code</h2>
+        <p>Enter this code in the CurveLead app to log in:</p>
+        <p style="font-size: 32px; font-weight: bold; letter-spacing: 8px; margin: 20px 0;">${code}</p>
+        <p style="color: #999; font-size: 13px;">The code expires in ${minutes} minutes. If you didn't request it, ignore this email.</p>
+      </div>
+    `,
+    text: `Your CurveLead login code is ${code}. It expires in ${minutes} minutes.`,
+  });
+};
+
 const sendInviteEmail = async (email, inviteUrl, businessName, inviterName) => {
   return sendEmail({
     to: email,
@@ -52,4 +68,4 @@ const sendInviteEmail = async (email, inviteUrl, businessName, inviterName) => {
   });
 };
 
-module.exports = { sendEmail, sendPasswordResetEmail, sendInviteEmail };
+module.exports = { sendEmail, sendPasswordResetEmail, sendOtpEmail, sendInviteEmail };
