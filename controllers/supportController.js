@@ -10,7 +10,7 @@ const userFromToken = async (req) => {
     const header = req.headers.authorization;
     if (!header || !header.startsWith('Bearer ')) return null;
     const decoded = jwt.verify(header.split(' ')[1], process.env.JWT_SECRET);
-    const result = await query('SELECT id, tenant_id FROM users WHERE id = $1', [decoded.userId]);
+    const result = await query('SELECT id, tenant_id, name, email FROM users WHERE id = $1', [decoded.userId]);
     return result.rows[0] || null;
   } catch { return null; }
 };
@@ -19,7 +19,11 @@ const userFromToken = async (req) => {
 // Required: name, email, message. Optional: phone, subject, category, priority (low | medium | high).
 const submitTicket = async (req, res) => {
   try {
-    const { name, email, phone, message, subject, category, priority } = req.body;
+    const { phone, message, subject, category, priority } = req.body;
+    const user = await userFromToken(req);
+    // A signed-in user's name and email come from their account, so the in-app forms don't have to send them.
+    const name = req.body.name?.trim() || user?.name;
+    const email = req.body.email?.trim() || user?.email;
     if (!name?.trim() || !email?.trim() || !message?.trim()) {
       return res.status(400).json({ error: 'Name, email and message are required.' });
     }
@@ -27,7 +31,6 @@ const submitTicket = async (req, res) => {
     if (priority && !normalizedPriority) {
       return res.status(400).json({ error: `priority must be one of: ${PRIORITIES.join(', ')}.` });
     }
-    const user = await userFromToken(req);
     const tenantId = user?.tenant_id || null;
 
     let result;
@@ -38,7 +41,9 @@ const submitTicket = async (req, res) => {
         [tenantId, user?.id || null, name.trim(), email.trim(), phone?.trim() || null, message.trim(), subject?.trim() || null, category?.trim() || null, normalizedPriority]
       );
     } catch (e) {
-      if (e.code !== '42703') throw e; // columns not migrated yet: store the original fields
+      // Columns not migrated yet, or the database rejected the extra fields: still store the original fields
+      // rather than losing the request.
+      console.warn('Support ticket full insert failed, saving basic fields:', e.code, e.message);
       result = await query(
         `INSERT INTO support_tickets (tenant_id, name, email, phone, message) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
         [tenantId, name.trim(), email.trim(), phone?.trim() || null, message.trim()]
