@@ -109,9 +109,12 @@ const limiterUserId = (req) => {
   if (!auth.startsWith('Bearer ')) return null;
   try { return jwt.verify(auth.slice(7), process.env.JWT_SECRET).userId || null; } catch { return null; }
 };
+const envInt = (name, fallback) => { const n = parseInt(process.env[name], 10); return n > 0 ? n : fallback; };
+const RATE_LIMIT_USER_MAX = envInt('RATE_LIMIT_USER_MAX', 2000);
+const RATE_LIMIT_IP_MAX = envInt('RATE_LIMIT_IP_MAX', 500);
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: (req) => (limiterUserId(req) ? 2000 : 500),
+  max: (req) => (limiterUserId(req) ? RATE_LIMIT_USER_MAX : RATE_LIMIT_IP_MAX),
   keyGenerator: (req) => { const id = limiterUserId(req); return id ? `user:${id}` : req.ip; },
   message: { error: 'Too many requests, please try again later.' },
 });
