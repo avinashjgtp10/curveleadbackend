@@ -12,6 +12,9 @@ platform admin enables the route, the organization lists the country, a verified
    aws ssm put-parameter --name "/curvelead/backend/<env>/VOICE_TELNYX_PUBLIC_KEY" --type SecureString --value "<base64 Ed25519 public key from Mission Control>"
    aws ssm put-parameter --name "/curvelead/backend/<env>/VOICE_DEFAULT_PROVIDER"  --type String --value "telnyx"
    ```
+   At boot the API validates the two secrets (`services/voiceCalling/config.js`): the API key must start with `KEY`, the public key must be
+   base64 of a raw 32-byte Ed25519 key. If either is missing or malformed it logs `[voice] ...` errors and voice stays disabled
+   (`GET /api/voice/status` -> `enabled:false`; token/authorize/call return 503 `VOICE_UNAVAILABLE`); the API still starts.
    Only the two secrets are required. `VOICE_AUTH_TTL_SECONDS`, `VOICE_RESERVE_CAP_SECONDS`, `VOICE_VELOCITY_MAX_5MIN`,
    `VOICE_CALL_RATE_LIMIT_PER_MIN`, `VOICE_TOPUP_MIN_MINOR`, `VOICE_TOPUP_MAX_MINOR` are optional (defaults in `.env.example`).
    Do not add them to `REQUIRED_VARS`: calling is optional, so a missing key must not stop the whole API from starting.
