@@ -148,6 +148,9 @@ app.use('/api/payments', apiLimiter, require('./routes/payments'));
 app.use('/api/super-admin', apiLimiter, require('./routes/superAdmin'));
 app.use('/api/support', apiLimiter, require('./routes/support'));
 app.use('/api/webhook', require('./routes/webhook')); // No rate limit - external service
+app.use('/api/voice/webhooks', require('./routes/voiceWebhooks')); // signed provider callbacks; no login, no user rate limit
+app.use('/api/voice/admin', apiLimiter, require('./routes/voiceAdmin')); // platform super-admin setup (must precede /api/voice)
+app.use('/api/voice', apiLimiter, require('./routes/voice')); // CurveLead Voice (human-agent calling)
 app.use('/api/integrations', apiLimiter, require('./routes/integrations'));
 
 app.use('/api/lead-stages',    apiLimiter, require('./routes/leadStages'));
@@ -244,6 +247,11 @@ app.listen(PORT, () => {
   setTimeout(runDailyReportEmail, 40 * 1000);
   setInterval(() => require('./jobs/featureJobs').runFeatureJobs().catch(e => console.error('Feature jobs:', e.message)), 60 * 1000);
   setInterval(runDailyReportEmail, 15 * 60 * 1000);
+
+  // CurveLead Voice: release expired call authorizations, flag calls with no end event
+  const { runVoiceCallingSweep } = require('./jobs/voiceCalling');
+  setTimeout(runVoiceCallingSweep, 25 * 1000);
+  setInterval(runVoiceCallingSweep, 60 * 1000);
 
   // Ads module jobs (insights sync every 4h, daily token checks) — BullMQ when
   // REDIS_URL is set, otherwise in-process timers.
