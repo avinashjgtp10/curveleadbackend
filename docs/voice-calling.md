@@ -46,6 +46,7 @@ Environment / Parameter Store (`/curvelead/backend/<env>/NAME`):
 | `VOICE_TELNYX_PUBLIC_KEY` | No (it is a *public* key; keep out of git anyway) | Yes, to enable | base64 of the raw 32-byte Ed25519 key |
 | `VOICE_DEFAULT_PROVIDER` | No | No | `telnyx` (only implemented provider) |
 | `VOICE_ALLOWED_DESTINATIONS` | No | No | `IN,SG,AE`. Hard platform allow-list; can only narrow, never add countries beyond IN/SG/AE |
+| `VOICE_MAX_CONCURRENT_CALLS` | No | No | `2`. Telnyx's account-wide concurrent outbound limit; `0` disables the local guard. If one browser call counts as 2 channels on your account, set it to `1` |
 | `VOICE_AUTH_TTL_SECONDS` | No | No | `60` |
 | `VOICE_RESERVE_CAP_SECONDS` | No | No | `900` (wallet hold per call) |
 | `VOICE_VELOCITY_MAX_5MIN` | No | No | `20` calls per agent per 5 min |
@@ -71,3 +72,10 @@ Note `VOICE_WEBHOOK_REQUIRE_SIGNATURE` belongs to the separate AI-calling (Vapi)
 - Caller ID: chosen per call from `voice_phone_numbers` — the agent's assigned number, else a number whose country
   matches the destination, else any verified org number. Add an India number later and it takes over for +91 with no API change.
 - Run `models/migration_voice_uae_hours.sql` to align stored UAE policy rows with the 09:00-18:00 ceiling.
+
+## Concurrency
+Telnyx limits the whole account (currently 2 live outbound calls). `POST /api/voice/calls` refuses to start a call when
+`VOICE_MAX_CONCURRENT_CALLS` lines are in use, using the existing `PROVIDER_ERROR` code with the message "All call lines are busy
+right now. Please try again in a moment." (503). A provider-side rejection (Call Control error `90043`, or SIP 403 "User channel limit
+exceeded") is mapped to the same message and audited as `call.provider_capacity_limit`. A claimed call that is never dialled frees its
+line after ~2 minutes. One live call per agent (`AGENT_BUSY`) is enforced separately by the database.

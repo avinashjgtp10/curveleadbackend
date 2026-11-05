@@ -9,6 +9,9 @@ const originCountry = (req) => req.user.tenant_settings?.country || null;
 const handle = (fn) => async (req, res) => {
   try { await fn(req, res); }
   catch (e) {
+    // A provider failure (bad Telnyx key => 401, etc.) must NOT reach the browser as its own status: the web app treats
+    // 401 as "logged out". Report it as a gateway problem without provider details.
+    if (e.name === 'ProviderError') { console.error('Voice provider error:', e.message); return res.status(502).json({ error: 'The calling provider is unavailable. Please try again.', code: 'PROVIDER_ERROR' }); }
     if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
     console.error('Voice API error:', e.message);
     res.status(500).json({ error: 'Something went wrong.' });

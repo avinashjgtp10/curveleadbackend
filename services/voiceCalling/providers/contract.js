@@ -29,6 +29,9 @@ const assertProvider = (p) => {
   return p;
 };
 class ProviderError extends Error {
-  constructor(message, { retryable = false, status = null } = {}) { super(message); this.name = 'ProviderError'; this.retryable = retryable; this.status = status; }
+  // `codes` are Telnyx API error codes (never request data); `capacity` = the provider's concurrent-call limit was hit.
+  constructor(message, { retryable = false, status = null, codes = [], capacity = false } = {}) {
+    super(message); this.name = 'ProviderError'; this.retryable = retryable; this.status = status; this.codes = codes; this.capacity = capacity;
+  }
 }
 module.exports = { assertProvider, ProviderError };
