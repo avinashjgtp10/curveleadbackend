@@ -33,12 +33,14 @@ function createCallService(deps = {}) {
     throw fail(status, code, message);
   };
 
-  async function pickCallerId(tenantId, provider, agentId, destinationOrigin) {
-    // Prefer a number assigned to this agent, then an unassigned org number; never another agent's number.
+  // Caller ID per call. Order: a number assigned to this agent, then one whose country matches the DESTINATION
+  // (so an India number can later serve +91 with no API change), then any other verified org number.
+  // Never another agent's number. Numbers come from voice_phone_numbers, not from config or code.
+  async function pickCallerId(tenantId, provider, agentId, destinationCountry) {
     const r = await db(
       `SELECT * FROM voice_phone_numbers WHERE tenant_id=$1 AND provider=$2 AND verification_status='verified'
          AND (capabilities->>'voice_outbound')::boolean IS TRUE AND (assigned_agent_id=$3 OR assigned_agent_id IS NULL)
-       ORDER BY (assigned_agent_id=$3) DESC NULLS LAST, (country_code=$4) DESC LIMIT 1`, [tenantId, provider, agentId, destinationOrigin]);
+       ORDER BY (assigned_agent_id=$3) DESC NULLS LAST, (country_code=$4) DESC, created_at LIMIT 1`, [tenantId, provider, agentId, destinationCountry]);
     return r.rows[0] || null;
   }
 
@@ -60,7 +62,7 @@ function createCallService(deps = {}) {
       if (!destination) return deny(ctx, 'INVALID_NUMBER', 'The lead\'s phone number is not valid for calling.', 422);
 
       const policy = originCountry ? await policies.getPolicy(originCountry, destination.country) : null;
-      const callerId = account ? await pickCallerId(tenantId, provider, user.id, originCountry) : null;
+      const callerId = account ? await pickCallerId(tenantId, provider, user.id, destination?.country) : null;
       const verdict = evaluateCallPolicy({
         originCountry, destination, account, policy, callerId, wantRecording,
         hasActiveConsent: policy?.requires_contact_consent ? await policies.hasActiveConsent(tenantId, leadId) : true,

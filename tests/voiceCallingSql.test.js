@@ -315,3 +315,33 @@ test('admin: rates derive selling price from markup, refuse below-cost, and supe
   const live = (await pool.query(`SELECT id, selling_price_per_minute_micro::text s FROM voice_rate_cards WHERE destination_country='SG' AND destination_prefix='65' AND effective_to IS NULL`)).rows;
   assert.equal(live.length, 1); assert.equal(live[0].id, r2.id); assert.equal(live[0].s, '2600000');
 });
+
+// ---- caller ID selection & UAE hours migration --------------------------------------------------
+test('one US caller ID serves every destination; a destination-matching number takes over later with no API change', { skip }, async () => {
+  await reset(); await enableRoute();
+  await pool.query(`UPDATE voice_phone_numbers SET verification_status='revoked'`); // start clean: only the US number below is usable
+  await pool.query(`INSERT INTO voice_phone_numbers (tenant_id, provider, phone_number_e164, country_code, verification_status) VALUES ($1,'telnyx','+15673603199','US','verified')`, [fx.A]);
+  assert.equal((await auth()).callerId, '+15673603199');                        // US number for an Indian lead
+  await pool.query(`UPDATE voice_phone_numbers SET verification_status='verified' WHERE phone_number_e164='+911140000000'`); // an India number appears
+  assert.equal((await auth()).callerId, '+911140000000');                       // preferred for +91, same response shape
+  await pool.query(`UPDATE voice_phone_numbers SET assigned_agent_id=$1 WHERE phone_number_e164='+15673603199'`, [fx.admin1.id]);
+  assert.equal((await auth()).callerId, '+15673603199');                        // an agent-assigned number still wins
+  await pool.query(`UPDATE voice_phone_numbers SET assigned_agent_id=NULL WHERE phone_number_e164='+15673603199'`);
+  await pool.query(`UPDATE voice_phone_numbers SET assigned_agent_id=$1 WHERE phone_number_e164='+911140000000'`, [fx.staff.id]);
+  await pool.query(`UPDATE voice_phone_numbers SET verification_status='revoked' WHERE phone_number_e164='+15673603199'`);
+  await assert.rejects(auth(), (e) => e.code === 'NO_VERIFIED_CALLER_ID');      // never another agent's number
+  await pool.query(`UPDATE voice_phone_numbers SET assigned_agent_id=NULL, verification_status='verified' WHERE phone_number_e164='+911140000000'`);
+  await pool.query(`DELETE FROM voice_phone_numbers WHERE phone_number_e164='+15673603199'`);
+});
+
+test('UAE hours migration narrows stored policy rows to 09:00-18:00 and is idempotent', { skip }, async () => {
+  await pool.query(`UPDATE voice_country_policies SET calling_hours_start='06:00', calling_hours_end='23:00' WHERE destination_country='AE' AND origin_country='IN'`);
+  await pool.query(`UPDATE voice_country_policies SET calling_hours_start='10:00', calling_hours_end='16:00' WHERE destination_country='AE' AND origin_country='SG'`);
+  const sql = read('migration_voice_uae_hours.sql');
+  await pool.query(sql); await pool.query(sql);
+  const r = (await pool.query(`SELECT origin_country o, calling_hours_start::text s, calling_hours_end::text e FROM voice_country_policies WHERE destination_country='AE' ORDER BY origin_country`)).rows;
+  const by = Object.fromEntries(r.map((x) => [x.o, x]));
+  assert.deepEqual([by.IN.s, by.IN.e], ['09:00:00', '18:00:00']);               // widened rows are pulled in
+  assert.deepEqual([by.SG.s, by.SG.e], ['10:00:00', '16:00:00']);               // stricter rows are left alone
+  assert.equal((await pool.query(`SELECT 1 FROM voice_country_policies WHERE destination_country<>'AE' AND calling_hours_end > '18:00' LIMIT 1`)).rowCount, 1); // other countries untouched
+});
