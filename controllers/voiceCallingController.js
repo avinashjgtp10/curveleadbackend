@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const { services } = require('../services/voiceCalling');
+const { validateVoiceConfig, voiceUnavailable } = require('../services/voiceCalling/config');
 
 const providerId = () => process.env.VOICE_DEFAULT_PROVIDER || 'telnyx';
 const originCountry = (req) => req.user.tenant_settings?.country || null;
@@ -17,26 +18,32 @@ const handle = (fn) => async (req, res) => {
 const accountCurrency = async (tenantId) =>
   (await query('SELECT default_currency FROM voice_accounts WHERE tenant_id=$1 AND provider=$2', [tenantId, providerId()])).rows[0]?.default_currency;
 
+// Platform keys missing or malformed => placing calls is refused (503) and status reports enabled:false.
+const requireConfigured = () => { if (!validateVoiceConfig().ok) throw voiceUnavailable(); };
+
 const serialize = (v) => JSON.parse(JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString() : x)));
 
 // Lets the UI decide whether to show calling at all. Informational only: authorize() re-checks everything.
 exports.status = handle(async (req, res) => {
   const a = (await query('SELECT status, default_currency, recording_enabled FROM voice_accounts WHERE tenant_id=$1 AND provider=$2', [req.tenantId, providerId()])).rows[0];
   const canCall = await require('../utils/permissions').hasPermission(req.user, 'voice.call');
-  res.json({ enabled: !!a && a.status === 'active' && canCall, accountStatus: a?.status || 'none', canCall, currency: a?.default_currency || null });
+  res.json({ enabled: validateVoiceConfig().ok && !!a && a.status === 'active' && canCall, accountStatus: a?.status || 'none', canCall, currency: a?.default_currency || null });
 });
 
 exports.token = handle(async (req, res) => {
+  requireConfigured();
   res.json(await services().tokens.issue({ user: req.user, tenantId: req.tenantId }));
 });
 
 exports.authorize = handle(async (req, res) => {
+  requireConfigured();
   const { leadId, recording } = req.body || {};
   if (!leadId || typeof leadId !== 'string') return res.status(400).json({ error: 'leadId is required.' });
   res.json(await services().calls.authorize({ user: req.user, tenantId: req.tenantId, originCountry: originCountry(req), leadId, wantRecording: recording === true }));
 });
 
 exports.createCall = handle(async (req, res) => {
+  requireConfigured();
   const { authorizationId } = req.body || {};
   if (!authorizationId) return res.status(400).json({ error: 'authorizationId is required.' });
   res.status(202).json(await services().calls.initiate({ user: req.user, tenantId: req.tenantId, authorizationId, mode: req.body.mode === 'server' ? 'server' : 'client' }));
