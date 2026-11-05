@@ -2,6 +2,20 @@
 // Pure evaluation (evaluateCallPolicy) is separate from loading so it is unit-testable.
 const { query: defaultQuery } = require('../../config/db');
 
+// ---- Platform hard limits (defense in depth: these apply even if a database policy row is wrong) -------------
+// Only these destinations can ever be dialled, and only with their own calling code. Matches the Telnyx
+// Outbound Voice Profile (India, Singapore, UAE). Override with VOICE_ALLOWED_DESTINATIONS="IN,SG,AE".
+const CALLING_CODE = { IN: '+91', SG: '+65', AE: '+971' };
+// The LEAD's local time zone, not the agent's and not the server's.
+const DESTINATION_ZONE = { IN: 'Asia/Kolkata', SG: 'Asia/Singapore', AE: 'Asia/Dubai' };
+// Hard ceiling on the calling window per destination (a database policy may only narrow it).
+// UAE telemarketing: 09:00-18:00 local at most.
+const MAX_WINDOW = { AE: ['09:00', '18:00'] };
+const platformDestinations = (env = process.env) =>
+  (env.VOICE_ALLOWED_DESTINATIONS || 'IN,SG,AE').split(',').map((c) => c.trim().toUpperCase()).filter((c) => CALLING_CODE[c]);
+const platformAllows = (destination, env) =>
+  !!destination && platformDestinations(env).includes(destination.country) && String(destination.e164).startsWith(CALLING_CODE[destination.country]);
+
 // Minutes since local midnight in an IANA timezone.
 const localMinutes = (date, timeZone) => {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(date);
@@ -20,6 +34,7 @@ const evaluateCallPolicy = (ctx) => {
   if (!account || account.status !== 'active') return deny('ACCOUNT_INACTIVE', 'Calling is not enabled for this organization.');
   if (!ctx.originCountry) return deny('ORG_COUNTRY_UNKNOWN', 'Organization country is not configured.');
   if (!destination) return deny('INVALID_NUMBER', 'The phone number is not a valid international number.');
+  if (!platformAllows(destination, ctx.env)) return deny('ROUTE_DISABLED', `Calls to ${destination.country} are not enabled.`);
   if (!policy || policy.enabled !== true) return deny('ROUTE_DISABLED', `Calls to ${destination.country} are not enabled.`);
   if (!(account.allowed_destination_countries || []).includes(destination.country)) return deny('DESTINATION_NOT_ALLOWED', `${destination.country} is not approved for this organization.`);
   if (!(policy.allowed_number_types || []).includes(destination.type)) return deny('NUMBER_TYPE_BLOCKED', 'This type of number cannot be called.');
@@ -28,9 +43,20 @@ const evaluateCallPolicy = (ctx) => {
   if (policy.requires_contact_consent && !ctx.hasActiveConsent) return deny('NO_CONSENT', 'No active contact consent is recorded for this lead.');
   if (ctx.wantRecording && !(policy.recording_allowed && account.recording_enabled)) return deny('RECORDING_NOT_PERMITTED', 'Recording is not permitted on this route.');
   try {
-    const mins = localMinutes(ctx.now || new Date(), policy.destination_timezone);
-    const start = timeToMinutes(policy.calling_hours_start); const end = timeToMinutes(policy.calling_hours_end);
-    const inside = start <= end ? mins >= start && mins < end : mins >= start || mins < end;
+    const zone = DESTINATION_ZONE[destination.country] || policy.destination_timezone;
+    const mins = localMinutes(ctx.now || new Date(), zone);
+    let start = timeToMinutes(policy.calling_hours_start); let end = timeToMinutes(policy.calling_hours_end);
+    if (Number.isNaN(start) || Number.isNaN(end) || Number.isNaN(mins)) throw new Error('bad calling hours');
+    const cap = MAX_WINDOW[destination.country];
+    let inside;
+    if (cap) { // a daytime ceiling: the policy can only narrow it, never wrap past midnight or widen it
+      const capStart = timeToMinutes(cap[0]); const capEnd = timeToMinutes(cap[1]);
+      const wraps = start > end;
+      const s2 = wraps ? capStart : Math.max(start, capStart); const e2 = wraps ? capEnd : Math.min(end, capEnd);
+      inside = s2 < e2 && mins >= s2 && mins < e2;
+    } else {
+      inside = start <= end ? mins >= start && mins < end : mins >= start || mins < end;
+    }
     if (!inside) return deny('OUTSIDE_CALLING_HOURS', 'Outside permitted calling hours for the destination.');
   } catch { return deny('POLICY_INVALID', 'Calling-hours policy is invalid.'); }
   return { allowed: true, maxCallSeconds: Math.min(account.max_call_seconds, policy.max_call_seconds) };
@@ -57,4 +83,4 @@ function createCountryPolicyService(deps = {}) {
     },
   };
 }
-module.exports = { evaluateCallPolicy, createCountryPolicyService, localMinutes };
+module.exports = { evaluateCallPolicy, platformAllows, platformDestinations, MAX_WINDOW, DESTINATION_ZONE, createCountryPolicyService, localMinutes };
