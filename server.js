@@ -179,6 +179,7 @@ app.use(require('./middleware/errorHandler'));
 // Start server
 // ============================================
 app.listen(PORT, () => {
+  require('./services/voiceCalling/config').logVoiceConfig(); // validates Telnyx keys; never throws, never prints values
   console.log(`
   ╔═══════════════════════════════════════════╗
   ║   🚀 CurveLead API V2                    ║
