@@ -68,6 +68,7 @@ app.use(cors((req, callback) => {
     return callback(null, { origin: true, credentials: false });
   }
   callback(null, {
+    exposedHeaders: ['Retry-After', 'RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset'],
     origin: (origin, cb) => {
       if (!origin) return cb(null, true);
       if (allowedOrigins.includes(origin)) {
@@ -103,21 +104,9 @@ app.use('/uploads', require('express').static(require('path').join(__dirname, 'u
 // Logged-in users get their own bucket. Keyed by IP, a whole office shared 500 requests,
 // and the inbox's background polling alone uses ~200 per open tab — once spent, new
 // WhatsApp messages silently stopped appearing until the window reset.
-const jwt = require('jsonwebtoken');
-const limiterUserId = (req) => {
-  const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) return null;
-  try { return jwt.verify(auth.slice(7), process.env.JWT_SECRET).userId || null; } catch { return null; }
-};
-const envInt = (name, fallback) => { const n = parseInt(process.env[name], 10); return n > 0 ? n : fallback; };
-const RATE_LIMIT_USER_MAX = envInt('RATE_LIMIT_USER_MAX', 2000);
-const RATE_LIMIT_IP_MAX = envInt('RATE_LIMIT_IP_MAX', 500);
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: (req) => (limiterUserId(req) ? RATE_LIMIT_USER_MAX : RATE_LIMIT_IP_MAX),
-  keyGenerator: (req) => { const id = limiterUserId(req); return id ? `user:${id}` : req.ip; },
-  message: { error: 'Too many requests, please try again later.' },
-});
+// Two budgets (foreground vs polling), per-user keys, Retry-After and one log line per limited key:
+// see middleware/apiRateLimit.js. Tunables: RATE_LIMIT_USER_MAX, RATE_LIMIT_IP_MAX, RATE_LIMIT_BACKGROUND_USER_MAX.
+const apiLimiter = require('./middleware/apiRateLimit').createApiLimiter();
 
 // ============================================
 // Health check (no rate limit)
