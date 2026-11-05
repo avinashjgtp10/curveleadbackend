@@ -35,6 +35,15 @@ const logVoiceConfig = (env = process.env, log = console) => {
   return r;
 };
 
+const E164 = /^\+[1-9]\d{6,14}$/;
+// Whether the Call button should be offered. Informational only: authorize() re-checks everything.
+// Needs valid platform keys, an active org account WITH its Telnyx connection id, a verified E.164 caller ID,
+// and the user's voice.call permission.
+const computeVoiceEnabled = ({ config, account, callerIds = [], canCall }) =>
+  !!(config?.ok && canCall && account && account.status === 'active'
+    && String(account.provider_account_reference || '').trim()
+    && callerIds.some((n) => n.verification_status === 'verified' && E164.test(n.phone_number_e164 || '')));
+
 const voiceUnavailable = () => Object.assign(new Error('Calling is not available right now.'), { status: 503, code: 'VOICE_UNAVAILABLE' });
 
-module.exports = { validateVoiceConfig, logVoiceConfig, voiceUnavailable };
+module.exports = { computeVoiceEnabled, validateVoiceConfig, logVoiceConfig, voiceUnavailable };

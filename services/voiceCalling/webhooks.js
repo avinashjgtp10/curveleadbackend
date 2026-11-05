@@ -100,7 +100,7 @@ function createWebhookService(deps = {}) {
           if (call.provider_call_id || ev.providerCallId) {
             try { await getProvider(providerId).hangupCall({ providerCallId: call.provider_call_id || ev.providerCallId, commandId: `mismatch:${call.id}` }); } catch (e) { console.error('mismatch hangup failed:', e.message); }
           }
-          await audit(null, { tenantId: call.tenant_id, action: 'call.destination_mismatch', entityId: call.id });
+          await audit((sql, params) => c.query(sql, params), { tenantId: call.tenant_id, action: 'call.destination_mismatch', entityId: call.id });
           return { handled: true, rejected: 'destination_mismatch' };
         }
 
@@ -123,6 +123,10 @@ function createWebhookService(deps = {}) {
 
         if (ev.type === 'hangup') {
           if (call.settled_at) return { handled: true, alreadySettled: true };
+          // Telnyx documents a SIP 403 "User channel limit exceeded" when the account's concurrent-call limit is hit.
+          if (/channel limit|limit exceeded/i.test(JSON.stringify(ev.payload?.data?.payload || {}))) {
+            await audit((sql, params) => c.query(sql, params), { tenantId: call.tenant_id, action: 'call.provider_capacity_limit', entityId: call.id, detail: { hangupCause: ev.detail.hangupCause } });
+          }
           const endedAt = ev.detail.endTime || ev.occurredAt || new Date();
           const answered = !!call.answered_at;
           const status = answered ? 'completed' : unansweredStatus(ev.detail.hangupCause);
@@ -131,7 +135,7 @@ function createWebhookService(deps = {}) {
             [call.id, status, endedAt, ev.detail.startTime, ev.detail.hangupCause]);
           const fresh = (await c.query('SELECT * FROM voice_calls WHERE id=$1', [call.id])).rows[0];
           await settle(c, fresh);
-          await audit(null, { tenantId: call.tenant_id, action: 'call.settled', entityId: call.id, detail: { status, billable: fresh.billable_seconds } });
+          await audit((sql, params) => c.query(sql, params), { tenantId: call.tenant_id, action: 'call.settled', entityId: call.id, detail: { status, billable: fresh.billable_seconds } });
           return { handled: true, settled: true };
         }
         return { handled: true };

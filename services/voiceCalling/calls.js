@@ -12,6 +12,11 @@ const AUTH_TTL_SECONDS = () => Number(process.env.VOICE_AUTH_TTL_SECONDS) || 60;
 const RESERVE_CAP_SECONDS = () => Number(process.env.VOICE_RESERVE_CAP_SECONDS) || 900;
 const VELOCITY_MAX_5MIN = () => Number(process.env.VOICE_VELOCITY_MAX_5MIN) || 20;
 const LIVE = ['initiating', 'ringing', 'answered'];
+// Telnyx limits the WHOLE account (currently 2 concurrent outbound calls). Count live calls platform-wide and refuse early, with a
+// clear message, instead of letting the browser dial into a provider rejection. 0 disables the guard. Reuses the existing
+// PROVIDER_ERROR code: it is a provider-side limit, so no new denial code is introduced.
+const MAX_CONCURRENT = () => { const n = parseInt(process.env.VOICE_MAX_CONCURRENT_CALLS, 10); return Number.isInteger(n) && n >= 0 ? n : 2; };
+const CAPACITY_MESSAGE = 'All call lines are busy right now. Please try again in a moment.';
 
 const fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 const encodeState = (o) => Buffer.from(JSON.stringify(o)).toString('base64');
@@ -33,12 +38,14 @@ function createCallService(deps = {}) {
     throw fail(status, code, message);
   };
 
-  async function pickCallerId(tenantId, provider, agentId, destinationOrigin) {
-    // Prefer a number assigned to this agent, then an unassigned org number; never another agent's number.
+  // Caller ID per call. Order: a number assigned to this agent, then one whose country matches the DESTINATION
+  // (so an India number can later serve +91 with no API change), then any other verified org number.
+  // Never another agent's number. Numbers come from voice_phone_numbers, not from config or code.
+  async function pickCallerId(tenantId, provider, agentId, destinationCountry) {
     const r = await db(
       `SELECT * FROM voice_phone_numbers WHERE tenant_id=$1 AND provider=$2 AND verification_status='verified'
          AND (capabilities->>'voice_outbound')::boolean IS TRUE AND (assigned_agent_id=$3 OR assigned_agent_id IS NULL)
-       ORDER BY (assigned_agent_id=$3) DESC NULLS LAST, (country_code=$4) DESC LIMIT 1`, [tenantId, provider, agentId, destinationOrigin]);
+       ORDER BY (assigned_agent_id=$3) DESC NULLS LAST, (country_code=$4) DESC, created_at LIMIT 1`, [tenantId, provider, agentId, destinationCountry]);
     return r.rows[0] || null;
   }
 
@@ -60,7 +67,7 @@ function createCallService(deps = {}) {
       if (!destination) return deny(ctx, 'INVALID_NUMBER', 'The lead\'s phone number is not valid for calling.', 422);
 
       const policy = originCountry ? await policies.getPolicy(originCountry, destination.country) : null;
-      const callerId = account ? await pickCallerId(tenantId, provider, user.id, originCountry) : null;
+      const callerId = account ? await pickCallerId(tenantId, provider, user.id, destination?.country) : null;
       const verdict = evaluateCallPolicy({
         originCountry, destination, account, policy, callerId, wantRecording,
         hasActiveConsent: policy?.requires_contact_consent ? await policies.hasActiveConsent(tenantId, leadId) : true,
@@ -123,15 +130,26 @@ function createCallService(deps = {}) {
     },
 
     async initiate({ user, tenantId, authorizationId, mode = 'client' }) {
-      // Atomic claim: only one caller can move authorized -> initiating, and only before expiry.
+      // Atomic claim: only one caller can move authorized -> initiating, and only before expiry. A global advisory lock
+      // serialises claims so two agents cannot both take the last free line.
       let call;
       try {
-        call = (await db(
-          `UPDATE voice_calls SET status='initiating', started_at=NOW(), updated_at=NOW()
-           WHERE id=$1 AND tenant_id=$2 AND agent_id=$3 AND status='authorized' AND authorization_expires_at > NOW() RETURNING *`,
-          [authorizationId, tenantId, user.id])).rows[0];
+        call = await tx(async (c) => {
+          await c.query(`SELECT pg_advisory_xact_lock(hashtext('voice:capacity'))`);
+          const cur = (await c.query(
+            `SELECT id FROM voice_calls WHERE id=$1 AND tenant_id=$2 AND agent_id=$3 AND status='authorized' AND authorization_expires_at > NOW() FOR UPDATE`,
+            [authorizationId, tenantId, user.id])).rows[0];
+          if (!cur) return null; // not claimable: handled below (idempotent retry / expired / not found)
+          const cap = MAX_CONCURRENT();
+          if (cap > 0) {
+            const live = Number((await c.query(`SELECT COUNT(*) AS n FROM voice_calls WHERE status IN ('initiating','ringing','answered')`)).rows[0].n);
+            if (live >= cap) throw Object.assign(fail(503, 'PROVIDER_ERROR', CAPACITY_MESSAGE), { capacityFull: true, live, cap });
+          }
+          return (await c.query(`UPDATE voice_calls SET status='initiating', started_at=NOW(), updated_at=NOW() WHERE id=$1 RETURNING *`, [authorizationId])).rows[0];
+        });
       } catch (e) {
         if (e.code === '23505') throw fail(409, 'AGENT_BUSY', 'You already have a call in progress.');
+        if (e.capacityFull) await audit(db, { tenantId, actorId: user.id, action: 'call.capacity_full', entityId: authorizationId, detail: { live: e.live, limit: e.cap } });
         throw e;
       }
       if (!call) {
@@ -169,6 +187,10 @@ function createCallService(deps = {}) {
           await c.query(`UPDATE voice_calls SET status='failed', reserved_amount=0, hangup_cause='provider_setup_failed', ended_at=NOW(), updated_at=NOW() WHERE id=$1`, [cur.id]);
         });
         await audit(db, { tenantId, actorId: user.id, action: 'call.setup_failed', entityId: call.id, detail: { error: e.message } });
+        if (e instanceof ProviderError && e.capacity) {
+          await audit(db, { tenantId, actorId: user.id, action: 'call.provider_capacity_limit', entityId: call.id, detail: { status: e.status, codes: e.codes } });
+          throw fail(503, 'PROVIDER_ERROR', CAPACITY_MESSAGE);
+        }
         throw e instanceof ProviderError ? fail(502, 'PROVIDER_ERROR', 'The calling provider is unavailable. Please try again.') : e;
       }
     },
@@ -294,4 +316,4 @@ function createCallService(deps = {}) {
     },
   };
 }
-module.exports = { createCallService, encodeState, decodeState };
+module.exports = { createCallService, encodeState, decodeState, CAPACITY_MESSAGE };

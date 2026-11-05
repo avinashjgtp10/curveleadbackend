@@ -32,9 +32,15 @@ function createTelnyxProvider(deps = {}) {
       return await http.request({ method, url, data, ...config, headers: { Authorization: `Bearer ${key}`, ...(config.headers || {}) } });
     } catch (e) {
       const status = e.response?.status ?? null;
-      // Never include request headers/body (secrets, numbers) in the error.
+      // Telnyx error bodies: { errors: [{ code, title, detail }] }. Keep only codes, never headers or request data.
+      const errs = Array.isArray(e.response?.data?.errors) ? e.response.data.errors : [];
+      const codes = errs.map((x) => String(x?.code ?? '')).filter(Boolean).slice(0, 5);
+      const text = errs.map((x) => `${x?.title || ''} ${x?.detail || ''}`).join(' ');
+      // Documented: 90043 "Connection outbound channels limit exceeded"; a 403 "channel limit exceeded" is the account/profile limit.
+      // 429 is the separate dials-per-second limit, not concurrency.
+      const capacity = codes.includes('90043') || (status === 403 && /channel limit|concurrent/i.test(text));
       throw new ProviderError(`Telnyx ${method.toUpperCase()} ${url} failed${status ? ` (${status})` : `: ${e.code || 'network'}`}`,
-        { status, retryable: !status || status >= 500 || status === 429 });
+        { status, retryable: !status || status >= 500 || status === 429, codes, capacity });
     }
   };
 

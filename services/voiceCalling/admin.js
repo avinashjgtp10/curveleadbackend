@@ -48,6 +48,12 @@ function createAdminService(deps = {}) {
       const spend = bigPos(body.dailySpendLimitMinor ?? 0, 'dailySpendLimitMinor');
       // Activating requires a connection id; a half-configured account must not go live.
       if (body.status === 'active' && !conn) throw fail(400, 'BAD_INPUT', 'An active account needs the provider connection id.');
+      // Per-agent WebRTC credentials belong to one Telnyx connection. If the connection changes, drop them so the next
+      // /token call creates credentials under the new connection instead of reusing ones bound to the old one.
+      const before = (await db('SELECT provider_account_reference FROM voice_accounts WHERE tenant_id=$1 AND provider=$2', [tenantId, provider])).rows[0];
+      if (before && before.provider_account_reference && before.provider_account_reference !== conn) {
+        await db('DELETE FROM voice_agent_credentials WHERE tenant_id=$1 AND provider=$2', [tenantId, provider]);
+      }
       const r = await db(
         `INSERT INTO voice_accounts (tenant_id, provider, provider_account_reference, status, business_verification_status, default_currency,
            allowed_destination_countries, max_call_seconds, daily_call_limit_per_agent, daily_spend_limit_minor, recording_enabled)

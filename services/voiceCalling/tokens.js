@@ -16,8 +16,18 @@ function createTokenService(deps = {}) {
       if (!account || account.status !== 'active') throw fail(403, 'ACCOUNT_INACTIVE', 'Calling is not enabled for this organization.');
       const provider = getProvider(providerId);
       if (!provider.capabilities.clientToken) throw fail(501, 'UNSUPPORTED', 'Provider does not support client tokens.');
-      const cred = (await db('SELECT provider_credential_id FROM voice_agent_credentials WHERE tenant_id=$1 AND user_id=$2 AND provider=$3', [tenantId, user.id, providerId])).rows[0];
-      const out = await provider.createClientToken({ tenantId, userId: user.id, account, credentialId: cred?.provider_credential_id });
+      let cred = (await db('SELECT provider_credential_id FROM voice_agent_credentials WHERE tenant_id=$1 AND user_id=$2 AND provider=$3', [tenantId, user.id, providerId])).rows[0];
+      let out;
+      try {
+        out = await provider.createClientToken({ tenantId, userId: user.id, account, credentialId: cred?.provider_credential_id });
+      } catch (e) {
+        // The stored credential was deleted/expired on Telnyx: forget it and mint a fresh one once.
+        if (cred && e.name === 'ProviderError' && e.status === 404) {
+          await db('DELETE FROM voice_agent_credentials WHERE tenant_id=$1 AND user_id=$2 AND provider=$3', [tenantId, user.id, providerId]);
+          out = await provider.createClientToken({ tenantId, userId: user.id, account, credentialId: undefined });
+          cred = null;
+        } else throw e;
+      }
       if (!cred) {
         await db('INSERT INTO voice_agent_credentials (tenant_id, user_id, provider, provider_credential_id) VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id,user_id,provider) DO NOTHING',
           [tenantId, user.id, providerId, out.credentialId]);

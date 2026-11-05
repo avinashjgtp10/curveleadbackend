@@ -35,3 +35,47 @@ platform admin enables the route, the organization lists the country, a verified
 - `call.hangup` `hangup_cause` values used for no-answer/busy classification.
 - Client tokens minted via API last 24h and are not individually revocable (revoke by deleting the agent's credential).
 - Provider-cost reconciliation against Telnyx detail records (not implemented).
+
+## Configuration reference (everything the voice module reads)
+
+Environment / Parameter Store (`/curvelead/backend/<env>/NAME`):
+
+| Name | Secret? | Needed? | Default / notes |
+|---|---|---|---|
+| `VOICE_TELNYX_API_KEY` | **Yes** (SecureString) | Yes, to enable | Telnyx v2 key, must start with `KEY` |
+| `VOICE_TELNYX_PUBLIC_KEY` | No (it is a *public* key; keep out of git anyway) | Yes, to enable | base64 of the raw 32-byte Ed25519 key |
+| `VOICE_DEFAULT_PROVIDER` | No | No | `telnyx` (only implemented provider) |
+| `VOICE_ALLOWED_DESTINATIONS` | No | No | `IN,SG,AE`. Hard platform allow-list; can only narrow, never add countries beyond IN/SG/AE |
+| `VOICE_MAX_CONCURRENT_CALLS` | No | No | `2`. Telnyx's account-wide concurrent outbound limit; `0` disables the local guard. If one browser call counts as 2 channels on your account, set it to `1` |
+| `VOICE_AUTH_TTL_SECONDS` | No | No | `60` |
+| `VOICE_RESERVE_CAP_SECONDS` | No | No | `900` (wallet hold per call) |
+| `VOICE_VELOCITY_MAX_5MIN` | No | No | `20` calls per agent per 5 min |
+| `VOICE_CALL_RATE_LIMIT_PER_MIN` | No | No | `30` per user |
+| `VOICE_TOPUP_MIN_MINOR` / `VOICE_TOPUP_MAX_MINOR` | No | No | `10000` / `10000000` (minor units) |
+| `API_BASE_URL` | No | Only for server-dial mode | Browser calling uses the webhook URL set on the Telnyx connection |
+
+Stored in the database (Super Admin → Calling), not in env:
+
+| Value | Where | Example |
+|---|---|---|
+| Telnyx connection ID | account → "Telnyx connection ID" | `3086510505527870746` |
+| Caller ID | Caller IDs (add, then Verify) | `+15673603199` |
+| Outbound Voice Profile | Telnyx portal only; the code never references it | `3086508125579118435` |
+
+Note `VOICE_WEBHOOK_REQUIRE_SIGNATURE` belongs to the separate AI-calling (Vapi) module, not to CurveLead Voice.
+
+## Hard platform rules (enforced in code, independent of database rows)
+- Destinations: only +91 (IN), +65 (SG), +971 (AE) numbers can be dialled. Anything else is denied as `ROUTE_DISABLED`.
+- Calling hours are evaluated in the **lead's** zone: IN `Asia/Kolkata`, SG `Asia/Singapore`, AE `Asia/Dubai`.
+  A policy row may narrow a window but never widen it. UAE ceiling: 09:00-18:00. IN and SG windows come from the
+  policy rows (placeholder 09:00-21:00; confirm the legal window with counsel before enabling those routes).
+- Caller ID: chosen per call from `voice_phone_numbers` — the agent's assigned number, else a number whose country
+  matches the destination, else any verified org number. Add an India number later and it takes over for +91 with no API change.
+- Run `models/migration_voice_uae_hours.sql` to align stored UAE policy rows with the 09:00-18:00 ceiling.
+
+## Concurrency
+Telnyx limits the whole account (currently 2 live outbound calls). `POST /api/voice/calls` refuses to start a call when
+`VOICE_MAX_CONCURRENT_CALLS` lines are in use, using the existing `PROVIDER_ERROR` code with the message "All call lines are busy
+right now. Please try again in a moment." (503). A provider-side rejection (Call Control error `90043`, or SIP 403 "User channel limit
+exceeded") is mapped to the same message and audited as `call.provider_capacity_limit`. A claimed call that is never dialled frees its
+line after ~2 minutes. One live call per agent (`AGENT_BUSY`) is enforced separately by the database.

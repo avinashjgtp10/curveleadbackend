@@ -1,6 +1,6 @@
 const { query } = require('../config/db');
 const { services } = require('../services/voiceCalling');
-const { validateVoiceConfig, voiceUnavailable } = require('../services/voiceCalling/config');
+const { computeVoiceEnabled, validateVoiceConfig, voiceUnavailable } = require('../services/voiceCalling/config');
 
 const providerId = () => process.env.VOICE_DEFAULT_PROVIDER || 'telnyx';
 const originCountry = (req) => req.user.tenant_settings?.country || null;
@@ -9,6 +9,9 @@ const originCountry = (req) => req.user.tenant_settings?.country || null;
 const handle = (fn) => async (req, res) => {
   try { await fn(req, res); }
   catch (e) {
+    // A provider failure (bad Telnyx key => 401, etc.) must NOT reach the browser as its own status: the web app treats
+    // 401 as "logged out". Report it as a gateway problem without provider details.
+    if (e.name === 'ProviderError') { console.error('Voice provider error:', e.message); return res.status(502).json({ error: 'The calling provider is unavailable. Please try again.', code: 'PROVIDER_ERROR' }); }
     if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
     console.error('Voice API error:', e.message);
     res.status(500).json({ error: 'Something went wrong.' });
@@ -25,9 +28,11 @@ const serialize = (v) => JSON.parse(JSON.stringify(v, (k, x) => (typeof x === 'b
 
 // Lets the UI decide whether to show calling at all. Informational only: authorize() re-checks everything.
 exports.status = handle(async (req, res) => {
-  const a = (await query('SELECT status, default_currency, recording_enabled FROM voice_accounts WHERE tenant_id=$1 AND provider=$2', [req.tenantId, providerId()])).rows[0];
+  const a = (await query('SELECT status, default_currency, provider_account_reference FROM voice_accounts WHERE tenant_id=$1 AND provider=$2', [req.tenantId, providerId()])).rows[0];
   const canCall = await require('../utils/permissions').hasPermission(req.user, 'voice.call');
-  res.json({ enabled: validateVoiceConfig().ok && !!a && a.status === 'active' && canCall, accountStatus: a?.status || 'none', canCall, currency: a?.default_currency || null });
+  const callerIds = a ? (await query(`SELECT phone_number_e164, verification_status FROM voice_phone_numbers WHERE tenant_id=$1 AND provider=$2 AND verification_status='verified'`, [req.tenantId, providerId()])).rows : [];
+  const enabled = computeVoiceEnabled({ config: validateVoiceConfig(), account: a, callerIds, canCall });
+  res.json({ enabled, accountStatus: a?.status || 'none', canCall, currency: a?.default_currency || null });
 });
 
 exports.token = handle(async (req, res) => {

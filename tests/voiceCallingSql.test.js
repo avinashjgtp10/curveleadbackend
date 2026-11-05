@@ -28,7 +28,7 @@ test.before(async () => {
   providerLog = [];
   const fakeProvider = {
     id: 'telnyx', implemented: true, capabilities: { clientToken: true, serverDial: true, hangup: true },
-    initiateCall: async (i) => { providerLog.push(['dial', i]); if (fx.failDial) throw new (require('../services/voiceCalling/providers/contract').ProviderError)('down', { retryable: true }); return { providerCallId: `cc-${i.commandId}`, providerSessionId: 's' }; },
+    initiateCall: async (i) => { providerLog.push(['dial', i]); if (fx.failDial) throw new (require('../services/voiceCalling/providers/contract').ProviderError)('down', { retryable: true, status: fx.capacityDial ? 403 : 503, capacity: !!fx.capacityDial }); return { providerCallId: `cc-${i.commandId}`, providerSessionId: 's' }; },
     hangupCall: async (i) => { providerLog.push(['hangup', i]); },
     createClientToken: async () => ({ token: 't', credentialId: 'c' }), getCallDetails: async () => ({}),
     verifyWebhook: ({ rawBody }) => { const e = JSON.parse(rawBody.toString()); return { ...e, occurredAt: e.occurredAt && new Date(e.occurredAt), detail: { startTime: e.detail?.startTime && new Date(e.detail.startTime), endTime: e.detail?.endTime && new Date(e.detail.endTime), hangupCause: e.detail?.hangupCause || null } }; },
@@ -314,4 +314,114 @@ test('admin: rates derive selling price from markup, refuse below-cost, and supe
   const r2 = await admin.addRate({ adminId: fx.admin1.id, body: { ...base, markupBps: 3000 } });
   const live = (await pool.query(`SELECT id, selling_price_per_minute_micro::text s FROM voice_rate_cards WHERE destination_country='SG' AND destination_prefix='65' AND effective_to IS NULL`)).rows;
   assert.equal(live.length, 1); assert.equal(live[0].id, r2.id); assert.equal(live[0].s, '2600000');
+});
+
+// ---- caller ID selection & UAE hours migration --------------------------------------------------
+test('one US caller ID serves every destination; a destination-matching number takes over later with no API change', { skip }, async () => {
+  await reset(); await enableRoute();
+  await pool.query(`UPDATE voice_phone_numbers SET verification_status='revoked'`); // start clean: only the US number below is usable
+  await pool.query(`INSERT INTO voice_phone_numbers (tenant_id, provider, phone_number_e164, country_code, verification_status) VALUES ($1,'telnyx','+15673603199','US','verified')`, [fx.A]);
+  assert.equal((await auth()).callerId, '+15673603199');                        // US number for an Indian lead
+  await pool.query(`UPDATE voice_phone_numbers SET verification_status='verified' WHERE phone_number_e164='+911140000000'`); // an India number appears
+  assert.equal((await auth()).callerId, '+911140000000');                       // preferred for +91, same response shape
+  await pool.query(`UPDATE voice_phone_numbers SET assigned_agent_id=$1 WHERE phone_number_e164='+15673603199'`, [fx.admin1.id]);
+  assert.equal((await auth()).callerId, '+15673603199');                        // an agent-assigned number still wins
+  await pool.query(`UPDATE voice_phone_numbers SET assigned_agent_id=NULL WHERE phone_number_e164='+15673603199'`);
+  await pool.query(`UPDATE voice_phone_numbers SET assigned_agent_id=$1 WHERE phone_number_e164='+911140000000'`, [fx.staff.id]);
+  await pool.query(`UPDATE voice_phone_numbers SET verification_status='revoked' WHERE phone_number_e164='+15673603199'`);
+  await assert.rejects(auth(), (e) => e.code === 'NO_VERIFIED_CALLER_ID');      // never another agent's number
+  await pool.query(`UPDATE voice_phone_numbers SET assigned_agent_id=NULL, verification_status='verified' WHERE phone_number_e164='+911140000000'`);
+  await pool.query(`DELETE FROM voice_phone_numbers WHERE phone_number_e164='+15673603199'`);
+});
+
+test('UAE hours migration narrows stored policy rows to 09:00-18:00 and is idempotent', { skip }, async () => {
+  await pool.query(`UPDATE voice_country_policies SET calling_hours_start='06:00', calling_hours_end='23:00' WHERE destination_country='AE' AND origin_country='IN'`);
+  await pool.query(`UPDATE voice_country_policies SET calling_hours_start='10:00', calling_hours_end='16:00' WHERE destination_country='AE' AND origin_country='SG'`);
+  const sql = read('migration_voice_uae_hours.sql');
+  await pool.query(sql); await pool.query(sql);
+  const r = (await pool.query(`SELECT origin_country o, calling_hours_start::text s, calling_hours_end::text e FROM voice_country_policies WHERE destination_country='AE' ORDER BY origin_country`)).rows;
+  const by = Object.fromEntries(r.map((x) => [x.o, x]));
+  assert.deepEqual([by.IN.s, by.IN.e], ['09:00:00', '18:00:00']);               // widened rows are pulled in
+  assert.deepEqual([by.SG.s, by.SG.e], ['10:00:00', '16:00:00']);               // stricter rows are left alone
+  assert.equal((await pool.query(`SELECT 1 FROM voice_country_policies WHERE destination_country<>'AE' AND calling_hours_end > '18:00' LIMIT 1`)).rowCount, 1); // other countries untouched
+});
+
+// ---- account-wide concurrency (Telnyx allows 2 live outbound calls for the whole account) ------------
+const extraAgents = async (n) => {
+  const out = [];
+  for (let i = 0; i < n; i++) out.push((await pool.query(`INSERT INTO users (tenant_id, name, email, password_hash, role) VALUES ($1,$2,$3,'x','admin') RETURNING id, role, tenant_id`,
+    [fx.A, `cap${i}`, `cap${i}-${crypto.randomBytes(3).toString('hex')}@t.co`])).rows[0]);
+  return out;
+};
+
+test('account-wide limit: with 4 agents racing for 2 lines exactly 2 claims succeed and the rest get a clear message', { skip }, async () => {
+  await reset(); await enableRoute(); delete process.env.VOICE_MAX_CONCURRENT_CALLS; // default limit = 2
+  const agents = await extraAgents(4);
+  const auths = await Promise.all(agents.map((u) => auth(u)));
+  const results = await Promise.allSettled(agents.map((u, i) => svc.calls.initiate({ user: u, tenantId: fx.A, authorizationId: auths[i].authorizationId })));
+  const ok = results.filter((r) => r.status === 'fulfilled'); const no = results.filter((r) => r.status === 'rejected');
+  assert.equal(ok.length, 2); assert.equal(no.length, 2);
+  for (const r of no) { assert.equal(r.reason.status, 503); assert.equal(r.reason.code, 'PROVIDER_ERROR'); assert.match(r.reason.message, /lines are busy/); } // existing code, no new one
+  assert.equal((await pool.query(`SELECT COUNT(*)::int n FROM voice_calls WHERE status='initiating'`)).rows[0].n, 2);
+
+  // The winner retrying is idempotent (not counted against itself); a loser's authorization is still valid and unreserved changes nothing.
+  const winnerIdx = results.findIndex((r) => r.status === 'fulfilled'); const loserIdx = results.findIndex((r) => r.status === 'rejected');
+  assert.equal((await svc.calls.initiate({ user: agents[winnerIdx], tenantId: fx.A, authorizationId: auths[winnerIdx].authorizationId })).status, 'initiating');
+  assert.equal((await pool.query(`SELECT status FROM voice_calls WHERE id=$1`, [auths[loserIdx].authorizationId])).rows[0].status, 'authorized');
+  assert.ok((await pool.query(`SELECT 1 FROM voice_audit_logs WHERE action='call.capacity_full'`)).rowCount >= 2, 'refusals are logged');
+
+  // When a live call ends, the line frees up and the waiting agent can claim.
+  await svc.webhooks.handle(evt(auths[winnerIdx].authorizationId, 'hangup', { at: '2026-06-01T10:00:20Z', detail: { endTime: '2026-06-01T10:00:20Z', hangupCause: 'no_answer' } }));
+  assert.equal((await svc.calls.initiate({ user: agents[loserIdx], tenantId: fx.A, authorizationId: auths[loserIdx].authorizationId })).status, 'initiating');
+});
+
+test('account-wide limit is configurable and 0 turns the local guard off', { skip }, async () => {
+  await reset(); await enableRoute();
+  const agents = await extraAgents(3);
+  const auths = await Promise.all(agents.map((u) => auth(u)));
+  process.env.VOICE_MAX_CONCURRENT_CALLS = '1';
+  try {
+    await svc.calls.initiate({ user: agents[0], tenantId: fx.A, authorizationId: auths[0].authorizationId });
+    await assert.rejects(svc.calls.initiate({ user: agents[1], tenantId: fx.A, authorizationId: auths[1].authorizationId }), (e) => e.code === 'PROVIDER_ERROR');
+    process.env.VOICE_MAX_CONCURRENT_CALLS = '0';
+    assert.equal((await svc.calls.initiate({ user: agents[1], tenantId: fx.A, authorizationId: auths[1].authorizationId })).status, 'initiating');
+  } finally { delete process.env.VOICE_MAX_CONCURRENT_CALLS; }
+});
+
+test('AGENT_BUSY still applies: one agent cannot hold two live calls even when the account has free lines', { skip }, async () => {
+  await reset(); await enableRoute();
+  const a = await auth(); const b = await auth();
+  await svc.calls.initiate({ user: fx.admin1, tenantId: fx.A, authorizationId: a.authorizationId });
+  await assert.rejects(svc.calls.initiate({ user: fx.admin1, tenantId: fx.A, authorizationId: b.authorizationId }), (e) => e.code === 'AGENT_BUSY' && e.status === 409);
+});
+
+test('provider-side capacity rejection (server-dial) is mapped to the same clear message, logged, and the reservation is released', { skip }, async () => {
+  await reset(); await enableRoute(); fx.failDial = true; fx.capacityDial = true;
+  try {
+    const a = await auth();
+    await assert.rejects(svc.calls.initiate({ user: fx.admin1, tenantId: fx.A, authorizationId: a.authorizationId, mode: 'server' }),
+      (e) => e.status === 503 && e.code === 'PROVIDER_ERROR' && /lines are busy/.test(e.message));
+    assert.deepEqual(await wal(), { a: '100000', r: '0' });
+    assert.equal((await pool.query(`SELECT status FROM voice_calls WHERE id=$1`, [a.authorizationId])).rows[0].status, 'failed');
+    assert.ok((await pool.query(`SELECT 1 FROM voice_audit_logs WHERE action='call.provider_capacity_limit' AND entity_id=$1`, [a.authorizationId])).rowCount >= 1);
+  } finally { fx.failDial = false; fx.capacityDial = false; }
+});
+
+test('a hangup carrying "channel limit exceeded" is logged as a capacity event and costs nothing', { skip }, async () => {
+  await reset(); await enableRoute();
+  const a = await auth(); await svc.calls.initiate({ user: fx.admin1, tenantId: fx.A, authorizationId: a.authorizationId });
+  await svc.webhooks.handle(evt(a.authorizationId, 'hangup', { at: '2026-06-01T10:00:02Z', detail: { endTime: '2026-06-01T10:00:02Z', hangupCause: 'call_rejected' }, payload: { sip_hangup_cause: '403', reason: 'User channel limit exceeded D1' } }));
+  assert.ok((await pool.query(`SELECT 1 FROM voice_audit_logs WHERE action='call.provider_capacity_limit' AND entity_id=$1`, [a.authorizationId])).rowCount >= 1);
+  assert.equal((await pool.query(`SELECT customer_cost::text c, status FROM voice_calls WHERE id=$1`, [a.authorizationId])).rows[0].c, '0');
+  assert.deepEqual(await wal(), { a: '100000', r: '0' });
+});
+
+test('changing the Telnyx connection drops stored agent credentials so /token mints them under the new connection', { skip }, async () => {
+  const admin = require('../services/voiceCalling/admin').createAdminService({ query: svc.query });
+  await pool.query(`INSERT INTO voice_agent_credentials (tenant_id, user_id, provider, provider_credential_id) VALUES ($1,$2,'telnyx','old-cred') ON CONFLICT DO NOTHING`, [fx.A, fx.admin1.id]);
+  await admin.upsertAccount({ adminId: fx.admin1.id, tenantId: fx.A, body: { providerAccountReference: 'conn', allowedDestinationCountries: ['IN'], status: 'active' } }); // unchanged ref
+  assert.equal((await pool.query(`SELECT 1 FROM voice_agent_credentials WHERE tenant_id=$1`, [fx.A])).rowCount, 1);
+  await admin.upsertAccount({ adminId: fx.admin1.id, tenantId: fx.A, body: { providerAccountReference: '3086510505527870746', allowedDestinationCountries: ['IN'], status: 'active' } });
+  assert.equal((await pool.query(`SELECT 1 FROM voice_agent_credentials WHERE tenant_id=$1`, [fx.A])).rowCount, 0);
+  await admin.upsertAccount({ adminId: fx.admin1.id, tenantId: fx.A, body: { providerAccountReference: 'conn', allowedDestinationCountries: ['IN'], status: 'active' } }); // restore
 });

@@ -67,7 +67,7 @@ test('policy fails closed on each missing condition', () => {
     NO_CONSENT: (c) => { c.hasActiveConsent = false; },
     RECORDING_NOT_PERMITTED: (c) => { c.wantRecording = true; },
     OUTSIDE_CALLING_HOURS: (c) => { c.policy.calling_hours_start = '09:00'; c.policy.calling_hours_end = '10:00'; },
-    POLICY_INVALID: (c) => { c.policy.destination_timezone = 'Not/AZone'; },
+    POLICY_INVALID: (c) => { c.policy.calling_hours_start = 'bad'; },
   };
   for (const [code, mutate] of Object.entries(cases)) {
     const c = okCtx(); mutate(c);
