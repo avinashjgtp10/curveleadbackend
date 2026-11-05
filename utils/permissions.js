@@ -14,6 +14,8 @@ const PERMISSIONS = {
   'ads.manage': 'Connect ad accounts, change budgets and pause/resume ads',
   'social.publish': 'Create, schedule and publish social posts',
   'finance.view': 'See payments, collected revenue, outstanding balances and the finance audit trail',
+  'voice.call': 'Place outbound calls to leads from CurveLead',
+  'voice.manage': 'Manage calling settings, caller IDs and wallet',
   'finance.manage': 'Record, refund, reverse and correct customer payments',
 };
 
