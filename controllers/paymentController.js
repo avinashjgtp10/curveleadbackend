@@ -335,6 +335,13 @@ const handleWebhook = async (req, res) => {
     }
 
     const event = req.body.event;
+
+    // Calling-wallet recharges are one-time orders, not subscriptions: hand them to CurveLead Voice.
+    if (event === 'payment.captured' || event === 'order.paid') {
+      await require('../services/voiceCalling').services().topups.handleWebhookEvent(req.body);
+      return;
+    }
+
     const subscriptionEntity = req.body.payload?.subscription?.entity;
     const paymentEntity = req.body.payload?.payment?.entity;
 
