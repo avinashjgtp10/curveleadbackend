@@ -21,6 +21,7 @@ const withExtras = (row) => ({
   daily_report_enabled: !!row?.settings?.daily_report_enabled,
   daily_report_time: row?.settings?.daily_report_time || '08:00',
   email_reply_to: row?.settings?.email_reply_to || '',
+  call_script: row?.settings?.call_script || '',
   automation_business_hours_enabled: !!row?.settings?.automation_business_hours_enabled,
   automation_business_hours_start: row?.settings?.automation_business_hours_start || '09:00',
   automation_business_hours_end: row?.settings?.automation_business_hours_end || '20:00',
@@ -107,6 +108,13 @@ const updateSettings = async (req, res) => {
     if (req.body.whatsapp_auto_opt_in !== undefined) {
       if (typeof req.body.whatsapp_auto_opt_in !== 'boolean') return res.status(422).json({ error: 'whatsapp_auto_opt_in must be true or false.' });
       settingsPatch.whatsapp_auto_opt_in = req.body.whatsapp_auto_opt_in;
+    }
+    // Talking points shown to agents when they start a call (CurveLead Voice). Plain text, may be empty to clear.
+    if (req.body.call_script !== undefined) {
+      if (typeof req.body.call_script !== 'string' || req.body.call_script.length > 2000) {
+        return res.status(422).json({ error: 'The call script must be text of up to 2000 characters.' });
+      }
+      settingsPatch.call_script = req.body.call_script.trim();
     }
     if (bank_details !== undefined) settingsPatch.bank_details = bank_details;
     if (daily_report_enabled !== undefined) settingsPatch.daily_report_enabled = daily_report_enabled;
