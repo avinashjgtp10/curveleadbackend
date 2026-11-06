@@ -132,3 +132,21 @@ test('hangup causes map to terminal statuses; unknown causes fail rather than bi
   assert.equal(unansweredStatus('user_busy'), 'busy'); assert.equal(unansweredStatus('no_answer'), 'no_answer');
   assert.equal(unansweredStatus('originator_cancel'), 'canceled'); assert.equal(unansweredStatus('???'), 'failed');
 });
+
+// ---- wallet recharge: gateway failures become a clear 503, with a safe log line --------------------
+test('a Razorpay authentication failure becomes "payments unavailable", logged without secrets', async () => {
+  const { createTopupService } = require('../services/voiceCalling/topups');
+  const rows = [];
+  const db = async (sql) => (/FROM voice_accounts/.test(sql) ? { rows: [{ default_currency: 'INR', status: 'active' }] } : { rows, rowCount: 0 });
+  const razorpayError = { statusCode: 401, error: { code: 'BAD_REQUEST_ERROR', description: 'Authentication failed' } }; // the SDK's real shape: a plain object
+  const gateway = { orders: { create: async () => { throw razorpayError; } }, payments: { fetch: async () => { throw razorpayError; } } };
+  const t = createTopupService({ query: db, wallet: {}, gateway, keySecret: 'SECRET-xyz', keyId: 'rzp_live_abc' });
+  const logged = []; const orig = console.error; console.error = (...a) => logged.push(a.join(' '));
+  try {
+    await assert.rejects(t.createOrder({ user: { id: 'u' }, tenantId: 't', amountMinor: 50000 }),
+      (e) => e.status === 503 && e.code === 'GATEWAY_UNAVAILABLE' && /temporarily unavailable/.test(e.message));
+  } finally { console.error = orig; }
+  assert.equal(logged.length, 1);
+  assert.match(logged[0], /401 BAD_REQUEST_ERROR: Authentication failed/);
+  assert.ok(!logged[0].includes('SECRET-xyz') && !logged[0].includes('rzp_live_abc'));
+});

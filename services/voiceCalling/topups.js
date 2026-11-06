@@ -21,12 +21,23 @@ function createTopupService(deps = {}) {
   const keyId = () => deps.keyId || process.env.RAZORPAY_KEY_ID;
   const keySecret = () => deps.keySecret || process.env.RAZORPAY_KEY_SECRET;
 
+  // Razorpay's SDK rejects with a plain object ({ statusCode, error: { code, description } }), not an Error. Log only those
+  // safe fields (never keys or request data) and give the user a clear message instead of a generic 500.
+  async function viaGateway(fn) {
+    try { return await fn(); } catch (e) {
+      if (e && e.status && e.code) throw e; // already one of our own errors
+      const detail = e?.error ? `${e.statusCode ?? ''} ${e.error.code ?? ''}: ${e.error.description ?? ''}`.trim() : String(e?.message || e);
+      console.error(`[voice] Razorpay request failed: ${detail}`.slice(0, 300));
+      throw fail(503, 'GATEWAY_UNAVAILABLE', 'Payments are temporarily unavailable. Please try again later.');
+    }
+  }
+
   // Credits the wallet iff Razorpay reports the payment captured and it matches our order. Returns 'credited'|'already'|'pending'.
   async function settleOrder({ orderId, paymentId }) {
     const order = (await db('SELECT * FROM voice_topup_orders WHERE razorpay_order_id=$1', [orderId])).rows[0];
     if (!order) throw fail(404, 'ORDER_NOT_FOUND', 'Unknown order.');
     if (order.status === 'paid') return 'already';
-    const p = await gateway().payments.fetch(paymentId);
+    const p = await viaGateway(() => gateway().payments.fetch(paymentId));
     if (p.order_id !== orderId) throw fail(400, 'ORDER_MISMATCH', 'Payment does not belong to this order.');
     if (p.status !== 'captured') return 'pending'; // authorized/failed: do not credit
     if (String(p.amount) !== String(order.amount_minor) || p.currency !== order.currency) {
@@ -49,7 +60,7 @@ function createTopupService(deps = {}) {
       const acct = (await db(`SELECT default_currency, status FROM voice_accounts WHERE tenant_id=$1 AND provider=$2`, [tenantId, process.env.VOICE_DEFAULT_PROVIDER || 'telnyx'])).rows[0];
       if (!acct || acct.status !== 'active') throw fail(403, 'ACCOUNT_INACTIVE', 'Calling is not enabled for this organization.');
       const receipt = `vw_${crypto.randomBytes(8).toString('hex')}`;
-      const order = await gateway().orders.create({ amount: Number(amount), currency: acct.default_currency, receipt, notes: { kind: 'voice_wallet', tenant_id: tenantId } });
+      const order = await viaGateway(() => gateway().orders.create({ amount: Number(amount), currency: acct.default_currency, receipt, notes: { kind: 'voice_wallet', tenant_id: tenantId } }));
       await db(`INSERT INTO voice_topup_orders (tenant_id, user_id, razorpay_order_id, amount_minor, currency) VALUES ($1,$2,$3,$4,$5)`,
         [tenantId, user.id, order.id, String(amount), acct.default_currency]);
       return { orderId: order.id, amount: Number(amount), currency: acct.default_currency, keyId: keyId() };
