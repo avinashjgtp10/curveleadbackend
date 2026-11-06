@@ -204,7 +204,13 @@ function createCallService(deps = {}) {
         return { status: 'canceled' };
       }
       if (!LIVE.includes(call.status)) return { status: call.status };
-      if (!call.provider_call_id) throw fail(409, 'CALL_NOT_READY', 'Call is still being set up. Try again in a moment.');
+      if (!call.provider_call_id) {
+        // Claimed by the browser but the provider has not reported it (yet): the agent is cancelling, and their browser has already
+        // hung up. Release the claim now instead of leaving the agent "busy" until the sweeper runs. A late provider event is still
+        // billed correctly (see webhooks.js), so a call that did connect is never lost.
+        if (call.status === 'initiating') { await this.cancelUnconfirmedClaim({ callId, tenantId }); return { status: 'canceled' }; }
+        throw fail(409, 'CALL_NOT_READY', 'Call is still being set up. Try again in a moment.');
+      }
       try { await getProvider(call.provider).hangupCall({ providerCallId: call.provider_call_id, commandId: `hangup:${call.id}` }); }
       catch (e) { throw fail(502, 'PROVIDER_ERROR', 'Could not hang up via the provider. Try again.'); }
       return { status: 'hanging_up' }; // authoritative end + settlement arrive via the call.hangup webhook
@@ -237,6 +243,16 @@ function createCallService(deps = {}) {
          FROM voice_calls c JOIN users u ON u.id=c.agent_id
          WHERE c.tenant_id=$1 AND c.status NOT IN ('authorized','expired','canceled') AND c.created_at >= $2 AND c.created_at < $3
          GROUP BY u.id, u.name ORDER BY calls DESC`, [tenantId, from, to])).rows;
+    },
+
+    async cancelUnconfirmedClaim({ callId, tenantId }) {
+      return tx(async (c) => {
+        const cur = (await c.query(`SELECT * FROM voice_calls WHERE id=$1 AND tenant_id=$2 AND status='initiating' AND provider_call_id IS NULL FOR UPDATE`, [callId, tenantId])).rows[0];
+        if (!cur) return false;
+        await wallet.releaseInTx(c, { tenantId, currency: cur.currency, callId, amount: cur.reserved_amount });
+        await c.query(`UPDATE voice_calls SET status='canceled', reserved_amount=0, hangup_cause='canceled_by_agent', ended_at=NOW(), updated_at=NOW() WHERE id=$1`, [callId]);
+        return true;
+      });
     },
 
     async cancelAuthorization({ callId, tenantId }) {

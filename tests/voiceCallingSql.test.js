@@ -425,3 +425,38 @@ test('changing the Telnyx connection drops stored agent credentials so /token mi
   assert.equal((await pool.query(`SELECT 1 FROM voice_agent_credentials WHERE tenant_id=$1`, [fx.A])).rowCount, 0);
   await admin.upsertAccount({ adminId: fx.admin1.id, tenantId: fx.A, body: { providerAccountReference: 'conn', allowedDestinationCountries: ['IN'], status: 'active' } }); // restore
 });
+
+// ---- cancelling right after starting a call ------------------------------------------------------------
+test('cancelling a claim the provider has not confirmed frees the agent and the wallet at once', { skip }, async () => {
+  await reset(); await enableRoute();
+  const a = await auth(); await svc.calls.initiate({ user: fx.admin1, tenantId: fx.A, authorizationId: a.authorizationId });
+  assert.equal((await svc.calls.hangup({ user: fx.admin1, tenantId: fx.A, callId: a.authorizationId })).status, 'canceled');
+  assert.deepEqual(await wal(), { a: '100000', r: '0' });
+  assert.equal((await pool.query(`SELECT status, hangup_cause FROM voice_calls WHERE id=$1`, [a.authorizationId])).rows[0].status, 'canceled');
+  // the same agent can start again straight away (previously: "You already have a call in progress" for ~2 minutes)
+  const b = await auth();
+  assert.equal((await svc.calls.initiate({ user: fx.admin1, tenantId: fx.A, authorizationId: b.authorizationId })).status, 'initiating');
+  // cancelling twice is harmless
+  assert.equal((await svc.calls.hangup({ user: fx.admin1, tenantId: fx.A, callId: a.authorizationId })).status, 'canceled');
+});
+
+test('a call that did connect before the cancel was recorded is still billed when its provider events arrive', { skip }, async () => {
+  await reset(); await enableRoute();
+  const a = await auth(); const id = a.authorizationId;
+  await svc.calls.initiate({ user: fx.admin1, tenantId: fx.A, authorizationId: id });
+  await svc.calls.hangup({ user: fx.admin1, tenantId: fx.A, callId: id }); // released: provider had not confirmed anything yet
+  await svc.webhooks.handle(evt(id, 'answered', { at: '2026-06-01T10:00:00Z' }));
+  await svc.webhooks.handle(evt(id, 'hangup', { at: '2026-06-01T10:01:30Z', detail: { endTime: '2026-06-01T10:01:30Z', hangupCause: 'normal_clearing' } }));
+  const c = (await pool.query(`SELECT status, billable_seconds, customer_cost::text cc FROM voice_calls WHERE id=$1`, [id])).rows[0];
+  assert.equal(c.status, 'completed'); assert.equal(c.billable_seconds, 90); assert.equal(c.cc, '300'); // 90s rounds up to 2 billed minutes at the fixture's 1.50/min = 300 paise
+});
+
+test('a call the provider already knows about is still hung up through the provider, not released locally', { skip }, async () => {
+  await reset(); await enableRoute(); providerLog.length = 0;
+  const a = await auth(); const id = a.authorizationId;
+  await svc.calls.initiate({ user: fx.admin1, tenantId: fx.A, authorizationId: id });
+  await svc.webhooks.handle(evt(id, 'ringing', { at: '2026-06-01T10:00:00Z' })); // sets provider_call_id
+  assert.equal((await svc.calls.hangup({ user: fx.admin1, tenantId: fx.A, callId: id })).status, 'hanging_up');
+  assert.ok(providerLog.some(([k]) => k === 'hangup'));
+  assert.equal((await pool.query(`SELECT status FROM voice_calls WHERE id=$1`, [id])).rows[0].status, 'ringing'); // final state comes from the webhook
+});
