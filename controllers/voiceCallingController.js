@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const { services } = require('../services/voiceCalling');
+const { describeError, where } = require('../services/voiceCalling/errors');
 const { computeVoiceEnabled, validateVoiceConfig, voiceUnavailable } = require('../services/voiceCalling/config');
 
 const providerId = () => process.env.VOICE_DEFAULT_PROVIDER || 'telnyx';
@@ -11,9 +12,9 @@ const handle = (fn) => async (req, res) => {
   catch (e) {
     // A provider failure (bad Telnyx key => 401, etc.) must NOT reach the browser as its own status: the web app treats
     // 401 as "logged out". Report it as a gateway problem without provider details.
-    if (e.name === 'ProviderError') { console.error('Voice provider error:', e.message); return res.status(502).json({ error: 'The calling provider is unavailable. Please try again.', code: 'PROVIDER_ERROR' }); }
+    if (e.name === 'ProviderError') { console.error(`Voice provider error [${where(req)}]:`, describeError(e)); return res.status(502).json({ error: 'The calling provider is unavailable. Please try again.', code: 'PROVIDER_ERROR' }); }
     if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
-    console.error('Voice API error:', e.message);
+    console.error(`Voice API error [${where(req)}]:`, describeError(e));
     res.status(500).json({ error: 'Something went wrong.' });
   }
 };
@@ -133,7 +134,7 @@ exports.telnyxWebhook = async (req, res) => {
     res.status(200).json({ ok: true, ...(out.duplicate ? { duplicate: true } : {}) });
   } catch (e) {
     if (e.status === 401) return res.status(401).json({ error: 'Invalid webhook.' });
-    console.error('Voice webhook error:', e.message);
+    console.error('Voice webhook error:', describeError(e));
     res.status(500).json({ error: 'Webhook processing failed.' }); // non-2xx => Telnyx retries; idempotency makes that safe
   }
 };
