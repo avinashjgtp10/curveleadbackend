@@ -1,3 +1,4 @@
+const { describeError, where } = require('../services/voiceCalling/errors');
 const { services } = require('../services/voiceCalling');
 const { audit } = require('../services/voiceCalling/audit');
 
@@ -5,7 +6,7 @@ const handle = (fn) => async (req, res) => {
   try { await fn(req, res); }
   catch (e) {
     if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
-    console.error('Voice admin error:', e.message);
+    console.error(`Voice admin error [${where(req)}]:`, describeError(e));
     res.status(500).json({ error: 'Something went wrong.' });
   }
 };
