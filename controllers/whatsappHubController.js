@@ -376,8 +376,12 @@ const getBookingMessages = async (req, res) => {
          WHERE b.tenant_id = $1 ORDER BY b.created_at DESC LIMIT 20`, [req.tenantId]
       )).rows;
     } catch (e) { if (!isMissingSchema(e)) throw e; }
+    let template_checks = {};
+    try { template_checks = await require('../services/bookingMessages').checkTemplates(t.settings || {}); }
+    catch (e) { console.error('booking template check failed:', e.message); }
     res.json({
       ...bookingSettings(t.settings),
+      template_checks,
       business_name: t.name || '',
       business_address: [t.address, t.city].filter(Boolean).join(', '),
       timezone: localeFromSettings(t.settings || {}).timezone,
