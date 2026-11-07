@@ -51,6 +51,7 @@ function validateSequence(body) {
   let questions = 0;
   for (const [i,s] of body.steps.entries()) {
     if (!s || typeof s !== 'object' || (s.always_template !== undefined && typeof s.always_template !== 'boolean')) return 'Invalid step.';
+    if (s.business_hours_only != null && typeof s.business_hours_only !== 'boolean') return 'business_hours_only must be true or false.';
     if (s.reply_routes != null && !Array.isArray(s.reply_routes)) return 'Reply routes must be an array.';
     if (!Number.isInteger(s.delay_minutes) || s.delay_minutes < 0 || s.delay_minutes > 525600) return `Step ${i+1}: invalid delay.`;
     if (!['whatsapp','email'].includes(s.channel || 'whatsapp')) return 'Invalid step channel.';

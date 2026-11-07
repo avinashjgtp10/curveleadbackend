@@ -6,6 +6,7 @@ const { substituteVars } = require('../utils/templateVars');
 const { generateFollowUpMessage } = require('../services/groqService');
 const { localeFromSettings, zonedParts, wallTimeToUtc } = require('../utils/workspaceLocale');
 const { decideConsent, templateCategory } = require('../services/whatsappConsent');
+const stepHours = require('../utils/leadTimezone');
 const { stopReason, templatePlan, sendOutcome, stepAttachment, sendKind } = require('../utils/automationPolicy');
 
 // Business hours are the workspace's local time (settings.timezone).
@@ -115,6 +116,11 @@ function createRunner(deps = {}) {
     if (!isWithinBusinessHours(settings,new Date())) {
      await db.query('UPDATE automation_enrollments SET next_send_at=$1,claim_token=NULL,claim_until=NULL WHERE id=$2 AND claim_token=$3',[nextBusinessWindowStart(settings,new Date()),row.id,token]);continue;
     }
+    // A step marked "only during business hours" waits for the lead's own opening time (their time zone, from their number).
+    const stepHold = step.business_hours_only ? stepHours.deferForStepHours(step, lead, settings, new Date()) : null;
+    if (stepHold) {
+     await db.query('UPDATE automation_enrollments SET next_send_at=$1,claim_token=NULL,claim_until=NULL WHERE id=$2 AND claim_token=$3',[stepHold,row.id,token]);continue;
+    }
     let list = null, media = null, aiMessage = null;
     if (step.approved_template_name) {
      list = settings.whatsapp_business_account_id && settings.whatsapp_access_token ? await templatesList(settings.whatsapp_business_account_id,settings.whatsapp_access_token) : {success:false,transient:false,error:'WhatsApp template catalogue connection is missing.'};
@@ -144,6 +150,8 @@ function createRunner(deps = {}) {
      if(currentLead.ai_paused || currentLead.automation_unresponsive || !e.sequence_active){await client.query(`UPDATE automation_enrollments SET claim_token=NULL,claim_until=NULL WHERE id=$1`,[e.id]);await client.query(`UPDATE automation_send_attempts SET status='ready' WHERE id=$1`,[attempt.id]);return;}
      const liveSettings=e.tenant_settings || {};
      if (!isWithinBusinessHours(liveSettings,new Date())) {await client.query('UPDATE automation_enrollments SET next_send_at=$2,claim_token=NULL,claim_until=NULL WHERE id=$1',[e.id,nextBusinessWindowStart(liveSettings,new Date())]);await client.query(`UPDATE automation_send_attempts SET status='ready' WHERE id=$1`,[attempt.id]);return;}
+     const liveHold = step.business_hours_only ? stepHours.deferForStepHours(step, currentLead, liveSettings, new Date()) : null;
+     if (liveHold) {await client.query('UPDATE automation_enrollments SET next_send_at=$2,claim_token=NULL,claim_until=NULL WHERE id=$1',[e.id,liveHold]);await client.query(`UPDATE automation_send_attempts SET status='ready' WHERE id=$1`,[attempt.id]);return;}
      if(liveSettings.automation_daily_cap_enabled){const count=(await client.query(`SELECT count(*) AS n FROM whatsapp_messages WHERE tenant_id=$1 AND lead_id=$2 AND is_automated=true AND sent_at>=CURRENT_DATE`,[e.tenant_id,e.lead_id])).rows[0];if(Number(count.n)>=(liveSettings.automation_daily_cap || 1)){await client.query(`UPDATE automation_enrollments SET next_send_at=now()+interval '1 day',claim_token=NULL,claim_until=NULL WHERE id=$1`,[e.id]);await client.query(`UPDATE automation_send_attempts SET status='ready' WHERE id=$1`,[attempt.id]);return;}}
      const sessionOpen=currentLead.last_inbound && Date.now()-new Date(currentLead.last_inbound).getTime()<86400000;
      let message=substituteVars(step.message || '',currentLead), plan=null, send;

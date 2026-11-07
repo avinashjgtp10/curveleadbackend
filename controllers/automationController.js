@@ -36,6 +36,7 @@ const getSequences = async (req, res) => {
                   'ai_generated', st.ai_generated, 'ai_instructions', st.ai_instructions,
                   'always_template',st.always_template,'template_language',st.template_language,
                   'media',COALESCE(to_jsonb(st)->'media','[]'::jsonb),
+                  'business_hours_only',COALESCE(to_jsonb(st)->'business_hours_only','false'::jsonb),
                   'template_parameters',st.template_parameters,'reply_routes',st.reply_routes
                 ) ORDER BY st.step_order
               ) FILTER (WHERE st.id IS NOT NULL), '[]') AS steps
@@ -68,6 +69,11 @@ const saveSteps = async (client, tenantId, sequenceId, steps) => {
         !!s.always_template,s.template_language || null,JSON.stringify(s.template_parameters || []),JSON.stringify(s.reply_routes || []),
       ]
     );
+    // Same idea for the business-hours flag: only a step that turns it on needs the column, so everything else keeps saving
+    // before migration_step_business_hours.sql has been run.
+    if (s.business_hours_only === true) {
+      await client.query('UPDATE automation_sequence_steps SET business_hours_only = true WHERE sequence_id = $1 AND step_order = $2', [sequenceId, i]);
+    }
     // Written on its own so sequences without files keep saving even before the media
     // migration has been run; a step that does carry a file reports the schema problem.
     if (s.media?.length) {
