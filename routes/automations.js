@@ -6,6 +6,8 @@ const enrollCtrl = require('../controllers/automationEnrollmentController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 const { requirePermission } = require('../utils/permissions');
+const rateLimit = require('express-rate-limit');
+const testSend = require('../controllers/automationTestSendController');
 
 const multer = require('multer');
 const { MAX_UPLOAD_BYTES } = require('../utils/sequenceMedia');
@@ -16,6 +18,9 @@ router.use(authenticate, tenantContext);
 router.post('/media', requirePermission('automations.manage'), (req, res, next) => mediaUpload.single('file')(req, res, (err) => (err
   ? res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'That file is too large (16 MB at most).' : 'Upload failed.' })
   : next())), ctrl.uploadStepMedia);
+// A test always goes to the signed-in user's own phone; keep it from being used as a message cannon.
+const testSendLimiter = rateLimit({ windowMs: 60 * 1000, max: Number(process.env.AUTOMATION_TEST_SEND_PER_MIN) || 5, keyGenerator: (req) => `autotest:${req.user?.id || req.ip}`, message: { error: 'Too many test messages. Wait a minute and try again.' } });
+router.post('/test-send', requirePermission('automations.manage'), testSendLimiter, testSend.testSend);
 router.get('/sequences', ctrl.getSequences);
 router.post('/sequences', requirePermission('automations.manage'), ctrl.createSequence);
 router.put('/sequences/:id', requirePermission('automations.manage'), ctrl.updateSequence);
