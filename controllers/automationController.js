@@ -13,8 +13,21 @@ const validateTargets = async (client, tenantId, steps, ownId) => {
 
 const getSequences = async (req, res) => {
   try {
+    // Per-sequence lead counts so the list can say "12 in it, 2 need attention" without a second request.
+    //   enrolled_total  every lead ever enrolled      enrolled_active  still receiving messages (or waiting for a reply)
+    //   with_errors     blocked, failed or uncertain  in_review        waiting for a person to look at a reply
     const result = await query(
-      `SELECT s.*,
+      `WITH counts AS (
+         SELECT sequence_id,
+                COUNT(*) AS enrolled_total,
+                COUNT(*) FILTER (WHERE status IN ('active','awaiting_reply')) AS enrolled_active,
+                COUNT(*) FILTER (WHERE status IN ('blocked','failed','uncertain')) AS with_errors,
+                COUNT(*) FILTER (WHERE status = 'human_review') AS in_review
+         FROM automation_enrollments WHERE tenant_id = $1 GROUP BY sequence_id
+       )
+       SELECT s.*,
+              COALESCE(c.enrolled_total, 0) AS enrolled_total, COALESCE(c.enrolled_active, 0) AS enrolled_active,
+              COALESCE(c.with_errors, 0) AS with_errors, COALESCE(c.in_review, 0) AS in_review,
               COALESCE(json_agg(
                 json_build_object(
                   'id', st.id, 'step_order', st.step_order, 'delay_minutes', st.delay_minutes,
@@ -28,12 +41,14 @@ const getSequences = async (req, res) => {
               ) FILTER (WHERE st.id IS NOT NULL), '[]') AS steps
        FROM automation_sequences s
        LEFT JOIN automation_sequence_steps st ON st.sequence_id = s.id
+       LEFT JOIN counts c ON c.sequence_id = s.id
        WHERE s.tenant_id = $1
-       GROUP BY s.id
+       GROUP BY s.id, c.enrolled_total, c.enrolled_active, c.with_errors, c.in_review
        ORDER BY s.created_at DESC`,
       [req.tenantId]
     );
-    res.json({ sequences: result.rows });
+    const n = (v) => parseInt(v, 10) || 0;
+    res.json({ sequences: result.rows.map(r => ({ ...r, enrolled_total: n(r.enrolled_total), enrolled_active: n(r.enrolled_active), with_errors: n(r.with_errors), in_review: n(r.in_review) })) });
   } catch (e) { console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Failed.' }); }
 };
 
