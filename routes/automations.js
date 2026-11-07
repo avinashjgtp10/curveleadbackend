@@ -7,6 +7,7 @@ const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 const { requirePermission } = require('../utils/permissions');
 const rateLimit = require('express-rate-limit');
+const insights = require('../controllers/automationInsightsController');
 const testSend = require('../controllers/automationTestSendController');
 
 const multer = require('multer');
@@ -22,6 +23,8 @@ router.post('/media', requirePermission('automations.manage'), (req, res, next) 
 const testSendLimiter = rateLimit({ windowMs: 60 * 1000, max: Number(process.env.AUTOMATION_TEST_SEND_PER_MIN) || 5, keyGenerator: (req) => `autotest:${req.user?.id || req.ip}`, message: { error: 'Too many test messages. Wait a minute and try again.' } });
 router.post('/test-send', requirePermission('automations.manage'), testSendLimiter, testSend.testSend);
 router.get('/sequences', ctrl.getSequences);
+router.get('/sequences/:id/analytics', requirePermission('automations.manage'), insights.getSequenceAnalytics);
+router.get('/leads/:leadId/timeline', insights.getLeadTimeline);
 router.post('/sequences', requirePermission('automations.manage'), ctrl.createSequence);
 router.put('/sequences/:id', requirePermission('automations.manage'), ctrl.updateSequence);
 router.delete('/sequences/:id', requirePermission('automations.manage'), ctrl.deleteSequence);
