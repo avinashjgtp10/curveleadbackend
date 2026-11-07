@@ -31,7 +31,7 @@ const clampDays = (v, def) => Math.min(Math.max(parseInt(v) || def, 1), 365);
 const getAnalytics = async (req, res) => {
   try {
     const days = clampDays(req.query.days, 30);
-    const [totals, daily, templates, response] = await Promise.all([
+    const [totals, daily, templates, response, failures] = await Promise.all([
       query(
         `SELECT
            COUNT(*) FILTER (WHERE direction = 'outbound') AS sent,
@@ -83,6 +83,16 @@ const getAnalytics = async (req, res) => {
          ) x WHERE secs IS NOT NULL AND secs < 86400`,
         [req.tenantId, String(days)]
       ),
+      // Why messages failed: the stored reason ("[131049] …"), grouped by Meta's code. Best-effort: older databases without
+      // the error_detail column just return no reasons.
+      query(
+        `SELECT substring(error_detail from '^\\[(\\d+)\\]') AS code, MIN(error_detail) AS detail, COUNT(*) AS count,
+                (array_agg(DISTINCT template_name) FILTER (WHERE template_name IS NOT NULL))[1:3] AS templates
+         FROM whatsapp_messages
+         WHERE tenant_id = $1 AND direction = 'outbound' AND status = 'failed' AND sent_at >= NOW() - ($2 || ' days')::interval
+         GROUP BY 1 ORDER BY count DESC LIMIT 8`,
+        [req.tenantId, String(days)]
+      ).catch((e) => { if (isMissingSchema(e)) return { rows: [] }; throw e; }),
     ]);
 
     const t = totals.rows[0];
@@ -97,6 +107,7 @@ const getAnalytics = async (req, res) => {
         read_rate: sent ? Math.round((n(t.read) / sent) * 100) : 0,
       },
       median_response_seconds: response.rows[0]?.median_seconds != null ? Math.round(response.rows[0].median_seconds) : null,
+      failure_reasons: failures.rows.map(r => ({ code: r.code || null, detail: r.detail || null, count: n(r.count), templates: r.templates || [] })),
       daily: daily.rows.map(r => ({ day: r.day, sent: n(r.sent), received: n(r.received) })),
       templates: templates.rows.map(r => ({
         template_name: r.template_name, sent: n(r.sent), delivered: n(r.delivered), read: n(r.read),
@@ -133,11 +144,28 @@ const getBroadcastHistory = async (req, res) => {
       [req.tenantId, String(days)]
     );
     const n = (v) => parseInt(v) || 0;
+    // Reasons behind each broadcast's failures (same grouping as the rows above). Best-effort, like the analytics ones.
+    const reasons = new Map();
+    try {
+      const f = await query(
+        `SELECT m.template_name, DATE_TRUNC('hour', m.sent_at) AS sent_hour, u.name AS sent_by_name,
+                substring(m.error_detail from '^\\[(\\d+)\\]') AS code, MIN(m.error_detail) AS detail, COUNT(*) AS count
+         FROM whatsapp_messages m LEFT JOIN users u ON u.id = m.sent_by
+         WHERE m.tenant_id = $1 AND m.direction = 'outbound' AND m.message_type = 'template' AND m.status = 'failed'
+           AND COALESCE(m.is_automated, false) = false AND m.template_name IS NOT NULL AND m.sent_at >= NOW() - ($2 || ' days')::interval
+         GROUP BY 1, 2, 3, 4 ORDER BY count DESC`, [req.tenantId, String(days)]);
+      for (const r of f.rows) {
+        const key = `${r.template_name}|${new Date(r.sent_hour).toISOString()}|${r.sent_by_name || ''}`;
+        if (!reasons.has(key)) reasons.set(key, []);
+        reasons.get(key).push({ code: r.code || null, detail: r.detail || null, count: n(r.count) });
+      }
+    } catch (e) { if (!isMissingSchema(e)) throw e; }
     res.json({
       days,
       broadcasts: result.rows.map(r => ({
         template_name: r.template_name, sent_at: r.sent_hour, sent_by_name: r.sent_by_name,
         total: n(r.total), delivered: n(r.delivered), read: n(r.read), failed: n(r.failed), replied: n(r.replied),
+        failure_reasons: reasons.get(`${r.template_name}|${new Date(r.sent_hour).toISOString()}|${r.sent_by_name || ''}`) || [],
       })),
     });
   } catch (e) { console.error('getBroadcastHistory:', e.message); res.status(500).json({ error: 'Failed to load broadcast history.' }); }
@@ -376,8 +404,12 @@ const getBookingMessages = async (req, res) => {
          WHERE b.tenant_id = $1 ORDER BY b.created_at DESC LIMIT 20`, [req.tenantId]
       )).rows;
     } catch (e) { if (!isMissingSchema(e)) throw e; }
+    let template_checks = {};
+    try { template_checks = await require('../services/bookingMessages').checkTemplates(t.settings || {}); }
+    catch (e) { console.error('booking template check failed:', e.message); }
     res.json({
       ...bookingSettings(t.settings),
+      template_checks,
       business_name: t.name || '',
       business_address: [t.address, t.city].filter(Boolean).join(', '),
       timezone: localeFromSettings(t.settings || {}).timezone,

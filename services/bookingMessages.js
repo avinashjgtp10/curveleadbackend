@@ -78,13 +78,59 @@ const FALLBACKS = { meeting_url: "we'll share the link shortly", address: "we'll
 
 const templateVarCount = (text) => Math.max(0, ...[...(text || '').matchAll(/\{\{(\d+)\}\}/g)].map(m => Number(m[1])));
 
-// Resolves the approved template (name → language + body) from the workspace's WABA.
+const bodyText = (t) => t?.components?.find(c => c.type === 'BODY')?.text || '';
+const norm = (v) => String(v || '').trim().toLowerCase();
+
+// Finds a template by name in Meta's list. Names are compared ignoring case and surrounding spaces. A name can exist in several
+// languages: it counts as verified if ANY variant is approved. Otherwise we say what state it is in, rather than "not found".
+//   verified | not_approved (PENDING, REJECTED, PAUSED, DISABLED...) | not_found | none (no name set)
+const lookupTemplate = (templates, name) => {
+  const wanted = norm(name);
+  if (!wanted) return { state: 'none' };
+  const matches = (templates || []).filter(t => norm(t.name) === wanted);
+  if (!matches.length) return { state: 'not_found' };
+  const approved = matches.find(t => t.status === 'APPROVED');
+  if (approved) return { state: 'verified', template: approved, status: 'APPROVED', language: approved.language };
+  const statuses = [...new Set(matches.map(t => t.status).filter(Boolean))];
+  return { state: 'not_approved', status: statuses[0] || 'UNKNOWN', statuses, language: matches[0].language };
+};
+
+const humanStatus = (s) => String(s || 'unknown').toLowerCase().replace(/_/g, ' ');
+const lookupMessage = (name, r, complete) => {
+  if (r.state === 'not_approved') return `Template "${name}" is ${humanStatus(r.status)} in WhatsApp Manager, so it can't be sent yet.`;
+  if (r.state === 'not_found') return `Template "${name}" wasn't found in your WhatsApp account.${complete === false ? ' (Only part of a very large template list could be checked.)' : ''}`;
+  return null;
+};
+const couldNotLoad = (list) => (list?.code === 190
+  ? 'Your WhatsApp access token has expired or was revoked. Reconnect WhatsApp to check templates.'
+  : 'Could not load WhatsApp templates from Meta.');
+
+// Resolves the approved template (name -> language + body) from the workspace's WABA. `code` says why it failed.
 const findApprovedTemplate = async (settings, name) => {
   const list = await listMessageTemplates(settings.whatsapp_business_account_id, settings.whatsapp_access_token).catch(() => null);
-  if (!list?.success) return { error: 'Could not load WhatsApp templates from Meta.' };
-  const t = list.templates.find(x => x.name === name && x.status === 'APPROVED');
-  if (!t) return { error: `Template "${name}" is not approved (or no longer exists) in WhatsApp Manager.` };
-  return { template: t, body: t.components?.find(c => c.type === 'BODY')?.text || '' };
+  if (!list?.success) return { error: couldNotLoad(list), code: 'unverified' };
+  const r = lookupTemplate(list.templates, name);
+  if (r.state !== 'verified') return { error: lookupMessage(name, r, list.complete) || `Template "${name}" can't be used.`, code: r.state };
+  return { template: r.template, body: bodyText(r.template) };
+};
+
+const TEMPLATE_SETTING_KEYS = ['demo_confirmation_template', 'visit_confirmation_template', 'demo_reminder_template', 'visit_reminder_template'];
+
+// What the settings screen shows next to each chosen template. Uses the same list and the same matching as the sender,
+// so the screen can never say "not found" for a template the sender would accept (or the reverse).
+//   { [settingKey]: { state: verified|not_approved|not_found|unverified, status?, language?, message? } }
+const checkTemplates = async (settings) => {
+  const cfg = bookingSettings(settings);
+  const keys = TEMPLATE_SETTING_KEYS.filter(k => cfg[k]);
+  if (!keys.length) return {};
+  const list = await listMessageTemplates(settings.whatsapp_business_account_id, settings.whatsapp_access_token).catch(() => null);
+  const out = {};
+  for (const k of keys) {
+    if (!list?.success) { out[k] = { state: 'unverified', message: couldNotLoad(list) }; continue; }
+    const r = lookupTemplate(list.templates, cfg[k]);
+    out[k] = { state: r.state, status: r.status, language: r.language, message: lookupMessage(cfg[k], r, list.complete) };
+  }
+  return out;
 };
 
 const loadBooking = async (followupId) => (await query(
@@ -200,5 +246,5 @@ const sendBookingMessage = async (followupId, kind) => {
 
 module.exports = {
   BOOKING_TYPES, DEFAULTS, VARIABLES, bookingSettings, whenText, bookingValues, freeText, templateVarCount, sendBookingMessage,
-  findApprovedTemplate,
+  findApprovedTemplate, lookupTemplate, checkTemplates, TEMPLATE_SETTING_KEYS,
 };

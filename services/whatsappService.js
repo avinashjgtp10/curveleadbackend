@@ -179,26 +179,38 @@ const verifyWhatsAppNumber = async (phoneNumberId, accessToken) => {
  */
 // Credential-scoped, bounded last-good cache; never reuse data after a token change.
 const templateCache = new Map();
+const TEMPLATE_PAGE_LIMIT = 100;
+const TEMPLATE_MAX_PAGES = 10; // 1000 templates; beyond that the list is reported as incomplete rather than silently cut
 const listMessageTemplates = async (wabaId, accessToken) => {
   const key = require('crypto').createHash('sha256').update(`${wabaId}:${accessToken}`).digest('hex');
   const cached = templateCache.get(key);
-  if (cached && Date.now() - cached.at < 60000) return { success: true, templates: cached.templates };
+  if (cached && Date.now() - cached.at < 60000) return { success: true, templates: cached.templates, complete: cached.complete };
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await axios.get(`${META_API_URL}/${wabaId}/message_templates`, {
-        timeout: 5000,
-        params: { fields: 'name,language,category,status,components,rejected_reason', limit: 100, access_token: accessToken },
-      });
-      const templates = response.data.data || [];
+      // Meta returns templates in pages; only reading the first page hid everything after the first 100.
+      const templates = [];
+      let after; let complete = true;
+      for (let page = 0; page < TEMPLATE_MAX_PAGES; page++) {
+        const response = await axios.get(`${META_API_URL}/${wabaId}/message_templates`, {
+          timeout: 5000,
+          params: { fields: 'name,language,category,status,components,rejected_reason', limit: TEMPLATE_PAGE_LIMIT, access_token: accessToken, ...(after ? { after } : {}) },
+        });
+        templates.push(...(response.data.data || []));
+        const paging = response.data.paging;
+        if (!paging?.next) break;
+        after = paging.cursors?.after;
+        if (!after) { complete = false; break; }
+        if (page === TEMPLATE_MAX_PAGES - 1) complete = false;
+      }
       if (templateCache.size >= 500) templateCache.delete(templateCache.keys().next().value);
-      templateCache.set(key, { at: Date.now(), templates });
-      return { success: true, templates };
+      templateCache.set(key, { at: Date.now(), templates, complete });
+      return { success: true, templates, complete };
     } catch (error) {
       const status = error.response?.status;
       const transient = !status || status === 429 || status >= 500;
       console.error('Meta template listing failed:', { status, code: error.code, attempt: attempt + 1 });
       if (transient && attempt === 0) { await new Promise(resolve => setTimeout(resolve, 250)); continue; }
-      if (transient && cached && Date.now() - cached.at < 86400000) return { success: true, templates: cached.templates, stale: true };
+      if (transient && cached && Date.now() - cached.at < 86400000) return { success: true, templates: cached.templates, complete: cached.complete, stale: true };
       if (!transient) templateCache.delete(key);
       return { success: false, transient, error: error.response?.data?.error?.message || error.message, code: error.response?.data?.error?.code };
     }
@@ -310,6 +322,7 @@ const sendMediaMessage = async (to, fileType, mediaUrl, caption = '', credential
 };
 
 module.exports = {
+  __templateCache: templateCache,
   sendTextMessage, sendTemplate, sendMediaMessage, verifyWhatsAppNumber, listMessageTemplates, describeStatusError,
   createMessageTemplate, uploadTemplateMedia,
 };
