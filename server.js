@@ -107,13 +107,20 @@ const jwt = require('jsonwebtoken');
 const limiterUserId = (req) => {
   const auth = req.headers.authorization || '';
   if (!auth.startsWith('Bearer ')) return null;
-  try { return jwt.verify(auth.slice(7), process.env.JWT_SECRET).userId || null; } catch { return null; }
+  // ignoreExpiration: an expired-but-genuine token must still count against its own user's
+  // bucket, not the shared IP bucket (the auth middleware rejects it later anyway).
+  try { return jwt.verify(auth.slice(7), process.env.JWT_SECRET, { ignoreExpiration: true }).userId || null; } catch { return null; }
 };
+// 1-minute window so the app's "wait a minute and try again" is actually true. (The old
+// 15-minute window locked users out of the dashboard for up to 15 minutes after a burst.)
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: (req) => (limiterUserId(req) ? 2000 : 500),
+  windowMs: 60 * 1000,
+  max: (req) => (limiterUserId(req) ? 600 : 200),
   keyGenerator: (req) => { const id = limiterUserId(req); return id ? `user:${id}` : req.ip; },
-  message: { error: 'Too many requests, please try again later.' },
+  skip: (req) => req.method === 'OPTIONS',
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please wait a minute and try again.' },
 });
 
 // ============================================
