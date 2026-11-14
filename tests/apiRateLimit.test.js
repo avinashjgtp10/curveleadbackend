@@ -95,3 +95,13 @@ test('an invalid or expired token falls back to the IP bucket instead of crashin
     assert.equal((await bad()).status, 429); // IP limit (1) applies, not the user limit (9)
   } finally { await s.close(); }
 });
+
+test('RATE_LIMIT_USER_DISABLED removes the limit for signed-in users only', async () => {
+  const s = await boot({ RATE_LIMIT_USER_DISABLED: 'true', RATE_LIMIT_USER_MAX: '2', RATE_LIMIT_BACKGROUND_USER_MAX: '2', RATE_LIMIT_IP_MAX: '3' });
+  try {
+    for (let i = 0; i < 20; i++) assert.equal((await s.call('/api/leads', { user: 'u1' })).status, 200);
+    for (let i = 0; i < 20; i++) assert.equal((await s.call('/api/notifications', { user: 'u1' })).status, 200);
+    for (let i = 0; i < 3; i++) assert.equal((await s.call('/api/auth/login', { method: 'POST', ip: '9.9.9.9' })).status, 200);
+    assert.equal((await s.call('/api/auth/login', { method: 'POST', ip: '9.9.9.9' })).status, 429); // anonymous still limited
+  } finally { await s.close(); }
+});
