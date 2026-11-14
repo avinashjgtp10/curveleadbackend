@@ -34,6 +34,9 @@ function createApiLimiter({ env = process.env, log = console.warn, now = Date.no
   const userMax = envInt(env, 'RATE_LIMIT_USER_MAX', 2000);
   const ipMax = envInt(env, 'RATE_LIMIT_IP_MAX', 500);
   const bgUserMax = envInt(env, 'RATE_LIMIT_BACKGROUND_USER_MAX', 3000);
+  // Kill switch: RATE_LIMIT_USER_DISABLED=true removes the limit for signed-in users. Unauthenticated traffic
+  // (login, public routes) stays limited per IP so password guessing is still throttled.
+  const usersUnlimited = String(env.RATE_LIMIT_USER_DISABLED || '').toLowerCase() === 'true';
 
   const logged = new Map(); // key -> window end; log once per key per window
   const logOnce = (req, bucket, key, limit, resetAt) => {
@@ -51,7 +54,7 @@ function createApiLimiter({ env = process.env, log = console.warn, now = Date.no
       keyGenerator: (req) => { const id = userIdFrom(req); return id ? `user:${id}` : `ip:${req.ip}`; },
       standardHeaders: true,   // RateLimit-* and Retry-After
       legacyHeaders: false,
-      skip,
+      skip: (req) => skip(req) || (usersUnlimited && !!userIdFrom(req)),
       handler: (req, res) => {
         const resetAt = req.rateLimit?.resetTime ? new Date(req.rateLimit.resetTime).getTime() : now() + WINDOW_MS;
         const retryAfterSeconds = Math.max(1, Math.ceil((resetAt - now()) / 1000));
