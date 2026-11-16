@@ -181,6 +181,45 @@ const login = async (req, res) => {
   }
 };
 
+// Google's own endpoint validates the signature and expiry of an ID token, so no extra dependency is needed.
+const verifyGoogleIdToken = async (credential) => {
+  const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
+  if (!response.ok) return null;
+  const info = await response.json();
+  // Only tokens issued to one of our own Google client IDs (web, Android, iOS) are accepted.
+  const allowed = (process.env.GOOGLE_LOGIN_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || '').split(',').map((id) => id.trim()).filter(Boolean);
+  if (!allowed.length || !allowed.includes(info.aud)) return null;
+  if (String(info.email_verified) !== 'true' || !info.email) return null;
+  return { email: String(info.email).toLowerCase() };
+};
+
+// POST /api/auth/google — { credential: <Google ID token> }. Signs in an existing user whose email Google has verified.
+const googleLogin = async (req, res) => {
+  try {
+    const { credential } = req.body || {};
+    if (!credential || typeof credential !== 'string') return res.status(400).json({ error: 'Google credential required.' });
+    if (!(process.env.GOOGLE_LOGIN_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID)) {
+      return res.status(503).json({ error: 'Google sign-in is not configured.' });
+    }
+
+    const google = await verifyGoogleIdToken(credential);
+    if (!google) return res.status(401).json({ error: 'Google sign-in could not be verified.' });
+
+    const result = await query(`${LOGIN_SELECT} WHERE LOWER(u.email) = $1`, [google.email]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No CurveLead account uses this Google email. Sign up first, then use Google to sign in.' });
+    }
+    const user = result.rows[0];
+    if (!user.is_active) return res.status(403).json({ error: 'Account inactive.' });
+
+    await query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
+    res.json(sessionPayload(user));
+  } catch (error) {
+    console.error('Google login error:', error);
+    res.status(500).json({ error: 'Google sign-in failed.' });
+  }
+};
+
 // GET /api/auth/me
 const getProfile = async (req, res) => {
   res.json({
@@ -478,4 +517,4 @@ const verifyOtp = async (req, res) => {
   }
 };
 
-module.exports = { requestOtp, verifyOtp, signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite, getPreferences, updatePreferences };
+module.exports = { requestOtp, verifyOtp, signup, login, googleLogin, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite, getPreferences, updatePreferences };

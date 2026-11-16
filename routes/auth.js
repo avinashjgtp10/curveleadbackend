@@ -1,13 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const {
-  signup, login, requestOtp, verifyOtp, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite,
+  signup, login, googleLogin, requestOtp, verifyOtp, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite,
   getPreferences, updatePreferences,
 } = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 
 router.post('/signup', signup);
 router.post('/login', login);
+router.post('/google', googleLogin);
 router.post('/request-otp', requestOtp);
 router.post('/verify-otp', verifyOtp);
 router.post('/forgot-password', forgotPassword);
