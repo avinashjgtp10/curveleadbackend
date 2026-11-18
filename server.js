@@ -124,6 +124,8 @@ app.get('/api/health', (req, res) => {
 // API Routes
 // ============================================
 app.use('/api/app', apiLimiter, require('./routes/app')); // public: mobile version check
+app.use('/api/auth', apiLimiter, require('./routes/googleAuth'));
+app.use('/api/v1/auth', apiLimiter, require('./routes/googleAuth')); // GOOGLE_REDIRECT_URI path
 app.use('/api/auth', apiLimiter, require('./routes/auth'));
 app.use('/api/leads', apiLimiter, require('./routes/leads'));
 app.use('/api/followups', apiLimiter, require('./routes/followups'));
@@ -249,6 +251,11 @@ app.listen(PORT, () => {
   require('./jobs/metaLeadJobs').registerMetaLeadJobs();
   require('./jobs/socialJobs').registerSocialJobs();
   require('./jobs/queues').start().catch(e => console.error('Job queues failed to start:', e.message));
+
+  // Push notifications: every few seconds, send new in-app notifications to the users' phones.
+  const { runPushDispatcher } = require('./services/pushNotifications');
+  setTimeout(runPushDispatcher, 20 * 1000);
+  setInterval(runPushDispatcher, 10 * 1000);
 });
 
 // Graceful shutdown
