@@ -133,11 +133,13 @@ const getLeads = async (req, res) => {
       i += searchPlan.values.length;
       whereClause = `${scopedWhere} AND ${searchPlan.direct}`;
     }
-    let countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params);
+    // The total only needs the joins when a filter actually reads them - skipping them keeps the count fast on big lists.
+    const countFrom = (where) => (/(pf|ls|u|c)\./.test(where) ? fromClause : 'FROM leads l');
+    let countResult = await query(`SELECT COUNT(*) ${countFrom(whereClause)} ${whereClause}`, params);
     if (searchPlan?.fuzzy && Number(countResult.rows[0].count) === 0) {
       searchMode = 'fuzzy';
       whereClause = `${scopedWhere} AND (${searchPlan.fuzzy})`;
-      countResult = await query(`SELECT COUNT(*) ${fromClause} ${whereClause}`, params);
+      countResult = await query(`SELECT COUNT(*) ${countFrom(whereClause)} ${whereClause}`, params);
     }
     const sortColumn = SORT_COLUMNS[sort] || 'l.created_at';
     const sortDir = dir === 'asc' ? 'ASC' : 'DESC';
