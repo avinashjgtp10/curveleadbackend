@@ -12,13 +12,29 @@ const sendInvite = async ({ tenantId, tenantName, inviterName, invitedBy, email,
   const expiresAt = new Date(Date.now() + INVITE_EXPIRY_MS);
 
   const inviteUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/accept-invite?token=${token}`;
-  await sendInviteEmail(email, inviteUrl, tenantName, inviterName).catch(e => console.error('Invite email failed:', e.message));
 
-  return query(
-    `INSERT INTO invitations (tenant_id, email, name, phone, role, team_id, token, invited_by, expires_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-    [tenantId, email, name || null, phone || null, role || 'staff', teamId || null, token, invitedBy || null, expiresAt]
-  );
+  // Save the invite first: emailing a link whose token never got stored would leave the person with a dead link.
+  let result;
+  try {
+    result = await query(
+      `INSERT INTO invitations (tenant_id, email, name, phone, role, team_id, token, invited_by, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [tenantId, email, name || null, phone || null, role || 'staff', teamId || null, token, invitedBy || null, expiresAt]
+    );
+  } catch (e) {
+    // invitations.phone comes from migration_invitations_phone.sql. Without it, still send the invite
+    // (the phone just isn't carried over) instead of failing with a 500.
+    if (e.code !== '42703') throw e;
+    console.warn('MIGRATION_PENDING: run models/migration_invitations_phone.sql; invite saved without phone.', e.message);
+    result = await query(
+      `INSERT INTO invitations (tenant_id, email, name, role, team_id, token, invited_by, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [tenantId, email, name || null, role || 'staff', teamId || null, token, invitedBy || null, expiresAt]
+    );
+  }
+
+  await sendInviteEmail(email, inviteUrl, tenantName, inviterName).catch(e => console.error('Invite email failed:', e.message));
+  return result;
 };
 
 // GET /api/staff
@@ -108,7 +124,10 @@ const inviteStaff = async (req, res) => {
     });
 
     res.status(201).json({ invitation: result.rows[0] });
-  } catch (error) { console.error('Invite staff error:', error); res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) {
+    console.error('Invite staff error:', error.code, error.message);
+    res.status(500).json({ error: 'Failed.' });
+  }
 };
 
 // GET /api/staff/invitations - Pending invites
