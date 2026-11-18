@@ -1,10 +1,15 @@
 const express = require('express');
 const router = express.Router();
-const { getNotifications, markAsRead, markAllAsRead, getUnreadCount, getNotificationGroups } = require('../controllers/notificationController');
+const { getNotifications, markAsRead, markAllAsRead, getUnreadCount, getNotificationGroups, registerPushToken, unregisterPushToken } = require('../controllers/notificationController');
 const { authenticate } = require('../middleware/auth');
 const { tenantContext } = require('../middleware/tenant');
 
+// No login needed: the app removes its token while signing out, after the session is already gone.
+router.delete('/push-tokens', unregisterPushToken);
+
 router.use(authenticate, tenantContext);
+
+router.post('/push-tokens', registerPushToken);
 
 router.get('/', getNotifications);
 router.get('/count', getUnreadCount);
