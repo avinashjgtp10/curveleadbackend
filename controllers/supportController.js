@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { query } = require('../config/db');
+const { isSchemaError, schemaErrorMessage } = require('../utils/schemaErrors');
 
 const PRIORITIES = ['low', 'medium', 'high'];
 
@@ -50,7 +51,12 @@ const submitTicket = async (req, res) => {
       );
     }
     res.status(201).json({ id: result.rows[0].id });
-  } catch (error) { console.error('Submit support ticket error:', error); res.status(500).json({ error: 'Failed.' }); }
+  } catch (error) {
+    // code + message identify the cause in the server log (e.g. 42P01 = support_tickets table missing).
+    console.error('Submit support ticket error:', error.code, error.message);
+    if (isSchemaError(error)) return res.status(503).json({ error: schemaErrorMessage(error) });
+    res.status(500).json({ error: 'Failed.' });
+  }
 };
 
 // GET /api/support/tickets — the logged-in user's own tickets
