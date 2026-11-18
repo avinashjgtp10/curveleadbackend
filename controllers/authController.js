@@ -181,6 +181,120 @@ const login = async (req, res) => {
   }
 };
 
+// Google's own endpoint validates the signature and expiry of an ID token, so no extra dependency is needed.
+const verifyGoogleIdToken = async (credential, extraAudiences = []) => {
+  const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
+  if (!response.ok) return null;
+  const info = await response.json();
+  // Only tokens issued to one of our own Google client IDs (web, Android, iOS) are accepted.
+  const allowed = [...(process.env.GOOGLE_LOGIN_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || '').split(','), ...extraAudiences].map((id) => String(id || '').trim()).filter(Boolean);
+  if (!allowed.length || !allowed.includes(info.aud)) return null;
+  if (String(info.email_verified) !== 'true' || !info.email) return null;
+  return { email: String(info.email).toLowerCase() };
+};
+
+// POST /api/auth/google — { credential: <Google ID token> }. Signs in an existing user whose email Google has verified.
+const googleLogin = async (req, res) => {
+  try {
+    const { credential } = req.body || {};
+    if (!credential || typeof credential !== 'string') return res.status(400).json({ error: 'Google credential required.' });
+    if (!(process.env.GOOGLE_LOGIN_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID)) {
+      return res.status(503).json({ error: 'Google sign-in is not configured.' });
+    }
+
+    const google = await verifyGoogleIdToken(credential);
+    if (!google) return res.status(401).json({ error: 'Google sign-in could not be verified.' });
+
+    const result = await query(`${LOGIN_SELECT} WHERE LOWER(u.email) = $1`, [google.email]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No CurveLead account uses this Google email. Sign up first, then use Google to sign in.' });
+    }
+    const user = result.rows[0];
+    if (!user.is_active) return res.status(403).json({ error: 'Account inactive.' });
+
+    await query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
+    res.json(sessionPayload(user));
+  } catch (error) {
+    console.error('Google login error:', error);
+    res.status(500).json({ error: 'Google sign-in failed.' });
+  }
+};
+
+// ---- Google "Continue with Google" redirect (authorization-code) flow -------------------------------------
+// GET /api/auth/google/start    -> redirects the browser to Google's consent screen
+// GET /api/auth/google/callback -> Google redirects back here (GOOGLE_REDIRECT_URI); we exchange the code,
+//   verify the verified email, and send the browser to the frontend with a normal CurveLead session token in the
+//   URL *fragment* (never sent to servers or logs). Only existing, active users can sign in.
+const GOOGLE_STATE_COOKIE = 'g_oauth_nonce';
+const frontendBase = () => String(process.env.FRONTEND_URL || 'http://localhost:5173').split(',')[0].trim().replace(/\/+$/, '');
+const readCookie = (req, name) => {
+  const m = String(req.headers.cookie || '').split(';').map((c) => c.trim()).find((c) => c.startsWith(`${name}=`));
+  return m ? decodeURIComponent(m.slice(name.length + 1)) : null;
+};
+const googleRedirectConfigured = () => !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REDIRECT_URI);
+const backToLogin = (res, error) => {
+  res.clearCookie(GOOGLE_STATE_COOKIE);
+  res.redirect(`${frontendBase()}/login#google_error=${encodeURIComponent(error)}`);
+};
+
+const googleStart = (req, res) => {
+  if (!googleRedirectConfigured()) return backToLogin(res, 'Google sign-in is not configured.');
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const state = jwt.sign({ n: nonce, p: 'google_oauth' }, process.env.JWT_SECRET, { expiresIn: '10m' });
+  res.cookie(GOOGLE_STATE_COOKIE, nonce, {
+    httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 10 * 60 * 1000, path: '/',
+  });
+  const params = new URLSearchParams({
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+    response_type: 'code',
+    scope: 'openid email profile',
+    state,
+    prompt: 'select_account',
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+};
+
+const googleCallback = async (req, res) => {
+  try {
+    if (!googleRedirectConfigured()) return backToLogin(res, 'Google sign-in is not configured.');
+    if (req.query.error) return backToLogin(res, 'Google sign-in was cancelled.');
+    const { code, state } = req.query;
+    if (typeof code !== 'string' || typeof state !== 'string') return backToLogin(res, 'Google sign-in failed. Please try again.');
+
+    // CSRF: the state must be our own, unexpired, and bound to this browser by the nonce cookie.
+    let decoded;
+    try { decoded = jwt.verify(state, process.env.JWT_SECRET); } catch { return backToLogin(res, 'Google sign-in expired. Please try again.'); }
+    const cookieNonce = readCookie(req, GOOGLE_STATE_COOKIE);
+    if (decoded.p !== 'google_oauth' || !cookieNonce || cookieNonce !== decoded.n) return backToLogin(res, 'Google sign-in could not be verified. Please try again.');
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: process.env.GOOGLE_REDIRECT_URI, grant_type: 'authorization_code',
+      }),
+    });
+    if (!tokenRes.ok) return backToLogin(res, 'Google sign-in failed. Please try again.');
+    const { id_token: idToken } = await tokenRes.json();
+    const google = idToken ? await verifyGoogleIdToken(idToken, [process.env.GOOGLE_CLIENT_ID]) : null;
+    if (!google) return backToLogin(res, 'Google sign-in could not be verified.');
+
+    const result = await query(`${LOGIN_SELECT} WHERE LOWER(u.email) = $1`, [google.email]);
+    if (result.rows.length === 0) return backToLogin(res, 'No CurveLead account uses this Google email. Sign up first, then use Google to sign in.');
+    const user = result.rows[0];
+    if (!user.is_active) return backToLogin(res, 'Account inactive.');
+
+    await query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
+    res.clearCookie(GOOGLE_STATE_COOKIE);
+    res.redirect(`${frontendBase()}/login#google_token=${encodeURIComponent(generateToken(user.id))}`);
+  } catch (error) {
+    console.error('Google callback error:', error);
+    backToLogin(res, 'Google sign-in failed.');
+  }
+};
+
 // GET /api/auth/me
 const getProfile = async (req, res) => {
   res.json({
@@ -478,4 +592,4 @@ const verifyOtp = async (req, res) => {
   }
 };
 
-module.exports = { requestOtp, verifyOtp, signup, login, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite, getPreferences, updatePreferences };
+module.exports = { requestOtp, verifyOtp, signup, login, googleLogin, googleStart, googleCallback, getProfile, forgotPassword, resetPassword, changePassword, getInviteInfo, acceptInvite, getPreferences, updatePreferences };
