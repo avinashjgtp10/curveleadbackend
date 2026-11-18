@@ -134,7 +134,7 @@ const getLeads = async (req, res) => {
       whereClause = `${scopedWhere} AND ${searchPlan.direct}`;
     }
     // The total only needs the joins when a filter actually reads them - skipping them keeps the count fast on big lists.
-    const countFrom = (where) => (/(pf|ls|u|c)\./.test(where) ? fromClause : 'FROM leads l');
+    const countFrom = (where) => (/\b(pf|ls|u|c)\./.test(where) ? fromClause : 'FROM leads l');
     let countResult = await query(`SELECT COUNT(*) ${countFrom(whereClause)} ${whereClause}`, params);
     if (searchPlan?.fuzzy && Number(countResult.rows[0].count) === 0) {
       searchMode = 'fuzzy';
