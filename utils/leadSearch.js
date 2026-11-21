@@ -12,7 +12,7 @@ function buildLeadSearch(value, firstParameter) {
   const phone = "regexp_replace(COALESCE(l.phone,''), '[^0-9]', '', 'g')";
   const exact = `(${name} = public.curvelead_search_text(${p(0)}) OR ${id} = lower(${p(0)}) OR l.id::text = lower(${p(0)}) OR (${p(3)} <> '' AND ${phone} = ${p(3)}))`;
   const prefix = `(${name} LIKE public.curvelead_search_text(${p(1)}) ESCAPE '\\' OR ${id} LIKE lower(${p(1)}) ESCAPE '\\')`;
-  const direct = `(${name} LIKE public.curvelead_search_text(${p(2)}) ESCAPE '\\' OR ${id} LIKE lower(${p(2)}) ESCAPE '\\' OR l.id::text = lower(${p(0)}) OR (${p(3)} <> '' AND ${phone} LIKE '%' || ${p(3)}))`;
+  const direct = `(${name} LIKE public.curvelead_search_text(${p(2)}) ESCAPE '\\' OR ${id} LIKE lower(${p(2)}) ESCAPE '\\' OR l.id::text = lower(${p(0)}) OR (${p(3)} <> '' AND ${phone} LIKE '%' || ${p(3)} || '%'))`;
   const allowFuzzy = !digits && !/^ld[-\s]?\d/i.test(term) && /^\p{L}[\p{L}\p{M}\s'-]{3,}$/u.test(term);
   return {
     values: [term, `${escapeLike(term)}%`, `%${escapeLike(term)}%`, digits],
