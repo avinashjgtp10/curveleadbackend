@@ -124,17 +124,20 @@ const dispatchPendingPushes = async () => {
 };
 
 let running = false;
-let disabled = false;
+// While the migration is missing the dispatcher pauses, then tries again on its own, so running the migration
+// is enough - no server restart needed.
+const RETRY_AFTER_MIGRATION_MS = 5 * 60 * 1000;
+let pausedUntil = 0;
 /** Safe to call on a timer: skips a tick if the previous one is still running and never throws. */
 const runPushDispatcher = async () => {
-  if (running || disabled) return;
+  if (running || Date.now() < pausedUntil) return;
   running = true;
   try { await dispatchPendingPushes(); }
   catch (error) {
-    // 42703 / 42P01 = the migration hasn't been run yet. Say so once instead of failing every few seconds.
+    // 42703 / 42P01 = the migration hasn't been run yet. Say so once per pause instead of failing every few seconds.
     if (error.code === '42703' || error.code === '42P01') {
-      disabled = true;
-      console.error('Push notifications are off: run models/migration_push_notifications.sql, then restart the server.');
+      pausedUntil = Date.now() + RETRY_AFTER_MIGRATION_MS;
+      console.error('Push notifications are off: run models/migration_push_notifications.sql (checking again in 5 minutes).');
     } else console.error('Push dispatcher error:', error.message);
   }
   finally { running = false; }

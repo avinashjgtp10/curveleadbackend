@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const { isExpoToken } = require('../services/pushNotifications');
+const { isSchemaError, migrationFor } = require('../utils/schemaErrors');
 const { NOTIFICATION_GROUPS, isNotificationEnabled, shouldSkipForLostLead } = require('../utils/notificationTypes');
 
 // GET /api/notifications - Get user's notifications
@@ -129,7 +130,12 @@ const registerPushToken = async (req, res) => {
       [req.tenantId, req.user.id, token, ['ios', 'android'].includes(platform) ? platform : null, device_id ? String(device_id).slice(0, 255) : null]
     );
     res.json({ message: 'Push token saved.' });
-  } catch (error) { console.error('Register push token error:', error); res.status(500).json({ error: 'Could not save the push token.' }); }
+  } catch (error) {
+    // Still a 500 (the token was not saved), but the log now names the cause. 42P01 = push_tokens table missing.
+    console.error('Register push token error:', error.code, error.message);
+    if (isSchemaError(error)) console.error(`MIGRATION_PENDING: run ${migrationFor(error) || 'models/migration_push_notifications.sql'}`);
+    res.status(500).json({ error: 'Could not save the push token.' });
+  }
 };
 
 // DELETE /api/notifications/push-tokens - stop pushing to this phone. Deliberately works without a login: the app

@@ -124,9 +124,7 @@ app.get('/api/health', (req, res) => {
 // API Routes
 // ============================================
 app.use('/api/app', apiLimiter, require('./routes/app')); // public: mobile version check
-app.use('/api/auth', apiLimiter, require('./routes/googleAuth'));
-app.use('/api/v1/auth', apiLimiter, require('./routes/googleAuth')); // GOOGLE_REDIRECT_URI path
-app.use('/api/auth', apiLimiter, require('./routes/auth'));
+require('./routes/authMounts')(app, apiLimiter); // /api/auth + /api/v1/auth, limiter applied once each
 app.use('/api/leads', apiLimiter, require('./routes/leads'));
 app.use('/api/followups', apiLimiter, require('./routes/followups'));
 app.use('/api/staff', apiLimiter, require('./routes/staff'));

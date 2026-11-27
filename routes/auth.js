@@ -6,6 +6,9 @@ const {
 } = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 
+// GET /google/start and /google/callback (Google redirect sign-in). Mounted here so /api/auth passes the
+// rate limiter exactly once; the same router is also mounted at /api/v1/auth by authMounts.js.
+router.use(require('./googleAuth'));
 router.post('/signup', signup);
 router.post('/login', login);
 router.post('/google', googleLogin);
