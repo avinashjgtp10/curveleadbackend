@@ -3,6 +3,12 @@ const { query } = require('../config/db');
 const { isNotificationEnabled, shouldSkipForLostLead } = require('../utils/notificationTypes');
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+const EXPO_RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts';
+// Expo only knows the real outcome (FCM/APNs accepted it or not) in the receipt, a few minutes after the ticket.
+const RECEIPT_MIN_AGE_MS = 2 * 60 * 1000;
+const RECEIPT_MAX_AGE_MS = 30 * 60 * 1000; // give up on receipts Expo never returns (they are only kept 24h anyway)
+const RECEIPT_CHUNK = 1000;
+const MAX_PENDING_RECEIPTS = 20000;
 const EXPO_CHUNK = 100;
 // Notifications older than this are never pushed (e.g. created while the server was down) - a "new lead" alert an hour late is noise.
 const MAX_AGE_MINUTES = 15;
@@ -10,11 +16,67 @@ const BATCH_SIZE = 100;
 
 const isExpoToken = (token) => typeof token === 'string' && /^Expo(nent)?PushToken\[[^\]]+\]$/.test(token);
 
-const sendToExpo = async (messages) => {
+const expoHeaders = () => {
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
   if (process.env.EXPO_ACCESS_TOKEN) headers.Authorization = `Bearer ${process.env.EXPO_ACCESS_TOKEN}`;
-  const response = await axios.post(EXPO_PUSH_URL, messages, { timeout: 30000, headers });
+  return headers;
+};
+
+const sendToExpo = async (messages) => {
+  const response = await axios.post(EXPO_PUSH_URL, messages, { timeout: 30000, headers: expoHeaders() });
   return response.data?.data || [];
+};
+
+// Tickets Expo accepted, waiting for their receipt. Kept in memory: after a server restart the pending ones are
+// simply not checked (the push itself is unaffected).
+const pendingReceipts = []; // { id, token, notificationId, at }
+
+// What each receipt error means and what to do about it - logged so it is obvious why a phone got nothing.
+const RECEIPT_ERROR_HINTS = {
+  InvalidCredentials: 'FCM/APNs credentials are missing or wrong for this app. Upload the FCM V1 service-account key (Android) / push key (iOS) to Expo: run `eas credentials`.',
+  MismatchSenderId: 'The app was built with a different Firebase project than the FCM key uploaded to Expo. Upload the key of the Firebase project whose google-services.json is in the build.',
+  MessageRateExceeded: 'Sending too fast to this device; Expo/FCM throttled it.',
+  MessageTooBig: 'Payload over 4KB; shorten the notification data.',
+  DeviceNotRegistered: 'The phone no longer accepts pushes (app uninstalled or token expired); the token was removed.',
+};
+
+/**
+ * Asks Expo for the receipts of tickets sent a few minutes ago. A ticket only says "Expo accepted it" - the receipt says
+ * whether Google/Apple accepted it. Never throws: a failure here must not affect sending.
+ */
+const checkPendingReceipts = async () => {
+  const now = Date.now();
+  const due = pendingReceipts.filter((entry) => now - entry.at >= RECEIPT_MIN_AGE_MS);
+  if (!due.length) return { checked: 0, failed: 0 };
+
+  let failed = 0;
+  const finished = new Set();
+  const deadTokens = [];
+  for (let start = 0; start < due.length; start += RECEIPT_CHUNK) {
+    const chunk = due.slice(start, start + RECEIPT_CHUNK);
+    try {
+      const response = await axios.post(EXPO_RECEIPTS_URL, { ids: chunk.map((entry) => entry.id) }, { timeout: 30000, headers: expoHeaders() });
+      const receipts = response.data?.data || {};
+      for (const entry of chunk) {
+        const receipt = receipts[entry.id];
+        if (!receipt) continue; // not ready yet - asked again next time, until RECEIPT_MAX_AGE_MS
+        finished.add(entry.id);
+        if (receipt.status === 'ok') continue;
+        failed += 1;
+        const code = receipt.details?.error || 'unknown';
+        console.error(`Push delivery failed (${code}) for notification ${entry.notificationId}, token ${entry.token.slice(0, 24)}...: ${receipt.message || ''} ${RECEIPT_ERROR_HINTS[code] ? `-> ${RECEIPT_ERROR_HINTS[code]}` : ''}`.trim());
+        if (code === 'DeviceNotRegistered') deadTokens.push(entry.token);
+      }
+    } catch (error) {
+      console.error('Push receipt check failed (will retry):', error.response?.data?.errors?.[0]?.message || error.message);
+    }
+  }
+  // Drop the finished ones and the ones Expo never answered for.
+  for (let i = pendingReceipts.length - 1; i >= 0; i -= 1) {
+    if (finished.has(pendingReceipts[i].id) || now - pendingReceipts[i].at > RECEIPT_MAX_AGE_MS) pendingReceipts.splice(i, 1);
+  }
+  if (deadTokens.length) await query('DELETE FROM push_tokens WHERE token = ANY($1::text[])', [deadTokens]).catch(() => {});
+  return { checked: finished.size, failed };
 };
 
 /**
@@ -105,8 +167,12 @@ const dispatchPendingPushes = async () => {
       const tickets = await sendToExpo(batch);
       batch.forEach((message, index) => {
         const ticket = tickets[index];
-        if (ticket?.status === 'ok') sent += 1;
-        else if (ticket?.details?.error === 'DeviceNotRegistered') deadTokens.push(message.to);
+        if (ticket?.status === 'ok') {
+          sent += 1;
+          if (ticket.id && pendingReceipts.length < MAX_PENDING_RECEIPTS) {
+            pendingReceipts.push({ id: ticket.id, token: message.to, notificationId: messageNotificationIds[start + index], at: Date.now() });
+          }
+        } else if (ticket?.details?.error === 'DeviceNotRegistered') deadTokens.push(message.to);
         else if (ticket?.status === 'error') console.error('Push rejected:', ticket.message || ticket.details?.error);
       });
     } catch (error) {
@@ -141,6 +207,8 @@ const runPushDispatcher = async () => {
     } else console.error('Push dispatcher error:', error.message);
   }
   finally { running = false; }
+  // After sending, so a slow or failing receipt check can never hold up or break the dispatcher.
+  await checkPendingReceipts().catch((error) => console.error('Push receipt error:', error.message));
 };
 
-module.exports = { dispatchPendingPushes, runPushDispatcher, isExpoToken };
+module.exports = { dispatchPendingPushes, runPushDispatcher, checkPendingReceipts, isExpoToken, _pendingReceipts: pendingReceipts };
